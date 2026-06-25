@@ -168,11 +168,11 @@ export default function Dashboard() {
   );
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden">
+    <div className="relative min-h-screen w-full overflow-x-hidden">
       <div className="aurora-bg" />
       <div className="grain" />
 
-      <div className="relative z-10 h-screen w-screen flex flex-col lg:flex-row p-4 lg:p-6 gap-4 lg:gap-6">
+      <div className="relative z-10 min-h-screen lg:h-screen w-full flex flex-col lg:flex-row p-4 lg:p-6 gap-4 lg:gap-6">
 
         {/* LEFT — Solfeggio + Saved */}
         <aside className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6 lg:h-full lg:overflow-y-auto custom-scrollbar">
@@ -271,7 +271,7 @@ export default function Dashboard() {
         </aside>
 
         {/* CENTER — Visualizer + transport */}
-        <main className="flex-1 relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/30 min-h-[420px]">
+        <main className="flex-1 relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/30 min-h-[480px] lg:min-h-0">
           <Visualizer playing={state.playing} frequency={state.frequency} />
           <Breathwork active={breathwork && state.playing} />
 
