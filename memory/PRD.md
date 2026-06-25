@@ -37,16 +37,17 @@
 - Aurora/grain ambient backdrop, glassmorphism panels, custom sliders (teal for tone, amber for ambient)
 - JWT cookie + Bearer fallback (so cross-origin works seamlessly)
 - Admin seeded automatically on startup (admin@example.com / admin123)
-- Backend + frontend smoke tested end-to-end (testing agent iteration 1: 100% pass)
+- **Daily check-in streak** (Jan 2026): `/api/streak` + `/api/streak/checkin`. Auto check-in after ≥60s of continuous playback. Streak/longest/total-min displayed in left sidebar.
+- **Gentle daily reminder** via Web Notifications API. User opts in, picks a time, and a daily notification is scheduled in-browser ("A quiet moment awaits 🌿").
+- Backend + frontend tested end-to-end (testing agent iterations 1 & 2: 100% pass)
 
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
 - P2: Optional sleep timer (fade-out over N min)
-- P2: Daily session streak + minutes-listened stats
 - P2: Share a session config via short URL
 - P2: Real recorded ambient tracks (rain/ocean/forest) for premium quality (would need licensed assets)
-- P2: PWA install + offline mode
+- P2: PWA install + offline mode + service-worker-driven reminders (for when tab is closed)
 
 ## Next tasks (suggested)
 1. Hook "last used config" into localStorage (no backend change needed)
