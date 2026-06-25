@@ -9,11 +9,13 @@ class AudioEngine {
     // Tone (oscillator) state
     this.osc = null;
     this.oscR = null; // for binaural
+    this.phiOscs = []; // [{osc, gain}, ...] for golden-stack harmonics
     this.toneGain = null;
     this.frequency = 432;
     this.waveform = 'sine';
     this.binaural = 0; // hz offset for right ear
     this.toneVolume = 0.35;
+    this.goldenStack = false; // when true, layer tones at f×φ and f×φ²
 
     // Ambient layers: { rain, ocean, forest } -> { node, gain }
     this.ambient = {};
@@ -42,6 +44,7 @@ class AudioEngine {
       waveform: this.waveform,
       binaural: this.binaural,
       toneVolume: this.toneVolume,
+      goldenStack: this.goldenStack,
       ambient: Object.fromEntries(Object.entries(this.ambient).map(([k, v]) => [k, v.volume])),
     };
   }
@@ -82,8 +85,49 @@ class AudioEngine {
     // Fade in
     this.toneGain.gain.linearRampToValueAtTime(this.toneVolume, ctx.currentTime + 0.8);
 
+    if (this.goldenStack) this._spawnPhiHarmonics();
+
     this.playing = true;
     this._emit();
+  }
+
+  // Spawn the golden-ratio harmonic tones (φ¹ and φ²) at decreasing amplitude.
+  _spawnPhiHarmonics() {
+    const ctx = this.ctx;
+    const PHI = 1.6180339887;
+    const levels = [
+      { mult: PHI, amp: 0.55 },     // ~1618 Hz at base 1000
+      { mult: PHI * PHI, amp: 0.30 }, // φ² ≈ 2.618
+    ];
+    levels.forEach(({ mult, amp }) => {
+      const osc = ctx.createOscillator();
+      osc.type = this.waveform;
+      const f = this.frequency * mult;
+      // Keep audible; if above 4kHz, fold down an octave for comfort.
+      osc.frequency.value = f > 4000 ? f / 2 : f;
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      osc.connect(g).connect(this.toneGain);
+      osc.start();
+      g.gain.linearRampToValueAtTime(amp, ctx.currentTime + 1.0);
+      this.phiOscs.push({ osc, gain: g, mult });
+    });
+  }
+
+  _killPhiHarmonics(fade = 0.4) {
+    if (!this.ctx || this.phiOscs.length === 0) return;
+    const ctx = this.ctx;
+    const local = this.phiOscs;
+    this.phiOscs = [];
+    local.forEach(({ gain }) => {
+      gain.gain.cancelScheduledValues(ctx.currentTime);
+      gain.gain.linearRampToValueAtTime(0, ctx.currentTime + fade);
+    });
+    setTimeout(() => {
+      local.forEach(({ osc, gain }) => {
+        try { osc.stop(); osc.disconnect(); gain.disconnect(); } catch (e) { /* noop */ }
+      });
+    }, (fade + 0.05) * 1000);
   }
 
   stop() {
@@ -94,6 +138,7 @@ class AudioEngine {
       this.toneGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
     }
     const oscs = [this.osc, this.oscR].filter(Boolean);
+    this._killPhiHarmonics(0.4);
     setTimeout(() => {
       oscs.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
       this.osc = null; this.oscR = null;
@@ -108,6 +153,11 @@ class AudioEngine {
     this.frequency = hz;
     if (this.osc) this.osc.frequency.setTargetAtTime(hz, this.ctx.currentTime, 0.05);
     if (this.oscR) this.oscR.frequency.setTargetAtTime(hz + this.binaural, this.ctx.currentTime, 0.05);
+    this.phiOscs.forEach(({ osc, mult }) => {
+      const f = hz * mult;
+      const safe = f > 4000 ? f / 2 : f;
+      osc.frequency.setTargetAtTime(safe, this.ctx.currentTime, 0.05);
+    });
     this._emit();
   }
 
@@ -115,6 +165,7 @@ class AudioEngine {
     this.waveform = w;
     if (this.osc) this.osc.type = w;
     if (this.oscR) this.oscR.type = w;
+    this.phiOscs.forEach(({ osc }) => { osc.type = w; });
     this._emit();
   }
 
@@ -128,6 +179,15 @@ class AudioEngine {
   setToneVolume(v) {
     this.toneVolume = v;
     if (this.toneGain) this.toneGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+    this._emit();
+  }
+
+  setGoldenStack(on) {
+    this.goldenStack = !!on;
+    if (this.playing) {
+      if (this.goldenStack && this.phiOscs.length === 0) this._spawnPhiHarmonics();
+      if (!this.goldenStack && this.phiOscs.length > 0) this._killPhiHarmonics(0.4);
+    }
     this._emit();
   }
 

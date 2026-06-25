@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2 } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -21,6 +21,8 @@ const SOLFEGGIO = [
 ];
 
 const WAVEFORMS = ['sine', 'triangle', 'square', 'sawtooth'];
+const PHI = 1.6180339887;
+const GOLDEN_BASE = 144; // Fibonacci number; 144 × φ ≈ 233 (Fib); × φ² ≈ 377 (Fib). Creates a pure golden chord.
 
 const AMBIENT = [
   { key: 'rain', label: 'Rain', Icon: Droplet },
@@ -110,19 +112,24 @@ export default function Dashboard() {
     }
   };
 
-  const selectFrequency = (hz) => {
-    const isSame = Math.round(state.frequency) === hz;
+  const selectFrequency = (hz, opts = {}) => {
+    const wantGolden = !!opts.golden;
+    const isSame =
+      Math.round(state.frequency) === hz && state.goldenStack === wantGolden;
     if (state.playing && isSame) {
       audioEngine.stop();
       setRemaining(0);
       return;
     }
     audioEngine.setFrequency(hz);
+    audioEngine.setGoldenStack(wantGolden);
     if (!state.playing) {
       setRemaining(duration * 60);
       audioEngine.start();
     }
   };
+
+  const toggleGoldenStack = () => audioEngine.setGoldenStack(!state.goldenStack);
 
   const saveSession = async () => {
     setErr('');
@@ -208,6 +215,29 @@ export default function Dashboard() {
                 );
               })}
             </div>
+
+            {/* Golden Ratio preset */}
+            <button
+              data-testid="golden-preset"
+              onClick={() => selectFrequency(GOLDEN_BASE, { golden: true })}
+              className={`mt-3 w-full glass-soft p-3 flex items-center gap-3 transition-all duration-300 hover:-translate-y-0.5 ${
+                state.goldenStack ? 'border-[#C4A67A]/60 bg-[#1A332A]/60' : ''
+              }`}
+            >
+              <Sparkles
+                size={20}
+                className={state.goldenStack ? 'text-[#C4A67A]' : 'text-[#8A9A92]'}
+                style={state.goldenStack ? { filter: 'drop-shadow(0 0 8px rgba(196,166,122,0.6))' } : {}}
+              />
+              <div className="flex-1 text-left">
+                <div className={`font-mono text-base ${state.goldenStack ? 'text-[#C4A67A]' : 'text-[#E8E3D9]'}`}>
+                  φ Golden Stack
+                </div>
+                <div className="text-[10px] text-[#8A9A92]">
+                  {GOLDEN_BASE} · {Math.round(GOLDEN_BASE * PHI)} · {Math.round(GOLDEN_BASE * PHI * PHI)} Hz
+                </div>
+              </div>
+            </button>
           </div>
 
           <StreakPanel refreshKey={streakBump} />
@@ -309,6 +339,19 @@ export default function Dashboard() {
                 ))}
               </div>
             </div>
+
+            <button
+              data-testid="golden-stack-toggle"
+              onClick={toggleGoldenStack}
+              className={`mt-5 w-full py-2.5 rounded-full border transition-colors duration-300 flex items-center justify-center gap-2 ${
+                state.goldenStack
+                  ? 'bg-[#C4A67A]/15 border-[#C4A67A]/50 text-[#C4A67A]'
+                  : 'border-[#5C9E8C]/20 text-[#8A9A92] hover:text-[#E8E3D9]'
+              }`}
+              title={`Stacks tones at f × φ¹ and f × φ² (φ ≈ ${PHI.toFixed(4)})`}
+            >
+              <Sparkles size={14} /> Golden Stack φ {state.goldenStack ? 'On' : 'Off'}
+            </button>
 
             <label className="text-xs text-[#8A9A92] flex justify-between mt-5 mb-1">
               <span>Binaural offset</span><span className="font-mono text-[#72C2AC]">{state.binaural} Hz</span>
