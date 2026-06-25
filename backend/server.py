@@ -174,6 +174,87 @@ async def delete_session(sid: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+# --- Streak / Check-in --------------------------------------------------------
+def _today_utc_date() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _date_minus(d_iso: str, days: int) -> str:
+    from datetime import date as _date
+    y, m, dd = map(int, d_iso.split("-"))
+    return _date.fromordinal(_date(y, m, dd).toordinal() - days).isoformat()
+
+
+class CheckinIn(BaseModel):
+    minutes: float = 0
+
+
+@api.get("/streak")
+async def get_streak(user: dict = Depends(get_current_user)):
+    doc = await db.streaks.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not doc:
+        return {
+            "current_streak": 0, "longest_streak": 0, "last_check_in": None,
+            "total_sessions": 0, "total_minutes": 0,
+            "checked_in_today": False,
+        }
+    doc["checked_in_today"] = (doc.get("last_check_in") == _today_utc_date())
+    # If streak is stale (skipped a day), reflect that without writing
+    last = doc.get("last_check_in")
+    today = _today_utc_date()
+    if last and last != today and last != _date_minus(today, 1):
+        doc["current_streak"] = 0
+    return doc
+
+
+@api.post("/streak/checkin")
+async def checkin(body: CheckinIn, user: dict = Depends(get_current_user)):
+    today = _today_utc_date()
+    existing = await db.streaks.find_one({"user_id": user["id"]})
+    minutes = max(0.0, float(body.minutes or 0))
+
+    if not existing:
+        doc = {
+            "user_id": user["id"],
+            "current_streak": 1,
+            "longest_streak": 1,
+            "last_check_in": today,
+            "total_sessions": 1,
+            "total_minutes": minutes,
+        }
+        await db.streaks.insert_one(doc)
+        doc.pop("_id", None)
+        doc["checked_in_today"] = True
+        return doc
+
+    last = existing.get("last_check_in")
+    current = int(existing.get("current_streak", 0))
+    longest = int(existing.get("longest_streak", 0))
+    total_sessions = int(existing.get("total_sessions", 0)) + 1
+    total_minutes = float(existing.get("total_minutes", 0)) + minutes
+
+    if last == today:
+        # Already checked in today — just bump totals.
+        pass
+    elif last == _date_minus(today, 1):
+        current += 1
+    else:
+        current = 1
+
+    longest = max(longest, current)
+    update = {
+        "current_streak": current,
+        "longest_streak": longest,
+        "last_check_in": today,
+        "total_sessions": total_sessions,
+        "total_minutes": total_minutes,
+    }
+    await db.streaks.update_one({"user_id": user["id"]}, {"$set": update})
+    update["user_id"] = user["id"]
+    update["checked_in_today"] = True
+    return update
+
+
 # --- App setup ----------------------------------------------------------------
 @api.get("/")
 async def root():
@@ -199,6 +280,7 @@ logger = logging.getLogger(__name__)
 async def startup():
     await db.users.create_index("email", unique=True)
     await db.sessions.create_index([("user_id", 1), ("created_at", -1)])
+    await db.streaks.create_index("user_id", unique=True)
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")

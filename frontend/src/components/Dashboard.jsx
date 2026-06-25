@@ -5,6 +5,7 @@ import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
+import StreakPanel from '@/components/StreakPanel';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -42,6 +43,16 @@ export default function Dashboard() {
   const [sessions, setSessions] = useState([]);
   const [saveName, setSaveName] = useState('');
   const [err, setErr] = useState('');
+  const [streakBump, setStreakBump] = useState(0);
+  const [sessionStart, setSessionStart] = useState(null);
+  const [checkedInThisRun, setCheckedInThisRun] = useState(false);
+
+  const checkIn = async (minutes) => {
+    try {
+      await api.post('/streak/checkin', { minutes });
+      setStreakBump((n) => n + 1);
+    } catch (e) { /* ignore */ }
+  };
 
   useEffect(() => audioEngine.on(setState), []);
 
@@ -56,6 +67,32 @@ export default function Dashboard() {
     }, 1000);
     return () => clearInterval(id);
   }, [state.playing, remaining]);
+
+  // Auto check-in: when user has been playing for >= 60s in this run, record it once.
+  useEffect(() => {
+    if (state.playing && !sessionStart) {
+      setSessionStart(Date.now());
+      setCheckedInThisRun(false);
+    }
+    if (!state.playing && sessionStart) {
+      const minutes = (Date.now() - sessionStart) / 60000;
+      if (minutes >= 1 && !checkedInThisRun) {
+        checkIn(minutes);
+        setCheckedInThisRun(true);
+      }
+      setSessionStart(null);
+    }
+  }, [state.playing]);
+
+  // Continuous check (covers timer auto-stop at 0): also check-in once threshold crossed mid-run
+  useEffect(() => {
+    if (!state.playing || !sessionStart || checkedInThisRun) return;
+    const id = setTimeout(() => {
+      const minutes = (Date.now() - sessionStart) / 60000;
+      if (minutes >= 1) { checkIn(minutes); setCheckedInThisRun(true); }
+    }, 60_000);
+    return () => clearTimeout(id);
+  }, [state.playing, sessionStart, checkedInThisRun]);
 
   // Fetch saved sessions
   useEffect(() => { refreshSessions(); }, []);
@@ -158,6 +195,8 @@ export default function Dashboard() {
               })}
             </div>
           </div>
+
+          <StreakPanel refreshKey={streakBump} />
 
           <div className="glass p-5">
             <div className="label-tiny mb-3 flex items-center justify-between">
