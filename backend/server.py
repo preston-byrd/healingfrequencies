@@ -1,89 +1,225 @@
-from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
-
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+import os
+import logging
+import uuid
+import bcrypt
+import jwt
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
+
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr
+
+
+# --- Setup --------------------------------------------------------------------
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
+JWT_ALGORITHM = "HS256"
+JWT_SECRET = os.environ["JWT_SECRET"]
+
 app = FastAPI()
-
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+api = APIRouter(prefix="/api")
 
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+# --- Auth helpers -------------------------------------------------------------
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+
+
+def create_access_token(user_id: str, email: str) -> str:
+    payload = {
+        "sub": user_id, "email": email, "type": "access",
+        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def set_auth_cookie(response: Response, token: str):
+    response.set_cookie(
+        key="access_token", value=token, httponly=True,
+        secure=True, samesite="none", max_age=7 * 24 * 3600, path="/",
+    )
+
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user = await db.users.find_one({"id": payload["sub"]})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user.pop("password_hash", None)
+        user.pop("_id", None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+# --- Models -------------------------------------------------------------------
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    name: Optional[str] = None
+
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class SessionIn(BaseModel):
+    name: str
+    frequency: float
+    waveform: str = "sine"
+    binaural: float = 0
+    duration_minutes: int = 10
+    ambient: dict = Field(default_factory=dict)  # {rain: 0..1, ocean: 0..1, forest: 0..1}
+    breathwork: bool = False
+
+
+class Session(SessionIn):
+    id: str
+    user_id: str
+    created_at: str
+
+
+# --- Auth routes --------------------------------------------------------------
+@api.post("/auth/register")
+async def register(body: RegisterIn, response: Response):
+    email = body.email.lower()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "name": body.name or email.split("@")[0],
+        "password_hash": hash_password(body.password),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.users.insert_one(user)
+    token = create_access_token(user["id"], email)
+    set_auth_cookie(response, token)
+    return {"id": user["id"], "email": email, "name": user["name"], "token": token}
+
+
+@api.post("/auth/login")
+async def login(body: LoginIn, response: Response):
+    email = body.email.lower()
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(body.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_access_token(user["id"], email)
+    set_auth_cookie(response, token)
+    return {"id": user["id"], "email": email, "name": user.get("name", ""), "token": token}
+
+
+@api.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    return {"ok": True}
+
+
+@api.get("/auth/me")
+async def me(user: dict = Depends(get_current_user)):
+    return user
+
+
+# --- Sessions (favorites) -----------------------------------------------------
+@api.get("/sessions")
+async def list_sessions(user: dict = Depends(get_current_user)):
+    items = await db.sessions.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return items
+
+
+@api.post("/sessions")
+async def create_session(body: SessionIn, user: dict = Depends(get_current_user)):
+    doc = body.model_dump()
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.sessions.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.delete("/sessions/{sid}")
+async def delete_session(sid: str, user: dict = Depends(get_current_user)):
+    res = await db.sessions.delete_one({"id": sid, "user_id": user["id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"ok": True}
+
+
+# --- App setup ----------------------------------------------------------------
+@api.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "Healing Frequencies API"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+app.include_router(api)
 
-# Include the router in the main app
-app.include_router(api_router)
-
+origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=origins,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.sessions.create_index([("user_id", 1), ("created_at", -1)])
+    # seed admin
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "email": admin_email,
+            "name": "Admin",
+            "password_hash": hash_password(admin_password),
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+        logger.info(f"Seeded admin: {admin_email}")
+    elif not verify_password(admin_password, existing["password_hash"]):
+        await db.users.update_one(
+            {"email": admin_email},
+            {"$set": {"password_hash": hash_password(admin_password)}},
+        )
+
+
 @app.on_event("shutdown")
-async def shutdown_db_client():
+async def shutdown():
     client.close()

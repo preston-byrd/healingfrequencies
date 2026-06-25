@@ -1,0 +1,27 @@
+{
+  "summary": "Smoke-tested Healing Frequencies app (backend + frontend). All core flows working: auth (register/login/admin/logout), Solfeggio presets, custom freq slider, waveform toggle, play/pause + countdown timer, save/load/delete sessions, dashboard render. Backend endpoints (/api/auth/*, /api/sessions GET/POST/DELETE) returned 200 with both Bearer header and httpOnly cookie auth.",
+  "tested_scope": ["frontend", "backend", "auth", "integration"],
+  "passed": [
+    "POST /api/auth/login (admin) -> 200 with JWT token",
+    "POST /api/auth/register (new user) -> 200 with JWT token",
+    "GET /api/auth/me (Bearer + cookie) -> 200",
+    "POST /api/sessions -> 200, returns session w/ id",
+    "GET /api/sessions -> 200 list including newly created",
+    "DELETE /api/sessions/{id} -> 200 {ok:true}",
+    "UI: Register new user -> auto-logged-in dashboard renders",
+    "UI: Solfeggio 528 Hz preset updates current-frequency to 528.0Hz",
+    "UI: Custom frequency slider updates frequency display in realtime (528 -> 538 after arrow keys)",
+    "UI: Waveform toggle (Triangle) highlights active",
+    "UI: Play/Pause starts countdown (10:00 -> 09:59); pause stops it",
+    "UI: Save session adds item to Saved Sessions",
+    "UI: Delete session removes saved item",
+    "UI: Logout returns to auth screen",
+    "UI: Admin login (admin@example.com/admin123) lands on dashboard with 'Hello, Admin'"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "Binaural offset slider, ambient sliders, duration slider, breathwork toggle, load-saved-session not exhaustively exercised in this smoke pass but underlying components render and primary flow works. No console errors observed. Web Audio output not verified (expected in headless mode). CORS + cookie auth working across origin."
+}
