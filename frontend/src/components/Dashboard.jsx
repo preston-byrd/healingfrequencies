@@ -111,6 +111,12 @@ export default function Dashboard() {
   };
 
   const selectFrequency = (hz) => {
+    const isSame = Math.round(state.frequency) === hz;
+    if (state.playing && isSame) {
+      audioEngine.stop();
+      setRemaining(0);
+      return;
+    }
     audioEngine.setFrequency(hz);
     if (!state.playing) {
       setRemaining(duration * 60);
