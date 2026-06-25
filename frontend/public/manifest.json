@@ -1,0 +1,17 @@
+{
+  "name": "Healing Frequencies",
+  "short_name": "Frequencies",
+  "description": "A quiet space for Solfeggio tones, custom frequencies, breathwork, and golden-ratio harmonic stacks.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#08120F",
+  "theme_color": "#08120F",
+  "categories": ["health", "lifestyle", "music"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
