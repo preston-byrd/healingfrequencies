@@ -110,6 +110,14 @@ export default function Dashboard() {
     }
   };
 
+  const selectFrequency = (hz) => {
+    audioEngine.setFrequency(hz);
+    if (!state.playing) {
+      setRemaining(duration * 60);
+      audioEngine.start();
+    }
+  };
+
   const saveSession = async () => {
     setErr('');
     if (!saveName.trim()) { setErr('Give your session a name'); return; }
@@ -180,7 +188,7 @@ export default function Dashboard() {
                   <button
                     key={p.hz}
                     data-testid={`solfeggio-freq-${p.hz}`}
-                    onClick={() => audioEngine.setFrequency(p.hz)}
+                    onClick={() => selectFrequency(p.hz)}
                     className={`glass-soft p-3 text-left transition-all duration-300 hover:-translate-y-0.5 ${
                       active ? 'border-[#72C2AC]/60 bg-[#1A332A]/60' : ''
                     }`}
