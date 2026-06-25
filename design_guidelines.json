@@ -1,0 +1,131 @@
+{
+  "theme": "Dark",
+  "archetype": "Archetype 1 (Organic & Earthy) - Midnight Forest Variant",
+  "design_vision": {
+    "vibe": "Deeply peaceful, contemplative, ethereal. Aurora borealis meets zen garden.",
+    "emotion": "Grounded calm with cosmic expansiveness",
+    "core_principles": [
+      "Avoid generic purple/teal SaaS gradients.",
+      "Use deep forest greens, warm sand, and muted moss to create an earthy night atmosphere.",
+      "Treat the interface as a 'Control Room' (Dense, Scannable) but styled as 'Crystal Glass' over an organic backdrop.",
+      "Motion must be fluid, slow, and meditative, never abrupt."
+    ]
+  },
+  "colors": {
+    "background_base": "#08120F",
+    "surface_glass": "rgba(20, 38, 31, 0.5)",
+    "surface_solid": "#101F1A",
+    "surface_hover": "rgba(26, 51, 42, 0.7)",
+    "primary": "#5C9E8C",
+    "primary_glow": "rgba(92, 158, 140, 0.4)",
+    "primary_active": "#72C2AC",
+    "secondary_accent": "#C4A67A",
+    "text_main": "#E8E3D9",
+    "text_muted": "#8A9A92",
+    "border_subtle": "rgba(92, 158, 140, 0.15)",
+    "border_active": "rgba(92, 158, 140, 0.5)",
+    "error": "#D96C6C",
+    "success": "#5C9E8C"
+  },
+  "typography": {
+    "heading_font": "Cormorant Garamond",
+    "body_font": "Outfit",
+    "mono_font": "JetBrains Mono",
+    "rules": {
+      "h1": "text-5xl sm:text-6xl font-light tracking-tighter text-[#E8E3D9]",
+      "h2": "text-3xl sm:text-4xl font-light tracking-tight text-[#E8E3D9]",
+      "h3": "text-xl sm:text-2xl font-medium tracking-tight text-[#E8E3D9]",
+      "body": "text-base font-normal leading-relaxed text-[#8A9A92]",
+      "numbers": "font-mono tracking-widest text-[#5C9E8C]",
+      "labels": "text-xs uppercase tracking-[0.2em] text-[#8A9A92] font-semibold"
+    }
+  },
+  "layout_and_spacing": {
+    "strategy": "Mode B: The 'Control Room' Grid but expanded for an immersive dashboard.",
+    "container": "h-screen w-screen overflow-hidden bg-[#08120F] text-[#E8E3D9] flex flex-col md:flex-row p-4 md:p-6 gap-6",
+    "panels": {
+      "left_sidebar": "w-full md:w-80 flex flex-col gap-6 h-full z-10",
+      "center_stage": "flex-1 flex flex-col items-center justify-center relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/20",
+      "right_sidebar": "w-full md:w-[360px] flex flex-col gap-6 h-full z-10 overflow-y-auto custom-scrollbar"
+    },
+    "spacing_scale": "Generous internal padding. Cards use p-6 or p-8.",
+    "surfaces": {
+      "glass_panel": "backdrop-blur-2xl bg-[#14261F]/40 border border-[#5C9E8C]/10 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.4)]",
+      "flat_card": "bg-[#101F1A] border border-[#5C9E8C]/10 rounded-xl"
+    }
+  },
+  "components": {
+    "auth": {
+      "type": "Modal or dedicated screen",
+      "style": "Glassmorphism panel centrally aligned. Inputs with border-b only or highly rounded filled inputs with soft earthy backgrounds."
+    },
+    "solfeggio_grid": {
+      "layout": "grid grid-cols-2 md:grid-cols-3 gap-3",
+      "item_style": "flat_card hover:bg-[#1A332A] transition-colors p-4 flex flex-col items-center justify-center cursor-pointer group",
+      "active_state": "The 'Tracing Beam' effect: dynamic border glow. text-[#72C2AC]"
+    },
+    "custom_generator": {
+      "layout": "flex flex-col gap-4 p-6 glass_panel",
+      "elements": "Shadcn Slider customized with #5C9E8C track. Number input with JetBrains Mono font. Waveform toggle (Sine, Square, Triangle) using group buttons."
+    },
+    "ambient_mixer": {
+      "layout": "flex flex-col gap-5 p-6 glass_panel",
+      "elements": "List of nature sounds (Rain, Ocean, Forest). Each has a horizontal volume slider and an icon (lucide-react). Slider tracks should use #C4A67A for visual distinction from main frequency."
+    },
+    "active_player_centerpiece": {
+      "layout": "Absolute fill within center_stage.",
+      "visuals": "React Three Fiber (R3F) Canvas or WebGL fluid simulation. A central abstract geometry (like an organic sphere or aurora waves) that subtly distorts based on frequency state.",
+      "breathwork_overlay": "SVG or Framer Motion circle in the exact center. Expands/contracts slowly (e.g., 4s inhale, 4s hold, 6s exhale). Uses a delicate 1px stroke of #72C2AC."
+    },
+    "timer_controls": {
+      "layout": "Absolute bottom of center_stage or integrated in right_sidebar.",
+      "elements": "Large digital countdown in JetBrains Mono. Minimalist Play/Pause/Stop buttons (lucide-react icons, 32px)."
+    }
+  },
+  "motion_and_interactions": {
+    "hover": "Subtle background lightening (hover:bg-[#1A332A]), slight lift (-translate-y-0.5).",
+    "active": "Scale down (scale-95).",
+    "transitions": "Use specific properties: transition-colors duration-300 ease-out, transform duration-200.",
+    "visualizer": "The central visual must continuously animate smoothly using requestAnimationFrame. Opacity transitions when audio plays/stops."
+  },
+  "assets_and_media": {
+    "icons_library": "lucide-react",
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1695605117941-e9130a0369ad?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwzfHxzdWJ0bGUlMjBhdXJvcmElMjBib3JlYWxpcyUyMGZvcmVzdHxlbnwwfHx8fDE3ODI0Mjc1NjJ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Subtle green/purple aurora over water. Use as a heavily blurred, very low opacity (10-15%) background layer behind the app container to give an ethereal ambient glow.",
+        "category": "app_background"
+      },
+      {
+        "url": "https://images.pexels.com/photos/35298173/pexels-photo-35298173.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Zen garden rock texture. Use as subtle texture for ambient sound mixer covers or empty states.",
+        "category": "texture_overlay"
+      },
+      {
+        "url": "https://images.pexels.com/photos/37553809/pexels-photo-37553809.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Abstract moss texture. Use for 'Forest' ambient track thumbnail or saved session cards.",
+        "category": "thumbnails"
+      }
+    ]
+  },
+  "testing_attributes": {
+    "rules": "All interactive elements MUST have a data-testid attribute in kebab-case.",
+    "examples": [
+      "data-testid='login-button'",
+      "data-testid='solfeggio-freq-528'",
+      "data-testid='custom-freq-slider'",
+      "data-testid='play-pause-button'",
+      "data-testid='ambient-rain-slider'",
+      "data-testid='save-session-button'"
+    ]
+  },
+  "instructions_to_main_agent": {
+    "tech_stack": "React.js (NOT TSX), Tailwind CSS, Shadcn UI, Framer Motion, Web Audio API, Lucide React.",
+    "setup_commands": [
+      "yarn add framer-motion lucide-react @radix-ui/react-slider @radix-ui/react-dialog @radix-ui/react-tabs clsx tailwind-merge"
+    ],
+    "audio_implementation": "Use the native Web Audio API (AudioContext) for the pure tones. Implement a master gain node and individual gain nodes for ambient tracks. Ensure the AudioContext is resumed on first user interaction.",
+    "ui_implementation": "Rely heavily on Tailwind for the glassmorphism effects (`backdrop-blur-xl`, `bg-black/20`, etc.). Strip default Shadcn 'Vercel' looks; replace borders with `border-[#5C9E8C]/15` and add appropriate padding.",
+    "visualizer": "If R3F is too heavy to implement fully in one shot, fallback to a robust Canvas API or CSS/Framer Motion organic blob that scales/pulses with the `timer` and audio state. It must look premium."
+  }
+}
