@@ -53,6 +53,11 @@
 - **Audio reliability fix** (Jan 2026): `_ensureCtx()` async + awaits `ctx.resume()`; `start()` async with `_starting` guard; `stop()` uses local osc refs + immediate null of instance refs (race-window safe); window-level first-gesture unlock listener (`pointerdown/touchstart/keydown`) → audioEngine.unlock() for iOS Safari.
 - Backend + frontend tested end-to-end (testing agent iterations 1–9: 100% pass)
 
+## Implemented (Feb 2026)
+- **Tap-to-toggle frequency** (Feb 2026): Tapping any frequency button (Solfeggio / Brainwave & Specials / φ Golden Stack) while that same selection is currently playing now STOPS playback. Tapping a DIFFERENT frequency while playing live-retunes (does not stop). Implemented in `Dashboard.jsx::selectFrequency` via `sameFreq` (`Math.abs(audioEngine.frequency - hz) < 0.05`) + `sameMode` (matching Golden-Stack state).
+- **Code quality cleanup** (Feb 2026): Memoized `AuthContext` + `SubscriptionContext` provider values with `useMemo` / `useCallback` (prevents unnecessary consumer re-renders). Replaced silent `catch {}` blocks with `console.warn(...)` logging in `Dashboard.jsx`, `AccountDashboard.jsx`, and both contexts. Backend pytest admin credentials are now env-driven (`ADMIN_TEST_EMAIL` / `ADMIN_TEST_PASSWORD` with safe defaults). `audioEngine.js` left intentionally untouched (its noop catches handle iOS unlock + cleanup races).
+- Testing: iteration 14 — 12/12 frontend scenarios pass, 44/47 pytest pass (2 pre-existing stale checkout-tx tests, 1 intentional skip).
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
