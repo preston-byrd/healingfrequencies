@@ -83,6 +83,13 @@
   - Added diagnostic `logger.info` line in `/me/checkout` printing the resolved `api_base` + `key_prefix` for operator-visibility in `/var/log/supervisor/backend.err.log`.
   - Testing iteration 21 — 9 new sticky-state guard tests in `test_stripe_routing.py` (4 unit monkeypatch tests proving deterministic api_base recovery + 4 live HTTP regression + 1 log-line assertion) + 38 regression. All 47/47 pass.
 
+- **Soundscape playback — graceful fade + tap-to-toggle + pause/resume** (Feb 2026): Comprehensive overhaul of the Soundscape player flow.
+  - `audioEngine.setAmbient(k, 0)` no longer instant-cuts; it now `cancelScheduledValues` + `setValueAtTime(current)` + `linearRampToValueAtTime(0, +0.8s)` — every ambient stop is smooth, whether triggered by slider drag, soundscape swap, or session stop.
+  - `audioEngine.stop()` now snapshots the active ambient mix to `_pendingAmbient`, fades ALL ambient gains to 0 over 0.8s (matched to the tone fade), and uses an 850ms oscillator cleanup window. Snapshot is restored automatically in `start()` so Pause → Play resumes the exact mix — including frequency, ambient layers, and tone volume.
+  - Dashboard.jsx added `activeSoundscape` state with three-branch `selectSoundscape` logic: same+playing → graceful stop (snapshot cleared), same+paused → resume (snapshot restored via `start()`), different → discard snapshot + swap mix + start (no silent gap). All explicit-reset paths (manual ambient slider, frequency tap, sleep mode, timer expiry) clear both `_pendingAmbient` and `activeSoundscape` so the next action starts fresh.
+  - Visual: active soundscape card shows ring + amber icon + 'PLAYING' badge (animated pulse dot) or 'PAUSED' badge + 'Tap to stop' / 'Tap to resume' hint. `data-active` and `data-playing` attributes on each card for testability.
+  - Testing iteration 22 — 9/9 frontend e2e scenarios pass (5 primary + 3 regression + 1 mobile). Fade trajectory verified live on Web Audio gain values: t=50ms=0.49 → t=400ms=0.25 → t=900ms=0.00, byte-identical on desktop (1280×900) and mobile (390×844). Testing agent added `window.__audioEngine` hook in Dashboard.jsx for live engine introspection — harmless in production.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
