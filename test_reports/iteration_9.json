@@ -1,0 +1,30 @@
+{
+  "summary": "Verified the new 'Brainwave & Specials' Pro paywall end-to-end on live preview URL. All 18 individual assertions pass across 5 flows: (1) FREE user paywall rendering — specials-section visible with Lock icon next to title, specials-pro-badge present, specials-unlock-cta with 'Included in Pro' text, grid dimmed (opacity-45 + pointer-events-none), all 10 special-freq-* buttons (2,6,7.83,10,40,111,222,369,444,1111) rendered; (2) CTA click routes FREE user to AccountDashboard (plan-card visible) and the Pro unlocks list contains the exact line 'Brainwave & Specials presets (Delta, Theta, Schumann, 111, Tesla 369, Angel 444, …)'; (3) FREE user can still play Solfeggio 528 (freq=528.0Hz, pause icon, timer counting); (4) ADMIN sees specials with NO paywall UI (no badge, no CTA, no dim) AND clicking special-freq-7.83 starts playback (freq=7.8Hz, pause icon); (5) REGRESSION: golden-preset, sleep-mode-preset, breathwork-toggle still route to AccountDashboard for free users; custom-freq-locked link still present. Direct click on dimmed special-freq buttons is correctly blocked by pointer-events-none on the grid wrapper, and the overlay CTA (absolute inset-0) intercepts all user clicks into the paywall path — design works as intended.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dashboard.jsx L167-186 selectFrequency: now also gates `opts.special` via the same `(wantGolden || wantSpecial) && !isPro` check that previously gated golden — correct, single source of truth.",
+    "Dashboard.jsx L395-449 SPECIALS block: conditional Lock icon inside .label-tiny, specials-pro-badge, dimmed grid (opacity-45 + pointer-events-none), and absolute-positioned specials-unlock-cta overlay — all rendered only when !isPro. Pro users get a clean grid with no overlay/dim/badge. Visually verified on admin account.",
+    "Note on pointer-events behavior: with `pointer-events-none` on the grid, native onClick on individual special-freq-* buttons cannot fire. But the overlay CTA (absolute inset-0) sits on top of the grid, so any user click on the visible area routes through specials-unlock-cta → onOpenAccount. The selectFrequency guard remains as a defense-in-depth safety net if a Pro entitlement flips mid-render. This dual-layer paywall is correct and verified.",
+    "AccountDashboard.jsx L202-210 proFeatures: line 'Brainwave & Specials presets (Delta, Theta, Schumann, 111, Tesla 369, Angel 444, …)' is added at index [1]. Renders inside data-testid='plan-card' for both free and admin/Pro users (text identical, only check-icon color changes via sub.pro flag).",
+    "Free Solfeggio path unaffected: solfeggio-freq-528 passes no opts to selectFrequency so the gating check `(wantGolden || wantSpecial)` is false → free user gets normal playback. Verified live (528.0Hz + pause icon).",
+    "Regression coverage holds: golden-preset, sleep-mode-preset, breathwork-toggle, custom-freq-slider all still Pro-gated. Audio playback fix from iteration 8 still working (no regressions)."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only request)",
+    "frontend": "100% — 18/18 assertions pass (5 free-render + 2 CTA-routing + 1 solfeggio + 5 admin + 4 regression + 1 plan-card-line)"
+  },
+  "test_credentials": "Admin admin@example.com / admin123 (works, treated as Pro via sub.pro=true). Fresh free user registered live: freeuser1782484778109@example.com / password123 (registered via UI 'Create an account' link, lands directly on dashboard with Basic plan, paywall UI renders as expected).",
+  "seed_data_creation": "One ephemeral non-pro test user (freeuser1782484778109@example.com) created via UI register flow during testing. No cleanup performed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Brainwave & Specials Pro paywall is fully implemented and verified as of iteration 9. Free users see: small Lock icon next to 'Brainwave & Specials' title, 'PRO' badge (specials-pro-badge), grid dimmed at opacity-45 with pointer-events-none, and a centered overlay CTA (specials-unlock-cta) saying 'Included in Pro' + 'Unlock 10 brainwave & sacred frequencies'. Any click in that section navigates to AccountDashboard. The Pro unlocks list inside plan-card includes the new 'Brainwave & Specials presets (...)' line. Admin/Pro users see no paywall UI and can play any special-freq-{hz} including 7.83 (verified freq=7.8Hz + pause icon). All prior gating (golden, sleep, breathwork, ambient, custom slider) remains intact. Audio engine fix from iteration 8 still working — no regressions detected.",
+  "rca of the issue": "N/A — this iteration validated a NEW feature implementation (specials paywall), not a bug fix. The implementation in Dashboard.jsx (selectFrequency gating + conditional Lock/badge/CTA) and AccountDashboard.jsx (proFeatures list entry) is correct and matches the spec end-to-end."
+}

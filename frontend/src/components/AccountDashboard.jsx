@@ -201,8 +201,10 @@ export default function AccountDashboard({ onBack }) {
 
   const proFeatures = [
     'Unlimited saved sessions',
+    'Brainwave & Specials presets (Delta, Theta, Schumann, 111, Tesla 369, Angel 444, …)',
     'φ Golden Stack harmonic mode',
-    'Ambient layers (rain · ocean · forest)',
+    'Sleep Mode (30-min fade-to-silence)',
+    'Ambient layers (rain · ocean · forest · wind · crickets · bowls · brown · white)',
     'Breathwork guide',
     'Custom frequency generator',
   ];

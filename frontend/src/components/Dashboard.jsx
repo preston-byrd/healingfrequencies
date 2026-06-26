@@ -166,7 +166,8 @@ export default function Dashboard({ onOpenAccount }) {
 
   const selectFrequency = (hz, opts = {}) => {
     const wantGolden = !!opts.golden;
-    if (wantGolden && !isPro) { onOpenAccount(); return; }
+    const wantSpecial = !!opts.special;
+    if ((wantGolden || wantSpecial) && !isPro) { onOpenAccount(); return; }
     const playing = audioEngine.playing;
     const isSame =
       Math.round(audioEngine.frequency) === Math.round(hz) &&
@@ -390,17 +391,31 @@ export default function Dashboard({ onOpenAccount }) {
             </button>
           </div>
 
-          {/* Brainwave & Specials */}
-          <div className="glass p-5">
-            <div className="label-tiny mb-3">Brainwave &amp; Specials</div>
-            <div className="grid grid-cols-2 gap-2">
+          {/* Brainwave & Specials — Pro only */}
+          <div className={`glass p-5 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="specials-section">
+            <div className="flex items-center justify-between mb-3">
+              <div className="label-tiny flex items-center gap-2">
+                Brainwave &amp; Specials
+                {!isPro && <Lock size={11} className="text-[#C4A67A]" />}
+              </div>
+              {!isPro && (
+                <span
+                  data-testid="specials-pro-badge"
+                  className="text-[9px] tracking-widest text-[#C4A67A] bg-[#C4A67A]/10 px-2 py-0.5 rounded-full"
+                >
+                  PRO
+                </span>
+              )}
+            </div>
+
+            <div className={`grid grid-cols-2 gap-2 transition-opacity ${!isPro ? 'opacity-45 pointer-events-none select-none' : ''}`}>
               {SPECIALS.map((p) => {
-                const active = Math.abs(state.frequency - p.hz) < 0.05 && !state.goldenStack;
+                const active = Math.abs(audioEngine.frequency - p.hz) < 0.05 && !state.goldenStack && isPro;
                 return (
                   <button
                     key={p.hz}
                     data-testid={`special-freq-${p.hz}`}
-                    onClick={() => selectFrequency(p.hz)}
+                    onClick={() => selectFrequency(p.hz, { special: true })}
                     className={`glass-soft p-3 text-left transition-all duration-300 hover:-translate-y-0.5 ${
                       active ? 'border-[#72C2AC]/60 bg-[#1A332A]/60' : ''
                     }`}
@@ -414,6 +429,23 @@ export default function Dashboard({ onOpenAccount }) {
                 );
               })}
             </div>
+
+            {!isPro && (
+              <button
+                data-testid="specials-unlock-cta"
+                onClick={onOpenAccount}
+                className="absolute inset-0 flex items-end justify-center pb-5 px-5 cursor-pointer group"
+              >
+                <div className="glass-soft px-4 py-3 border border-[#C4A67A]/40 hover:border-[#C4A67A] hover:-translate-y-0.5 transition-all text-center w-full max-w-[260px]">
+                  <div className="flex items-center justify-center gap-2 text-[#C4A67A] text-xs font-medium">
+                    <Lock size={12} /> Included in Pro
+                  </div>
+                  <div className="text-[10px] text-[#8A9A92] mt-1">
+                    Unlock 10 brainwave &amp; sacred frequencies
+                  </div>
+                </div>
+              </button>
+            )}
           </div>
 
           <StreakPanel refreshKey={streakBump} />
