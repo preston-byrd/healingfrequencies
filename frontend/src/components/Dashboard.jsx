@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
 import StreakPanel from '@/components/StreakPanel';
@@ -36,8 +37,9 @@ function formatTime(secs) {
   return `${m}:${s}`;
 }
 
-export default function Dashboard() {
+export default function Dashboard({ onOpenAccount }) {
   const { user, logout } = useAuth();
+  const { isPro, refresh: refreshSub } = useSubscription();
   const [state, setState] = useState(audioEngine.getState());
   const [duration, setDuration] = useState(10); // minutes
   const [remaining, setRemaining] = useState(0); // seconds; 0 = not running
@@ -114,6 +116,7 @@ export default function Dashboard() {
 
   const selectFrequency = (hz, opts = {}) => {
     const wantGolden = !!opts.golden;
+    if (wantGolden && !isPro) { onOpenAccount(); return; }
     const isSame =
       Math.round(state.frequency) === hz && state.goldenStack === wantGolden;
     if (state.playing && isSame) {
@@ -129,7 +132,25 @@ export default function Dashboard() {
     }
   };
 
-  const toggleGoldenStack = () => audioEngine.setGoldenStack(!state.goldenStack);
+  const toggleGoldenStack = () => {
+    if (!isPro) { onOpenAccount(); return; }
+    audioEngine.setGoldenStack(!state.goldenStack);
+  };
+
+  const setAmbient = (key, v) => {
+    if (!isPro && v > 0) { onOpenAccount(); return; }
+    audioEngine.setAmbient(key, v);
+  };
+
+  const toggleBreathwork = () => {
+    if (!isPro) { onOpenAccount(); return; }
+    setBreathwork((b) => !b);
+  };
+
+  const onCustomFreqChange = (e) => {
+    if (!isPro) { onOpenAccount(); return; }
+    audioEngine.setFrequency(parseFloat(e.target.value));
+  };
 
   const saveSession = async () => {
     setErr('');
@@ -146,7 +167,13 @@ export default function Dashboard() {
       });
       setSaveName('');
       refreshSessions();
-    } catch (e) { setErr(formatApiError(e)); }
+    } catch (e) {
+      const msg = formatApiError(e);
+      if (e?.response?.status === 402) {
+        setErr(msg + ' →');
+        refreshSub();
+      } else { setErr(msg); }
+    }
   };
 
   const loadSession = (s) => {
@@ -179,17 +206,35 @@ export default function Dashboard() {
           <div className="glass p-6">
             <div className="flex items-center justify-between mb-1">
               <div className="label-tiny">Healing Frequencies</div>
-              <button
-                data-testid="logout-button"
-                onClick={logout}
-                className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
-                title="Sign out"
-              >
-                <LogOut size={16} />
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  data-testid="account-button"
+                  onClick={onOpenAccount}
+                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+                  title="Account"
+                >
+                  <UserCircle size={18} />
+                </button>
+                <button
+                  data-testid="logout-button"
+                  onClick={logout}
+                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+                  title="Sign out"
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
             </div>
             <h2 className="font-display text-2xl text-[#E8E3D9] font-light">Hello, {user.name}</h2>
-            <p className="text-xs text-[#8A9A92] mt-1">Choose a tone or craft your own.</p>
+            <p className="text-xs text-[#8A9A92] mt-1">
+              {isPro ? (
+                <span className="text-[#C4A67A] inline-flex items-center gap-1">
+                  <Sparkles size={11} /> Pro · all features unlocked
+                </span>
+              ) : (
+                <>Choose a tone or <button onClick={onOpenAccount} className="text-[#72C2AC] hover:text-[#C4A67A] underline-offset-2 hover:underline">upgrade for Pro features</button>.</>
+              )}
+            </p>
           </div>
 
           <div className="glass p-5">
@@ -315,10 +360,20 @@ export default function Dashboard() {
               data-testid="custom-freq-slider"
               type="range" min="20" max="1200" step="0.5"
               value={state.frequency}
-              onChange={(e) => audioEngine.setFrequency(parseFloat(e.target.value))}
-              className="slider"
+              onChange={onCustomFreqChange}
+              disabled={!isPro}
+              className="slider disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ '--v': `${((state.frequency - 20) / 1180) * 100}%` }}
             />
+            {!isPro && (
+              <button
+                onClick={onOpenAccount}
+                data-testid="custom-freq-locked"
+                className="mt-2 text-[10px] text-[#C4A67A] hover:text-[#72C2AC] flex items-center gap-1"
+              >
+                <Lock size={10} /> Custom frequency is a Pro feature — unlock
+              </button>
+            )}
 
             <div className="mt-4">
               <div className="label-tiny mb-2">Waveform</div>
@@ -350,6 +405,7 @@ export default function Dashboard() {
               }`}
               title={`Stacks tones at f × φ¹ and f × φ² (φ ≈ ${PHI.toFixed(4)})`}
             >
+              {!isPro && <Lock size={12} className="text-[#C4A67A]" />}
               <Sparkles size={14} /> Golden Stack φ {state.goldenStack ? 'On' : 'Off'}
             </button>
 
@@ -397,8 +453,9 @@ export default function Dashboard() {
                       data-testid={`ambient-${key}-slider`}
                       type="range" min="0" max="1" step="0.01"
                       value={v}
-                      onChange={(e) => audioEngine.setAmbient(key, parseFloat(e.target.value))}
-                      className="slider amber"
+                      onChange={(e) => setAmbient(key, parseFloat(e.target.value))}
+                      disabled={!isPro}
+                      className="slider amber disabled:opacity-50 disabled:cursor-not-allowed"
                       style={{ '--v': `${v * 100}%` }}
                     />
                   </div>
@@ -424,13 +481,14 @@ export default function Dashboard() {
 
             <button
               data-testid="breathwork-toggle"
-              onClick={() => setBreathwork((b) => !b)}
+              onClick={toggleBreathwork}
               className={`mt-5 w-full py-2.5 rounded-full border transition-colors duration-300 flex items-center justify-center gap-2 ${
                 breathwork
                   ? 'bg-[#5C9E8C]/25 border-[#72C2AC]/50 text-[#72C2AC]'
                   : 'border-[#5C9E8C]/20 text-[#8A9A92] hover:text-[#E8E3D9]'
               }`}
             >
+              {!isPro && <Lock size={12} className="text-[#C4A67A]" />}
               <Wind size={14} /> Breathwork {breathwork ? 'On' : 'Off'}
             </button>
           </div>
@@ -454,7 +512,16 @@ export default function Dashboard() {
                 <Save size={14} /> Save
               </button>
             </div>
-            {err && <div className="text-[#D96C6C] text-xs mt-2">{err}</div>}
+            {err && (
+              <div className="text-[#D96C6C] text-xs mt-2">
+                {err}{' '}
+                {!isPro && (
+                  <button onClick={onOpenAccount} className="text-[#C4A67A] hover:text-[#72C2AC] underline ml-1">
+                    Upgrade
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </aside>
       </div>

@@ -1,11 +1,21 @@
-import React from 'react';
+import React, { useState } from 'react';
 import '@/App.css';
 import { AuthProvider, useAuth } from '@/contexts/AuthContext';
+import { SubscriptionProvider } from '@/contexts/SubscriptionContext';
 import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
+import AccountDashboard from '@/components/AccountDashboard';
 
 function Shell() {
   const { user, loading } = useAuth();
+  const [view, setView] = useState('main'); // 'main' | 'account'
+
+  // Auto-navigate to account when returning from Stripe checkout
+  React.useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('stripe_session_id') || p.get('stripe_canceled')) setView('account');
+  }, []);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center text-[#8A9A92]">
@@ -15,13 +25,17 @@ function Shell() {
     );
   }
   if (!user) return <AuthScreen />;
-  return <Dashboard />;
+
+  if (view === 'account') return <AccountDashboard onBack={() => setView('main')} />;
+  return <Dashboard onOpenAccount={() => setView('account')} />;
 }
 
 export default function App() {
   return (
     <AuthProvider>
-      <Shell />
+      <SubscriptionProvider>
+        <Shell />
+      </SubscriptionProvider>
     </AuthProvider>
   );
 }

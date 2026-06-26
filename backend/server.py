@@ -16,6 +16,9 @@ from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depend
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
+from emergentintegrations.payments.stripe.checkout import (
+    StripeCheckout, CheckoutSessionRequest
+)
 
 
 # --- Setup --------------------------------------------------------------------
@@ -25,6 +28,17 @@ db = client[os.environ['DB_NAME']]
 
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.environ["JWT_SECRET"]
+STRIPE_API_KEY = os.environ.get("STRIPE_API_KEY", "")
+
+# Fixed plan packages — amounts ALWAYS resolved server-side, never trusted from client.
+# Admin can override the displayed/charged amount via /api/admin/plan-prices, which writes
+# overrides into the plan_config collection. Defaults below are used until admin overrides.
+DEFAULT_PLAN_CONFIG = {
+    "monthly": {"price": 9.99, "days": 30, "label": "Pro Monthly"},
+    "annual":  {"price": 60.00, "days": 365, "label": "Pro Annual"},
+    "currency": "usd",
+    "trial_days": 7,
+}
 
 app = FastAPI()
 api = APIRouter(prefix="/api")
@@ -155,6 +169,14 @@ async def list_sessions(user: dict = Depends(get_current_user)):
 
 @api.post("/sessions")
 async def create_session(body: SessionIn, user: dict = Depends(get_current_user)):
+    # Feature gate: Basic plan caps saved sessions at 3
+    if not _is_pro(user):
+        count = await db.sessions.count_documents({"user_id": user["id"]})
+        if count >= 3:
+            raise HTTPException(
+                status_code=402,
+                detail="Free plan saves up to 3 sessions. Upgrade to Pro for unlimited saves.",
+            )
     doc = body.model_dump()
     doc.update({
         "id": str(uuid.uuid4()),
@@ -255,6 +277,270 @@ async def checkin(body: CheckinIn, user: dict = Depends(get_current_user)):
     return update
 
 
+# --- Subscription / Billing --------------------------------------------------
+def _is_pro(user: dict) -> bool:
+    """User has Pro access if their pro_until is in the future."""
+    pu = user.get("pro_until")
+    if not pu:
+        return False
+    try:
+        return datetime.fromisoformat(pu) > datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+async def _get_plan_config() -> dict:
+    doc = await db.plan_config.find_one({"_id": "current"}) or {}
+    cfg = {**DEFAULT_PLAN_CONFIG, **{k: v for k, v in doc.items() if k != "_id"}}
+    return cfg
+
+
+def _require_admin(user: dict):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=6)
+
+
+class CheckoutIn(BaseModel):
+    plan: str  # "monthly" | "annual"
+    origin_url: str
+
+
+class PlanPricesIn(BaseModel):
+    monthly_price: Optional[float] = Field(None, gt=0, le=10000)
+    annual_price: Optional[float] = Field(None, gt=0, le=100000)
+    trial_days: Optional[int] = Field(None, ge=0, le=90)
+
+
+@api.post("/me/password")
+async def change_password(body: PasswordChangeIn, user: dict = Depends(get_current_user)):
+    full = await db.users.find_one({"id": user["id"]})
+    if not verify_password(body.current_password, full["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"password_hash": hash_password(body.new_password)}},
+    )
+    return {"ok": True}
+
+
+@api.get("/plan/config")
+async def get_plan_config_public():
+    cfg = await _get_plan_config()
+    # Don't leak internal fields; expose what the UI needs.
+    return {
+        "currency": cfg.get("currency", "usd"),
+        "monthly": {"price": cfg["monthly"]["price"], "days": cfg["monthly"]["days"], "label": cfg["monthly"]["label"]},
+        "annual": {"price": cfg["annual"]["price"], "days": cfg["annual"]["days"], "label": cfg["annual"]["label"]},
+        "trial_days": cfg.get("trial_days", 7),
+    }
+
+
+@api.get("/me/subscription")
+async def my_subscription(user: dict = Depends(get_current_user)):
+    full = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0}) or {}
+    pro = _is_pro(full)
+    pro_until = full.get("pro_until")
+    days_left = 0
+    if pro_until:
+        try:
+            delta = datetime.fromisoformat(pro_until) - datetime.now(timezone.utc)
+            days_left = max(0, delta.days + (1 if delta.seconds > 0 else 0))
+        except Exception:
+            pass
+    return {
+        "plan": full.get("plan") or ("pro" if pro else "basic"),
+        "pro": pro,
+        "pro_until": pro_until,
+        "days_left": days_left,
+        "trial_used": bool(full.get("trial_used")),
+        "is_admin": full.get("role") == "admin",
+    }
+
+
+@api.post("/me/trial")
+async def start_trial(user: dict = Depends(get_current_user)):
+    full = await db.users.find_one({"id": user["id"]})
+    if full.get("trial_used"):
+        raise HTTPException(status_code=400, detail="Free trial already used")
+    if _is_pro(full):
+        raise HTTPException(status_code=400, detail="You already have an active Pro plan")
+    cfg = await _get_plan_config()
+    until = datetime.now(timezone.utc) + timedelta(days=int(cfg.get("trial_days", 7)))
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"plan": "trial", "pro_until": until.isoformat(), "trial_used": True}},
+    )
+    return {"ok": True, "pro_until": until.isoformat()}
+
+
+@api.post("/me/checkout")
+async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depends(get_current_user)):
+    if body.plan not in ("monthly", "annual"):
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    if not STRIPE_API_KEY:
+        raise HTTPException(status_code=500, detail="Payments not configured")
+
+    cfg = await _get_plan_config()
+    pkg = cfg[body.plan]
+    amount = float(pkg["price"])  # SERVER-SIDE truth — never trust client
+    currency = cfg.get("currency", "usd")
+
+    host_url = str(request.base_url).rstrip("/")
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    sc = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+    origin = body.origin_url.rstrip("/")
+    success_url = f"{origin}/?stripe_session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{origin}/?stripe_canceled=1"
+
+    metadata = {
+        "user_id": user["id"],
+        "email": user["email"],
+        "plan": body.plan,
+        "days": str(pkg["days"]),
+    }
+    req = CheckoutSessionRequest(
+        amount=amount,
+        currency=currency,
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata=metadata,
+    )
+    session = await sc.create_checkout_session(req)
+
+    # Create pending transaction BEFORE redirect
+    await db.payment_transactions.insert_one({
+        "session_id": session.session_id,
+        "user_id": user["id"],
+        "email": user["email"],
+        "plan": body.plan,
+        "amount": amount,
+        "currency": currency,
+        "days": int(pkg["days"]),
+        "status": "initiated",
+        "payment_status": "pending",
+        "metadata": metadata,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "fulfilled": False,
+    })
+    return {"url": session.url, "session_id": session.session_id}
+
+
+async def _fulfill_payment(tx: dict):
+    """Idempotently apply a successful payment to the user's plan."""
+    if tx.get("fulfilled"):
+        return
+    user_id = tx["user_id"]
+    days = int(tx.get("days", 30))
+    full = await db.users.find_one({"id": user_id}) or {}
+    now = datetime.now(timezone.utc)
+    current_until = None
+    pu = full.get("pro_until")
+    if pu:
+        try:
+            current_until = datetime.fromisoformat(pu)
+        except Exception:
+            current_until = None
+    base = current_until if (current_until and current_until > now) else now
+    new_until = base + timedelta(days=days)
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"plan": "pro", "pro_until": new_until.isoformat()}},
+    )
+    await db.payment_transactions.update_one(
+        {"session_id": tx["session_id"]},
+        {"$set": {"fulfilled": True, "fulfilled_at": now.isoformat()}},
+    )
+
+
+@api.get("/payments/status/{session_id}")
+async def payment_status(session_id: str, request: Request, user: dict = Depends(get_current_user)):
+    tx = await db.payment_transactions.find_one({"session_id": session_id, "user_id": user["id"]})
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    host_url = str(request.base_url).rstrip("/")
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    sc = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    status = await sc.get_checkout_status(session_id)
+
+    update = {
+        "status": status.status,
+        "payment_status": status.payment_status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.payment_transactions.update_one({"session_id": session_id}, {"$set": update})
+
+    if status.payment_status == "paid" and not tx.get("fulfilled"):
+        await _fulfill_payment({**tx, **update})
+
+    return {
+        "session_id": session_id,
+        "status": status.status,
+        "payment_status": status.payment_status,
+        "amount_total": status.amount_total,
+        "currency": status.currency,
+        "fulfilled": (status.payment_status == "paid"),
+    }
+
+
+@api.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    if not STRIPE_API_KEY:
+        return {"received": False}
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature", "")
+    host_url = str(request.base_url).rstrip("/")
+    webhook_url = f"{host_url}/api/webhook/stripe"
+    sc = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    try:
+        resp = await sc.handle_webhook(body, sig)
+    except Exception as e:
+        logger.warning(f"Stripe webhook error: {e}")
+        return {"received": True}
+    if resp.payment_status == "paid" and resp.session_id:
+        tx = await db.payment_transactions.find_one({"session_id": resp.session_id})
+        if tx and not tx.get("fulfilled"):
+            await _fulfill_payment(tx)
+    return {"received": True}
+
+
+@api.get("/me/transactions")
+async def my_transactions(user: dict = Depends(get_current_user)):
+    items = await db.payment_transactions.find(
+        {"user_id": user["id"]},
+        {"_id": 0, "metadata": 0},
+    ).sort("created_at", -1).to_list(100)
+    return items
+
+
+@api.get("/admin/plan-prices")
+async def admin_get_prices(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    return await _get_plan_config()
+
+
+@api.put("/admin/plan-prices")
+async def admin_update_prices(body: PlanPricesIn, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    update = {}
+    if body.monthly_price is not None:
+        update["monthly.price"] = float(body.monthly_price)
+    if body.annual_price is not None:
+        update["annual.price"] = float(body.annual_price)
+    if body.trial_days is not None:
+        update["trial_days"] = int(body.trial_days)
+    if not update:
+        raise HTTPException(status_code=400, detail="No changes provided")
+    await db.plan_config.update_one({"_id": "current"}, {"$set": update}, upsert=True)
+    return await _get_plan_config()
+
+
 # --- App setup ----------------------------------------------------------------
 @api.get("/")
 async def root():
@@ -292,6 +578,12 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.sessions.create_index([("user_id", 1), ("created_at", -1)])
     await db.streaks.create_index("user_id", unique=True)
+    await db.payment_transactions.create_index("session_id", unique=True)
+    await db.payment_transactions.create_index([("user_id", 1), ("created_at", -1)])
+    # Seed plan_config if missing
+    existing_cfg = await db.plan_config.find_one({"_id": "current"})
+    if not existing_cfg:
+        await db.plan_config.insert_one({"_id": "current", **DEFAULT_PLAN_CONFIG})
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
