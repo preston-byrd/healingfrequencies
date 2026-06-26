@@ -39,7 +39,11 @@
 - Admin seeded automatically on startup (admin@example.com / admin123)
 - **Daily check-in streak** (Jan 2026): `/api/streak` + `/api/streak/checkin`. Auto check-in after ≥60s of continuous playback. Streak/longest/total-min displayed in left sidebar.
 - **Gentle daily reminder** via Web Notifications API. User opts in, picks a time, and a daily notification is scheduled in-browser ("A quiet moment awaits 🌿").
-- Backend + frontend tested end-to-end (testing agent iterations 1 & 2: 100% pass)
+- **Golden Ratio (φ) Stack** (Jan 2026): dedicated preset (144 · 233 · 377 Hz Fibonacci chord) + toggle that stacks φ¹ and φ² harmonics on any base frequency.
+- **PWA** (Jan 2026): manifest, service worker for offline shell, app icons, installable on iOS/Android/desktop.
+- **Subscription & billing** (Jan 2026): Basic (free, 3-session cap) + Pro Monthly ($9.99/mo) + Pro Annual ($60/yr). 7-day free trial. Stripe Checkout via emergentintegrations. `/api/me/checkout`, `/api/payments/status/{id}`, `/api/webhook/stripe`. Pro unlocks Golden Stack, ambient layers, breathwork, custom freq generator, unlimited saves.
+- **Account dashboard** (Jan 2026): change password, current plan + days left, upgrade flow, billing history, admin price editor.
+- Backend + frontend tested end-to-end (testing agent iterations 1, 2 & 3: 100% pass)
 
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login

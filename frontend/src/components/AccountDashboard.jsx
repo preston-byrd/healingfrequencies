@@ -132,7 +132,7 @@ export default function AccountDashboard({ onBack }) {
       await api.put('/admin/plan-prices', {
         monthly_price: parseFloat(monthly),
         annual_price: parseFloat(annual),
-        trial_days: parseInt(trial),
+        trial_days: parseInt(trial, 10),
       });
       setMsg('Plan prices updated.');
       await load();
