@@ -451,6 +451,29 @@ async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user))
     return {"ok": True}
 
 
+# ---------- Stripe helper ----------
+def _stripe_client(webhook_url: str) -> StripeCheckout:
+    """Create a StripeCheckout instance and normalise the global `stripe.api_base`.
+
+    Why: the emergentintegrations wrapper sets `stripe.api_base` to Emergent's
+    proxy when the key contains 'sk_test_emergent' — but it NEVER resets that
+    global afterwards. Because `stripe.api_base` is a module-level singleton,
+    a single sk_test_emergent call earlier in the process lifetime would route
+    every subsequent live-key request through Emergent's proxy, producing a
+    Stripe Checkout Session URL that loads BLANK in the user's live account
+    (the session was never created on real Stripe).
+
+    We normalise it explicitly on every request so the routing is correct
+    regardless of what previous keys ran through this process.
+    """
+    import stripe as _stripe
+    if "sk_test_emergent" in STRIPE_API_KEY:
+        _stripe.api_base = "https://integrations.emergentagent.com/stripe"
+    else:
+        _stripe.api_base = "https://api.stripe.com"
+    return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+
 @api.post("/me/checkout")
 async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depends(get_current_user)):
     if body.plan not in ("monthly", "annual"):
@@ -465,7 +488,18 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    sc = _stripe_client(webhook_url)
+
+    # Diagnostic log — surfaces which Stripe environment we're actually talking
+    # to. If a sk_live_ key were ever routed to Emergent's proxy by accident,
+    # this single line in /var/log/supervisor/backend.out.log would show it.
+    import stripe as _stripe
+    logger.info(
+        "[checkout] user=%s plan=%s method=%s key_prefix=%s api_base=%s",
+        user.get("email"), body.plan, body.payment_method_preference,
+        (STRIPE_API_KEY[:12] + "…") if STRIPE_API_KEY else "(none)",
+        _stripe.api_base,
+    )
 
     origin = body.origin_url.rstrip("/")
     success_url = f"{origin}/?stripe_session_id={{CHECKOUT_SESSION_ID}}"
@@ -554,7 +588,7 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
 
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    sc = _stripe_client(webhook_url)
     status = await sc.get_checkout_status(session_id)
 
     update = {
@@ -586,7 +620,7 @@ async def stripe_webhook(request: Request):
     sig = request.headers.get("Stripe-Signature", "")
     host_url = str(request.base_url).rstrip("/")
     webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    sc = _stripe_client(webhook_url)
     try:
         resp = await sc.handle_webhook(body, sig)
     except Exception as e:
