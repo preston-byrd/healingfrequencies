@@ -404,7 +404,7 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
     if body.plan not in ("monthly", "annual"):
         raise HTTPException(status_code=400, detail="Invalid plan")
     if not STRIPE_API_KEY:
-        raise HTTPException(status_code=500, detail="Payments not configured")
+        raise HTTPException(status_code=500, detail="Payments not configured — STRIPE_API_KEY is missing in backend .env")
 
     cfg = await _get_plan_config()
     pkg = cfg[body.plan]
@@ -432,7 +432,21 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
         cancel_url=cancel_url,
         metadata=metadata,
     )
-    session = await sc.create_checkout_session(req)
+    try:
+        session = await sc.create_checkout_session(req)
+    except Exception as e:
+        # Surface the real Stripe error so the user can act on it (bad key,
+        # restricted account, currency not supported, etc.) instead of a
+        # silent failure that the frontend reads as "nothing happens".
+        logger.exception("[checkout] Stripe create_checkout_session failed for user=%s plan=%s", user.get("email"), body.plan)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stripe checkout failed: {str(e)}. Verify STRIPE_API_KEY is a valid key from your Stripe Dashboard and that USD card payments are enabled.",
+        )
+
+    if not getattr(session, "url", None):
+        logger.error("[checkout] Stripe returned no URL for user=%s plan=%s session=%r", user.get("email"), body.plan, session)
+        raise HTTPException(status_code=502, detail="Stripe did not return a checkout URL")
 
     # Create pending transaction BEFORE redirect
     await db.payment_transactions.insert_one({

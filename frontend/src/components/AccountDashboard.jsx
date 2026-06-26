@@ -124,10 +124,19 @@ export default function AccountDashboard({ onBack }) {
         plan: planKey,
         origin_url: window.location.origin,
       });
-      window.location.href = data.url;
+      if (data?.url) {
+        window.location.href = data.url;
+      } else {
+        // Should never happen now that backend raises on missing URL — but guard
+        // defensively so the user doesn't see a silent "nothing happens" symptom.
+        setErr('Checkout could not start: no Stripe URL returned. Check the server logs and your STRIPE_API_KEY.');
+        setBusy('');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
     } catch (e) {
       setErr(formatApiError(e));
       setBusy('');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 

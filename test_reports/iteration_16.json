@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 16 — Validated the defensive checkout error-handling refactor (Stripe upgrade flow). Backend: 6/6 NEW tests pass in /app/backend/tests/test_checkout_error_handling.py — (1+2) Happy path with sk_test_emergent returns 200 with `url` starting with https://checkout.stripe.com + non-empty `session_id` for both monthly and annual; (3) Missing auth -> 401; (4) Invalid plan ('lifetime') -> 400; (5) Bad Stripe key (monkeypatched server.STRIPE_API_KEY='sk_live_invalid_key_for_test' via httpx.ASGITransport in-process, no .env edits) -> HTTP 502 with detail starting with 'Stripe checkout failed:'; (6) Empty STRIPE_API_KEY -> HTTP 500 with detail containing 'Payments not configured' + 'STRIPE_API_KEY'. Frontend Playwright: (a) Fresh user registered, opened Account Dashboard, clicked [data-testid=upgrade-monthly-button] -> page actually navigated to https://checkout.stripe.com/c/pay/cs_test_... (confirmed in page.url); (b) Mocked /api/me/checkout to return 502 with the new detail string -> [data-testid=account-err] populated with the FULL Stripe error message ('Stripe checkout failed: Invalid API Key provided. Verify STRIPE_API_KEY is a valid key...'), window.scrollY went from 205 -> 0 (page scrolled to top so error is visible), no silent navigation to undefined; (c) Regression: change-password flow -> 'Password updated.' msg; edit-name flow -> greeting updated to 'Hello, Renamed Tester'; (d) Admin regression: price update saved + restored, admin user search + delete-user worked end-to-end (used to clean up 2 test_stripe* users). Full backend pytest run on subscription + profile: 14/16 pass; the 2 remaining failures (test_checkout_monthly_creates_transaction, test_checkout_annual_creates_transaction) are PRE-EXISTING from iterations 12-15 and unrelated to this iteration.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/me/transactions", "issue": "Pre-existing (iter 12-15): test_subscription.py::test_checkout_{monthly,annual}_creates_transaction fail because /me/transactions hides pending tx per test_billing_history.py contract. Stale tests, orthogonal to this iteration. Consider deleting these two tests — they're already superseded by /app/backend/tests/test_billing_history.py."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_checkout_error_handling.py",
+    "/app/test_reports/pytest/checkout_error_handling.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py L402-449 create_checkout: clean and correct — explicit 500 for missing key with actionable message; try/except wraps ONLY sc.create_checkout_session (narrow scope, doesn't swallow Pydantic 422s or auth 401s); 502 detail surfaces underlying Stripe message verbatim so end-user can self-diagnose (bad key, restricted account, currency unsupported); extra defensive `if not getattr(session, 'url', None)` raises 502 instead of returning {url: null}. ✓",
+    "server.py L416 creates a NEW StripeCheckout instance per request reading the module-level STRIPE_API_KEY — that's correct since admins could rotate keys without restart in future, but be aware: changing STRIPE_API_KEY in /app/backend/.env still requires `sudo supervisorctl restart backend` because the env is loaded once at module-import via load_dotenv(). Not a bug; just operational note.",
+    "AccountDashboard.jsx L120-141 upgrade: properly handles three outcomes — (1) success+url -> redirect; (2) success+missing url -> client-side err+scrollTop (defense-in-depth even though backend now raises 502); (3) any exception -> formatApiError() into err state + scrollTop. The scrollTo({behavior:'smooth'}) is a nice UX touch (the user said they didn't see the small err div). ✓",
+    "Minor (non-blocking): the error string 'Stripe checkout failed:' is long and the red `account-err` div is a single line — on narrow viewports the message wraps but readability is fine. Considered: could add a 'Show details' collapse, but the current full-message visibility is correct for the user's stated symptom ('nothing happens'). Leave as is.",
+    "Test file note: /app/backend/tests/test_subscription.py L114-148 still contain the 2 pre-existing-broken checkout-transaction tests. Main agent should either delete them or fix /me/transactions to include pending tx — but per iter 14-15 context this is intentional and the tests are stale. Not blocking this iteration."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_checkout_error_handling.py (new — 6 tests, 100% pass)"
+  ],
+  "success_rate": {"backend": "100% on new feature (6/6 in test_checkout_error_handling.py). Suite-wide 14/16 (2 pre-existing failures from iter12-15 unrelated).", "frontend": "100% on all review-request scenarios (5/5: happy redirect, mocked-502 surfacing+scroll, change-password, edit-name, admin prices+user search/delete)"},
+  "test_credentials": "Admin: admin@example.com / admin123 (from /app/memory/test_credentials.md). Two test users created and CLEANED UP via admin delete-user button: test_stripe_1782492370@example.com, test_stripe_err_1782492414@example.com. STRIPE_API_KEY in /app/backend/.env left untouched (still sk_test_emergent).",
+  "seed_data_creation": "None permanent. 2 transient test users registered then deleted via the admin UI delete-user-{id} button. Admin plan-prices were temporarily changed to monthly=11.99 annual=75 trial=10 then RESTORED to monthly=9.99 annual=60 trial=7 (verified in screenshot — admin panel shows 9.99 / 60 / 7).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Stripe checkout error-handling refactor is solid end-to-end. Key data-testids on /account: upgrade-monthly-button, upgrade-annual-button, account-err, account-msg, account-greeting, edit-name-button/-input/-form, save-name-button, cancel-name-button, current-password-input, new-password-input, change-password-button, admin-monthly-price-input, admin-annual-price-input, admin-trial-days-input, admin-save-prices-button, admin-user-search-input, admin-user-search-button, admin-user-row-{id}, delete-user-{id}, grant-pro-{id}, revoke-pro-{id}, grant-days-{id}, account-button (on main Dashboard to open account). Stripe happy path is real — preview key sk_test_emergent routes through emergentintegrations -> real api.stripe.com when key does NOT contain 'sk_test_emergent', and through Emergent's proxy when it does (see /root/.venv/.../emergentintegrations/payments/stripe/checkout.py L107-109). The 2 stale checkout-transaction tests in test_subscription.py are pre-existing failures (iter 12-15) — should be removed or the contract fixed. To test the 502 path WITHOUT touching .env, use httpx.ASGITransport + monkeypatch.setattr(server_mod, 'STRIPE_API_KEY', ...) as in test_checkout_error_handling.py, and remember to rebind server_mod.client/db to a fresh AsyncIOMotorClient on a new event loop in each test (motor binds at instantiation)."
+}
