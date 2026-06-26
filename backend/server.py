@@ -680,11 +680,15 @@ async def startup():
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         logger.info(f"Seeded admin: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one(
-            {"email": admin_email},
-            {"$set": {"password_hash": hash_password(admin_password)}},
-        )
+    else:
+        updates = {}
+        if existing.get("role") != "admin":
+            updates["role"] = "admin"
+        if not verify_password(admin_password, existing["password_hash"]):
+            updates["password_hash"] = hash_password(admin_password)
+        if updates:
+            await db.users.update_one({"email": admin_email}, {"$set": updates})
+            logger.info(f"Updated admin fields: {list(updates.keys())}")
 
 
 @app.on_event("shutdown")
