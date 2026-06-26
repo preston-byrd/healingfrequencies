@@ -78,6 +78,11 @@
   - AccountDashboard upgrade card refactored: 2-card plan selector (Monthly/Annual with aria-pressed) + 4-button payment-methods grid below.
   - Testing iteration 20 — 38/38 backend (12 new payment_methods tests + full regression) + 13/13 frontend e2e (plan switch, wallet hide+hint, link modal w/ QR/copy/open/close, annual title, card-redirect). Zero defects.
 
+- **Stripe blank-checkout production bug — root caused and fixed** (Feb 2026): User reported Stripe Checkout loads a blank skeleton page in production with their `sk_live_...` key. RCA: the `emergentintegrations` library mutates the module-level `stripe.api_base` singleton when the key contains `sk_test_emergent` (lib L107-109) but NEVER resets it for non-emergent keys. Because Python module state persists for the entire uvicorn worker lifetime, ANY prior `sk_test_emergent` call (a startup probe, a previous deployment, or a brief `.env` placeholder) leaves `stripe.api_base` stuck pointing at Emergent's proxy. Subsequent `sk_live_` calls then create Checkout Sessions on Emergent's proxy account → returned session URLs reference IDs that don't exist in the user's real Stripe account → Stripe Checkout fetches and fails silently → blank page.
+  - FIX: new helper `_stripe_client(webhook_url)` in `server.py` L455-475 that explicitly normalises `stripe.api_base` BEFORE every `StripeCheckout` instantiation — Emergent's proxy iff key contains `sk_test_emergent`, else `https://api.stripe.com`. All 3 call sites (`POST /me/checkout`, `GET /payments/status/{sid}`, `POST /webhook/stripe`) refactored to use it.
+  - Added diagnostic `logger.info` line in `/me/checkout` printing the resolved `api_base` + `key_prefix` for operator-visibility in `/var/log/supervisor/backend.err.log`.
+  - Testing iteration 21 — 9 new sticky-state guard tests in `test_stripe_routing.py` (4 unit monkeypatch tests proving deterministic api_base recovery + 4 live HTTP regression + 1 log-line assertion) + 38 regression. All 47/47 pass.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference

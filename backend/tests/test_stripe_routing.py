@@ -175,7 +175,6 @@ class TestCheckoutLiveRegression:
 class TestCheckoutDiagnosticLog:
     def test_checkout_emits_api_base_log_line(self):
         token = _register(_fresh_email("cklog"))
-        marker_email_part = "TEST_cklog_"
 
         # Issue a checkout call so the [checkout] log line is produced
         body = {"plan": "monthly", "origin_url": "https://example.test"}
