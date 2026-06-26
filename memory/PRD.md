@@ -58,6 +58,9 @@
 - **Code quality cleanup** (Feb 2026): Memoized `AuthContext` + `SubscriptionContext` provider values with `useMemo` / `useCallback` (prevents unnecessary consumer re-renders). Replaced silent `catch {}` blocks with `console.warn(...)` logging in `Dashboard.jsx`, `AccountDashboard.jsx`, and both contexts. Backend pytest admin credentials are now env-driven (`ADMIN_TEST_EMAIL` / `ADMIN_TEST_PASSWORD` with safe defaults). `audioEngine.js` left intentionally untouched (its noop catches handle iOS unlock + cleanup races).
 - Testing: iteration 14 — 12/12 frontend scenarios pass, 44/47 pytest pass (2 pre-existing stale checkout-tx tests, 1 intentional skip).
 
+## Implemented (Feb 2026 — cont.)
+- **Edit user name** (Feb 2026): Users can now edit their display name from AccountDashboard. New endpoint `PUT /api/me/profile` with Pydantic `ProfileUpdateIn` (min_length=1, max_length=80, whitespace-trim). `AuthContext` exposes `setUserName(name)` so the in-memory user object updates immediately and propagates to the Dashboard sidebar greeting. Inline edit UI with Edit / Save / Cancel and auto-focus on the input. Testing iteration 15: 6/6 backend + 10/10 frontend scenarios pass.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
