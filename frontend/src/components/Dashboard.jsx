@@ -168,18 +168,11 @@ export default function Dashboard({ onOpenAccount }) {
     const wantGolden = !!opts.golden;
     const wantSpecial = !!opts.special;
     if ((wantGolden || wantSpecial) && !isPro) { onOpenAccount(); return; }
-    const playing = audioEngine.playing;
-    const isSame =
-      Math.round(audioEngine.frequency) === Math.round(hz) &&
-      audioEngine.goldenStack === wantGolden;
-    if (playing && isSame) {
-      audioEngine.stop();
-      setRemaining(0);
-      return;
-    }
+    // Per spec: tapping a frequency NEVER stops playback. It either starts (if idle)
+    // or live-retunes (if already playing). Only the explicit Play/Pause button stops audio.
     audioEngine.setFrequency(hz);
     audioEngine.setGoldenStack(wantGolden);
-    if (!playing) {
+    if (!audioEngine.playing) {
       setRemaining(duration * 60);
       audioEngine.start();
     }
@@ -598,10 +591,23 @@ export default function Dashboard({ onOpenAccount }) {
             />
           </div>
 
-          {/* Ambient Mixer */}
-          <div className="glass p-6">
-            <div className="label-tiny mb-4">Ambient Layers</div>
-            <div className="space-y-4">
+          {/* Ambient Mixer — Pro only */}
+          <div className={`glass p-6 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="ambient-section">
+            <div className="flex items-center justify-between mb-4">
+              <div className="label-tiny flex items-center gap-2">
+                Ambient Layers
+                {!isPro && <Lock size={11} className="text-[#C4A67A]" />}
+              </div>
+              {!isPro && (
+                <span
+                  data-testid="ambient-pro-badge"
+                  className="text-[9px] tracking-widest text-[#C4A67A] bg-[#C4A67A]/10 px-2 py-0.5 rounded-full"
+                >
+                  PRO
+                </span>
+              )}
+            </div>
+            <div className={`space-y-4 transition-opacity ${!isPro ? 'opacity-45 pointer-events-none select-none' : ''}`}>
               {AMBIENT.map(({ key, label, Icon }) => {
                 const v = state.ambient[key] || 0;
                 return (
@@ -625,6 +631,22 @@ export default function Dashboard({ onOpenAccount }) {
                 );
               })}
             </div>
+            {!isPro && (
+              <button
+                data-testid="ambient-unlock-cta"
+                onClick={onOpenAccount}
+                className="absolute inset-0 flex items-end justify-center pb-6 px-6 cursor-pointer group"
+              >
+                <div className="glass-soft px-4 py-3 border border-[#C4A67A]/40 hover:border-[#C4A67A] hover:-translate-y-0.5 transition-all text-center w-full max-w-[280px]">
+                  <div className="flex items-center justify-center gap-2 text-[#C4A67A] text-xs font-medium">
+                    <Lock size={12} /> Included in Pro
+                  </div>
+                  <div className="text-[10px] text-[#8A9A92] mt-1">
+                    Layer 8 ambient soundscapes — rain, ocean, forest, wind &amp; more
+                  </div>
+                </div>
+              </button>
+            )}
           </div>
 
           {/* Timer + Breathwork */}

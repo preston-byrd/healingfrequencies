@@ -1,0 +1,31 @@
+{
+  "summary": "Validated (a) Ambient Layers Pro paywall identical to Brainwave & Specials treatment, and (b) the new audio lifecycle behaviour (tapping a frequency never stops, only the play/pause button or the timer auto-stop does). 17/17 assertions PASS on the live preview URL.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dashboard.jsx L595-650 ambient-section: Lock icon next to title (only when !isPro), data-testid='ambient-pro-badge' rendered, inner wrapper has classes 'opacity-45 pointer-events-none select-none' when !isPro, and an absolute-inset overlay button data-testid='ambient-unlock-cta' with 'Included in Pro' copy. Mirrors specials-section treatment exactly — consistent UX.",
+    "Dashboard.jsx L167-179 selectFrequency: tap-same-freq no longer stops (the previous isSame branch was correctly removed). Function now only (1) gates golden/special on Pro, (2) live-retunes via audioEngine.setFrequency, (3) starts engine if idle. Verified: tapping solfeggio-freq-528 twice keeps playing (timer counted 10:00 → 09:55 across two taps).",
+    "audioEngine.js L189-203 setBinaural: topologyChange flag correctly limits stop/restart to crossings of 0 (i.e., adding/removing the right oscillator). Pure offset tweaks (e.g. 10→15) call setTargetAtTime on oscR only — playback uninterrupted (verified, pause icon stayed during 10→15).",
+    "audioEngine.js stop() (L146-165): captures osc/oscR into oscsLocal and nulls instance refs before the 450ms cleanup timeout, preventing the race where a quick restart's oscillator could be stopped by the previous teardown.",
+    "Timer auto-stop path: useEffect at Dashboard.jsx L101-110 calls audioEngine.stop() when remaining hits 1 and sets remaining to 0; verified live — at duration=1 min the timer counted down naturally and stopped at ~65s wall-clock (≈60s engine time + minor JS interval drift), Play icon returned, timer display reset to '01:00'.",
+    "PART 6 (ambient slider does not stop tone): audioEngine.setAmbient never calls stop() on the tone graph; ocean 0→0.5→0 leaves the tone gain-only-modified ambient nodes alone — confirmed pause icon stayed across both transitions.",
+    "PART 5 (special + golden retune): tapping special-freq-7.83 changes current-frequency to 7.8Hz without stop. Tapping golden-preset thereafter switches to 144Hz with goldenStack=true; verified pause icon and timer continued counting through all three retunes."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only request)",
+    "frontend": "100% — 17/17 assertions pass (5 free-paywall + 4 admin-unlocked + 8 audio-lifecycle)"
+  },
+  "test_credentials": "Admin admin@example.com / admin123. Fresh non-pro user registered live this iteration: freetest1782485317344@example.com / password123.",
+  "seed_data_creation": "One ephemeral non-pro test user created via UI register flow (freetest1782485317344@example.com). No cleanup performed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Ambient Layers paywall now matches Brainwave & Specials: Lock + PRO badge + opacity-45/pointer-events-none on sliders + absolute overlay CTA 'Included in Pro' that routes to AccountDashboard. selectFrequency in Dashboard.jsx no longer has an isSame branch — every tap either starts (idle) or live-retunes. Only the play-pause-button stops playback (or the timer reaches 0). audioEngine.setBinaural only rebuilds the graph when topology changes (0↔nonzero); pure offset changes retune oscR live. Verified live on https://frequency-healer-31.preview.emergentagent.com with admin@example.com (Pro) and a fresh registered free user. Timer auto-stop confirmed at ~65s for a 1-minute session; the slight overshoot is just JS setInterval drift in a headless tab and is acceptable.",
+  "rca of the issue": "N/A — feature-validation iteration. Both spec items (ambient paywall parity + uninterrupted audio lifecycle) are correctly implemented and live-verified."
+}

@@ -187,9 +187,18 @@ class AudioEngine {
   }
 
   setBinaural(offset) {
-    const wasPlaying = this.playing;
+    const oldOffset = this.binaural;
     this.binaural = offset;
-    if (wasPlaying) { this.stop(); setTimeout(() => this.start(), 460); }
+    // Only rebuild the graph when the binaural TOPOLOGY changes (i.e., turning the
+    // right-ear oscillator on or off). For pure offset tweaks while already binaural,
+    // just retune the right oscillator live — no stop/start that would interrupt audio.
+    const topologyChange = (oldOffset === 0) !== (offset === 0);
+    if (this.playing && topologyChange) {
+      this.stop();
+      setTimeout(() => this.start(), 460);
+    } else if (this.oscR) {
+      this.oscR.frequency.setTargetAtTime(this.frequency + offset, this.ctx.currentTime, 0.05);
+    }
     this._emit();
   }
 
