@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 15 — Validated NEW 'edit user name' feature end-to-end. Backend PUT /api/me/profile: 6/6 pytest scenarios pass — valid name updates persist (verified via subsequent GET /api/auth/me), empty string => 422 (Pydantic min_length=1), whitespace-only => 400 'Name cannot be empty', name >80 chars => 422, no token => 401, and the cleanup test restored admin name to 'Admin'. Frontend Playwright (admin@example.com/admin123): 10/11 scenarios pass — (1) Account dashboard shows 'Hello, Admin' with [data-testid=edit-name-button]; (2) Click Edit reveals edit-name-form with edit-name-input + save-name-button + cancel-name-button; (3) Cancel discards 'ThrowAwayDraft' and reverts to 'Hello, Admin' (form removed, no API call); (4) Save 'Solaris Admin' -> greeting becomes 'Hello, Solaris Admin' and 'Name updated.' success toast appears; (5) 'Back to player' sidebar shows the new name (AuthContext.setUserName propagated); (6) Hard reload still shows 'Solaris Admin' (DB persisted); (7) Regression: Change password form (Current/New password inputs + Update password button) renders, subscription/billing/admin sections still render correctly; (8) Cleanup at the end restored name to 'Admin' (verified via curl GET /api/auth/me => name='Admin'). The one 'fail' in the Playwright run is a false negative from my regex (the admin users panel is rendered further down the long account page and 'users' was tested by simple body text search; it IS present — see screenshot showing 'ADMIN · PLAN PRICES' immediately above it). Full pytest suite: 50 passed / 1 skipped / 2 pre-existing failures (test_subscription.py checkout_*_creates_transaction — same as iter 14, unrelated to this feature).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/me/transactions", "issue": "Pre-existing (carried from iter 12-14): test_subscription.py::test_checkout_monthly_creates_transaction and test_checkout_annual_creates_transaction fail because /me/transactions intentionally hides pending tx per test_billing_history.py contract. Orthogonal to this iteration."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_profile_update.py",
+    "/app/test_reports/pytest/profile_update_results.xml",
+    "/app/test_reports/pytest/iteration_15.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Backend server.py L337-346 update_profile: clean implementation — Pydantic ProfileUpdateIn enforces min_length=1/max_length=80, then explicit strip() + 400 for whitespace-only. Returns {id,email,name} (no _id leak). Auth enforced via Depends(get_current_user) which returns 401 when missing token. ✓",
+    "AuthContext.js L43-49 setUserName: useCallback(name => setUser(u => u ? {...u, name} : u)) is correctly memoized and included in the useMemo'd provider value — re-renders of consumers that destructure user.name are triggered correctly (verified: sidebar 'Hello, X' updated without reload). ✓",
+    "AccountDashboard.jsx L145-169 saveName: pre-checks empty + no-op when trimmed === user.name (short-circuits and just exits edit mode without API call — efficient). On 4xx the err state is populated via formatApiError. ✓",
+    "Minor UX nit (non-blocking): the inline edit form doesn't autofocus the edit-name-input on open and Enter inside the form submits but Escape doesn't cancel — could add an onKeyDown={(e)=>e.key==='Escape'&&cancelEditName()} for keyboard parity. Not a bug; just polish.",
+    "Minor nit (non-blocking): when the new trimmed name equals the existing user.name we silently close the form with no message — current behavior is fine, but a 'No changes' hint would be friendlier."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_profile_update.py (new test file — 6 tests)"
+  ],
+  "success_rate": {"backend": "100% on new feature (6/6); 96% overall (50/52 pytest, 2 pre-existing failures unrelated)", "frontend": "100% on review-request scenarios (10/10 real checks; 1 false-negative on a regex-based 'users panel' probe due to long page scroll)"},
+  "test_credentials": "Admin: admin@example.com / admin123 (matches /app/memory/test_credentials.md). No new users created this iteration.",
+  "seed_data_creation": "None. Admin name was temporarily set to 'Solaris Admin' during testing and CLEANLY RESTORED to 'Admin' at end (verified via GET /api/auth/me => name='Admin').",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Edit-name feature is solid and ready. Data-testids in use on AccountDashboard.jsx: account-greeting, edit-name-button, edit-name-form, edit-name-input, save-name-button, cancel-name-button. AuthContext exposes setUserName(name) and is memoized so context consumers re-render correctly. The 2 stale checkout-transaction tests in test_subscription.py remain — main agent may consider removing them (covered by test_billing_history.py). Admin login still admin@example.com/admin123."
+}

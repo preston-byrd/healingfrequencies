@@ -15,13 +15,17 @@ function fmtMoney(amount, currency = 'usd') {
 }
 
 export default function AccountDashboard({ onBack }) {
-  const { user } = useAuth();
+  const { user, setUserName } = useAuth();
   const [sub, setSub] = useState(null);
   const [plan, setPlan] = useState(null);
   const [tx, setTx] = useState([]);
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
+
+  // name edit
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
 
   // password
   const [curPw, setCurPw] = useState('');
@@ -138,6 +142,32 @@ export default function AccountDashboard({ onBack }) {
     finally { setBusy(''); }
   };
 
+  const startEditName = () => {
+    setNameDraft(user?.name || '');
+    setEditingName(true);
+    setErr(''); setMsg('');
+  };
+
+  const cancelEditName = () => {
+    setEditingName(false);
+    setNameDraft('');
+  };
+
+  const saveName = async (e) => {
+    e.preventDefault();
+    const trimmed = nameDraft.trim();
+    if (!trimmed) { setErr('Name cannot be empty'); return; }
+    if (trimmed === user?.name) { setEditingName(false); return; }
+    setBusy('name'); setErr(''); setMsg('');
+    try {
+      const { data } = await api.put('/me/profile', { name: trimmed });
+      setUserName(data.name);
+      setMsg('Name updated.');
+      setEditingName(false);
+    } catch (e2) { setErr(formatApiError(e2)); }
+    finally { setBusy(''); }
+  };
+
   const saveAdminPrices = async (e) => {
     e.preventDefault();
     setBusy('admin'); setErr(''); setMsg('');
@@ -234,7 +264,49 @@ export default function AccountDashboard({ onBack }) {
 
         <div className="mb-8">
           <div className="label-tiny mb-2">Account</div>
-          <h1 className="font-display text-4xl font-light text-[#E8E3D9]">Hello, {user.name}</h1>
+          {editingName ? (
+            <form onSubmit={saveName} className="flex items-center gap-3 flex-wrap" data-testid="edit-name-form">
+              <input
+                data-testid="edit-name-input"
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                maxLength={80}
+                placeholder="Your name"
+                className="font-display text-4xl font-light text-[#E8E3D9] bg-transparent border-b border-[#72C2AC]/40 focus:border-[#72C2AC] outline-none min-w-[260px] py-1"
+              />
+              <button
+                data-testid="save-name-button"
+                type="submit"
+                disabled={busy === 'name'}
+                className="px-4 py-1.5 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] text-xs font-medium transition-colors disabled:opacity-50"
+              >
+                {busy === 'name' ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                data-testid="cancel-name-button"
+                type="button"
+                onClick={cancelEditName}
+                className="px-3 py-1.5 rounded-full border border-[#5C9E8C]/30 text-[#8A9A92] hover:text-[#E8E3D9] text-xs transition-colors"
+              >
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <div className="flex items-center gap-3 flex-wrap">
+              <h1 data-testid="account-greeting" className="font-display text-4xl font-light text-[#E8E3D9]">
+                Hello, {user.name}
+              </h1>
+              <button
+                data-testid="edit-name-button"
+                onClick={startEditName}
+                className="text-[11px] tracking-wider text-[#72C2AC] hover:text-[#C4A67A] underline-offset-2 hover:underline transition-colors"
+                title="Edit name"
+              >
+                Edit
+              </button>
+            </div>
+          )}
           <p className="text-sm text-[#8A9A92] mt-1">{user.email}</p>
         </div>
 

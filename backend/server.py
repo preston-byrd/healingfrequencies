@@ -307,6 +307,10 @@ class PasswordChangeIn(BaseModel):
     new_password: str = Field(min_length=6)
 
 
+class ProfileUpdateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 class CheckoutIn(BaseModel):
     plan: str  # "monthly" | "annual"
     origin_url: str
@@ -328,6 +332,18 @@ async def change_password(body: PasswordChangeIn, user: dict = Depends(get_curre
         {"$set": {"password_hash": hash_password(body.new_password)}},
     )
     return {"ok": True}
+
+
+@api.put("/me/profile")
+async def update_profile(body: ProfileUpdateIn, user: dict = Depends(get_current_user)):
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"name": new_name}},
+    )
+    return {"id": user["id"], "email": user["email"], "name": new_name}
 
 
 @api.get("/plan/config")

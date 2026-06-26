@@ -40,9 +40,13 @@ export function AuthProvider({ children }) {
     setUser(false);
   }, []);
 
+  const setUserName = useCallback((name) => {
+    setUser((u) => (u && typeof u === 'object' ? { ...u, name } : u));
+  }, []);
+
   const value = useMemo(
-    () => ({ user, loading, login, register, logout }),
-    [user, loading, login, register, logout],
+    () => ({ user, loading, login, register, logout, setUserName }),
+    [user, loading, login, register, logout, setUserName],
   );
 
   return (
