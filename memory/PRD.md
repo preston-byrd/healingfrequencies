@@ -61,6 +61,8 @@
 ## Implemented (Feb 2026 — cont.)
 - **Edit user name** (Feb 2026): Users can now edit their display name from AccountDashboard. New endpoint `PUT /api/me/profile` with Pydantic `ProfileUpdateIn` (min_length=1, max_length=80, whitespace-trim). `AuthContext` exposes `setUserName(name)` so the in-memory user object updates immediately and propagates to the Dashboard sidebar greeting. Inline edit UI with Edit / Save / Cancel and auto-focus on the input. Testing iteration 15: 6/6 backend + 10/10 frontend scenarios pass.
 
+- **Stripe checkout — surface real errors instead of silent fail** (Feb 2026): When a user replaces `sk_test_emergent` with their own `sk_live_...` or real `sk_test_...` key, the emergentintegrations library correctly routes to `api.stripe.com` (per library L107-109). If Stripe rejects the key (invalid / restricted account / unsupported currency), `/api/me/checkout` now catches the exception, logs the traceback, and returns HTTP 502 with the underlying message (e.g., `"Stripe checkout failed: Invalid API Key provided..."`). Backend also rejects empty `session.url` responses with 502. Frontend `upgrade()` in `AccountDashboard.jsx` guards against `undefined data.url` and scrolls to top on any error so the small `account-err` div is visible. Testing iteration 16: 6/6 backend + 5/5 frontend scenarios pass.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
