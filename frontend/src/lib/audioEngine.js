@@ -125,6 +125,16 @@ class AudioEngine {
 
       if (this.goldenStack) this._spawnPhiHarmonics();
 
+      // Pause→Resume: restore the ambient mix that was active when the user
+      // last hit Stop / paused. Cleared after restore so subsequent stops
+      // re-snapshot a fresh state.
+      if (this._pendingAmbient) {
+        Object.entries(this._pendingAmbient).forEach(([kind, vol]) => {
+          this.setAmbient(kind, vol);
+        });
+        this._pendingAmbient = null;
+      }
+
       this.playing = true;
       this._emit();
     } finally {
@@ -172,22 +182,50 @@ class AudioEngine {
   }
 
   stop() {
-    if (!this.playing) return;
     const ctx = this.ctx;
+    // Snapshot the currently-playing ambient volumes BEFORE we fade them out — a
+    // subsequent start() (i.e., Pause → Play) will restore exactly this mix so
+    // soundscapes resume seamlessly. Cleared by start() after restore, or by
+    // selectSoundscape / stopAllAmbient when the user explicitly resets.
+    if (ctx) {
+      const snap = {};
+      Object.entries(this.ambient).forEach(([k, a]) => {
+        if (a && a.volume > 0.001) snap[k] = a.volume;
+      });
+      this._pendingAmbient = Object.keys(snap).length > 0 ? snap : null;
+
+      // Fade every active ambient layer to 0 smoothly so the volume "dials down"
+      // before playback fully stops — fires whether or not the tone is playing
+      // (e.g., user paused the tone earlier, ambient is still humming).
+      Object.values(this.ambient).forEach((a) => {
+        if (a && a.gain && a.volume > 0.001) {
+          a.gain.gain.cancelScheduledValues(ctx.currentTime);
+          a.gain.gain.setValueAtTime(a.gain.gain.value, ctx.currentTime);
+          a.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
+          a.volume = 0;
+        }
+      });
+    }
+
+    if (!this.playing) {
+      this._emit();
+      return;
+    }
+
     if (this.toneGain) {
       this.toneGain.gain.cancelScheduledValues(ctx.currentTime);
-      this.toneGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
+      this.toneGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
     }
     // Capture the CURRENT oscillators locally and null the instance refs immediately
-    // so that a subsequent start() (within the 450ms cleanup window) doesn't get its
+    // so that a subsequent start() (within the cleanup window) doesn't get its
     // brand-new oscillator clobbered when the cleanup timeout fires.
     const oscsLocal = [this.osc, this.oscR].filter(Boolean);
     this.osc = null;
     this.oscR = null;
-    this._killPhiHarmonics(0.4);
+    this._killPhiHarmonics(0.8);
     setTimeout(() => {
       oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
-    }, 450);
+    }, 850);
     this.playing = false;
     this._emit();
   }
@@ -359,8 +397,17 @@ class AudioEngine {
     a.volume = v;
     const ctx = this.ctx;
     if (v === 0) {
+      // Smooth fade-to-silent instead of instant cutoff — used both for slider
+      // drags to 0 and for soundscape stop. The 0.8s ramp matches the tone fade
+      // in stop() so multi-layer mixes wind down together.
+      const current = a.gain.gain.value || 0;
       a.gain.gain.cancelScheduledValues(ctx.currentTime);
-      a.gain.gain.setValueAtTime(0, ctx.currentTime);
+      if (current > 0.001) {
+        a.gain.gain.setValueAtTime(current, ctx.currentTime);
+        a.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
+      } else {
+        a.gain.gain.setValueAtTime(0, ctx.currentTime);
+      }
     } else {
       a.gain.gain.cancelScheduledValues(ctx.currentTime);
       a.gain.gain.setTargetAtTime(v, ctx.currentTime, 0.2);
@@ -377,6 +424,7 @@ class AudioEngine {
       } catch (e) { /* noop */ }
     });
     this.ambient = {};
+    this._pendingAmbient = null;
     this._emit();
   }
 }

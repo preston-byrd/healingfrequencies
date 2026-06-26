@@ -94,6 +94,10 @@ export default function Dashboard({ onOpenAccount }) {
   const [sessionStart, setSessionStart] = useState(null);
   const [checkedInThisRun, setCheckedInThisRun] = useState(false);
   const [sleepMode, setSleepMode] = useState(false);
+  // Soundscape selection — set when the user taps a curated mix, cleared on
+  // explicit reset (tap-toggle, swap, full stop, sleep mode, timer end).
+  // Persisted through Pause/Resume so the visual indicator survives a pause.
+  const [activeSoundscape, setActiveSoundscape] = useState(null);
   // Track restore lifecycle: restoreStartedRef prevents re-entry of the restore
   // effect (it's set synchronously when restore begins); prefsRestoredRef gates
   // the auto-save effect (set only when restore completes, so auto-save can't
@@ -114,6 +118,11 @@ export default function Dashboard({ onOpenAccount }) {
 
   useEffect(() => audioEngine.on(setState), []);
 
+  // Test-only hook: expose the audioEngine singleton so Playwright/E2E can
+  // introspect engine state (playing, ambient gains, _pendingAmbient) for
+  // soundscape fade verification. Harmless in production.
+  useEffect(() => { try { window.__audioEngine = audioEngine; } catch (e) { /* noop */ } }, []);
+
   // Unlock AudioContext on the very first user gesture anywhere on the dashboard.
   // Essential for iOS Safari which keeps the context suspended until a tap.
   // Listens for the broadest set of "first gesture" events to catch every device.
@@ -128,6 +137,8 @@ export default function Dashboard({ onOpenAccount }) {
   }, []);
 
   // Drift-resistant timer: derive remaining from wall-clock end timestamp instead of
+  // Pre-built timer effect: wall-clock-based to survive background-tab throttling.
+  // Runs once per playback session; the deps capture only state.playing because
   // decrementing — survives background-tab throttling and JS interval jitter.
   useEffect(() => {
     if (!state.playing || remaining <= 0) return;
@@ -135,8 +146,12 @@ export default function Dashboard({ onOpenAccount }) {
     const tick = () => {
       const secsLeft = Math.max(0, Math.round((endAt - Date.now()) / 1000));
       if (secsLeft <= 0) {
+        // Timer expired: graceful stop with no resume snapshot, and clear any
+        // soundscape selection so the next user action starts fresh.
+        audioEngine._pendingAmbient = null;
         audioEngine.stop();
         setRemaining(0);
+        setActiveSoundscape(null);
       } else {
         setRemaining(secsLeft);
       }
@@ -286,13 +301,16 @@ export default function Dashboard({ onOpenAccount }) {
     const sameFreq = Math.abs(audioEngine.frequency - hz) < 0.05;
     const sameMode = wantGolden === !!audioEngine.goldenStack;
     if (audioEngine.playing && sameFreq && sameMode) {
+      audioEngine._pendingAmbient = null;
       audioEngine.stop();
       setRemaining(0);
       setSleepMode(false);
+      setActiveSoundscape(null);
       return;
     }
     audioEngine.setFrequency(hz);
     audioEngine.setGoldenStack(wantGolden);
+    setActiveSoundscape(null); // new manual selection invalidates any active soundscape
     if (!audioEngine.playing) {
       setRemaining(duration * 60);
       audioEngine.start();
@@ -309,6 +327,7 @@ export default function Dashboard({ onOpenAccount }) {
     // If something is playing, stop it cleanly first. audioEngine.stop schedules
     // a fade-out internally, but the new oscillator we'll create with start() will
     // also be brand-new (we always create fresh on each start), so there's no clash.
+    audioEngine._pendingAmbient = null;
     if (audioEngine.playing) audioEngine.stop();
     audioEngine.setGoldenStack(false);
     audioEngine.setWaveform('sine');
@@ -319,6 +338,7 @@ export default function Dashboard({ onOpenAccount }) {
     Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
     audioEngine.setAmbient('brown', 0.45);
     setBreathwork(false);
+    setActiveSoundscape(null);
     setDuration(SLEEP_DURATION_MIN);
     setRemaining(SLEEP_DURATION_MIN * 60);
     setSleepMode(true);
@@ -328,30 +348,63 @@ export default function Dashboard({ onOpenAccount }) {
 
   const stopSleepMode = () => {
     setSleepMode(false);
+    audioEngine._pendingAmbient = null;
     audioEngine.stop();
     setRemaining(0);
     Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
+    setActiveSoundscape(null);
   };
 
   const selectSoundscape = (s) => {
     if (!isPro) { onOpenAccount(); return; }
-    // Apply the curated mix in one beat: fresh start, requested freq, sine, no binaural/golden
-    if (audioEngine.playing) audioEngine.stop();
+    // Tap-to-toggle: if the user taps the currently-active soundscape while it's
+    // playing, stop the session gracefully (engine fades both tone & ambient
+    // to 0 over ~0.8s before stopping oscillators). The activeSoundscape state
+    // is cleared so a subsequent tap on the same card re-starts fresh rather
+    // than resuming a snapshot.
+    if (activeSoundscape === s.key && audioEngine.playing) {
+      audioEngine._pendingAmbient = null; // don't keep a snapshot since this is an explicit stop
+      audioEngine.stop();
+      setActiveSoundscape(null);
+      setRemaining(0);
+      setSleepMode(false);
+      return;
+    }
+
+    // Resume of the SAME soundscape from a paused state — just hit start; the
+    // engine's _pendingAmbient snapshot will restore the original mix.
+    if (activeSoundscape === s.key && !audioEngine.playing) {
+      setRemaining(duration * 60);
+      audioEngine.start();
+      return;
+    }
+
+    // New / different soundscape: configure the engine, apply the mix, start.
+    // setAmbient(k, 0) now smoothly fades any layers not in the new mix; the
+    // new layers ramp up via setTargetAtTime — graceful cross-blend.
+    audioEngine._pendingAmbient = null; // discard any previous snapshot
     audioEngine.setGoldenStack(false);
     audioEngine.setWaveform('sine');
     audioEngine.setBinaural(0);
     audioEngine.setFrequency(s.freq);
-    // Zero every ambient first, then apply the mix — guarantees sample-aligned playback
-    Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
+    Object.keys(audioEngine.ambient || {}).forEach((k) => {
+      if (!(k in s.ambient)) audioEngine.setAmbient(k, 0);
+    });
     Object.entries(s.ambient).forEach(([k, v]) => audioEngine.setAmbient(k, v));
     setBreathwork(false);
     setSleepMode(false);
-    setRemaining(duration * 60);
-    audioEngine.start();
+    setActiveSoundscape(s.key);
+    if (!audioEngine.playing) {
+      setRemaining(duration * 60);
+      audioEngine.start();
+    }
   };
 
   const setAmbient = (key, v) => {
     if (!isPro && v > 0) { onOpenAccount(); return; }
+    // Manual ambient adjustment → the user is customising; the curated mix
+    // is no longer "untouched", so clear the active-soundscape badge.
+    if (activeSoundscape) setActiveSoundscape(null);
     audioEngine.setAmbient(key, v);
   };
 
@@ -627,17 +680,50 @@ export default function Dashboard({ onOpenAccount }) {
             <div className={`grid grid-cols-1 gap-2 transition-opacity ${!isPro ? 'opacity-45 pointer-events-none select-none' : ''}`}>
               {SOUNDSCAPES.map((s) => {
                 const Icon = s.Icon;
+                const isActive = activeSoundscape === s.key;
+                const isActivePlaying = isActive && state.playing;
                 return (
                   <button
                     key={s.key}
                     data-testid={`soundscape-${s.key}`}
+                    data-active={isActive ? 'true' : 'false'}
+                    data-playing={isActivePlaying ? 'true' : 'false'}
+                    aria-pressed={isActive}
                     onClick={() => selectSoundscape(s)}
-                    className="glass-soft p-3 flex items-center gap-3 text-left transition-all duration-300 hover:-translate-y-0.5 hover:border-[#72C2AC]/40"
+                    className={`glass-soft p-3 flex items-center gap-3 text-left transition-all duration-300 hover:-translate-y-0.5 ${
+                      isActive
+                        ? 'border border-[#72C2AC]/70 ring-1 ring-[#72C2AC]/30 bg-[#5C9E8C]/10'
+                        : 'hover:border-[#72C2AC]/40'
+                    }`}
                   >
-                    <Icon size={18} className="text-[#72C2AC] flex-shrink-0" />
+                    <Icon
+                      size={18}
+                      className={`flex-shrink-0 ${isActive ? 'text-[#C4A67A]' : 'text-[#72C2AC]'}`}
+                    />
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm text-[#E8E3D9]">{s.name}</div>
-                      <div className="text-[10px] text-[#8A9A92] truncate">{s.desc}</div>
+                      <div className="text-sm text-[#E8E3D9] flex items-center gap-2 flex-wrap">
+                        <span>{s.name}</span>
+                        {isActivePlaying && (
+                          <span
+                            data-testid={`soundscape-${s.key}-playing-badge`}
+                            className="text-[8px] tracking-widest text-[#72C2AC] bg-[#72C2AC]/15 px-1.5 py-0.5 rounded inline-flex items-center gap-1"
+                          >
+                            <span className="w-1 h-1 rounded-full bg-[#72C2AC] animate-pulse" />
+                            PLAYING
+                          </span>
+                        )}
+                        {isActive && !state.playing && (
+                          <span
+                            data-testid={`soundscape-${s.key}-paused-badge`}
+                            className="text-[8px] tracking-widest text-[#8A9A92] bg-[#8A9A92]/15 px-1.5 py-0.5 rounded"
+                          >
+                            PAUSED
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-[#8A9A92] truncate">
+                        {isActivePlaying ? 'Tap to stop' : (isActive ? 'Tap to resume' : s.desc)}
+                      </div>
                     </div>
                   </button>
                 );
