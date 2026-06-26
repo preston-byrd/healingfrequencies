@@ -279,7 +279,9 @@ async def checkin(body: CheckinIn, user: dict = Depends(get_current_user)):
 
 # --- Subscription / Billing --------------------------------------------------
 def _is_pro(user: dict) -> bool:
-    """User has Pro access if their pro_until is in the future."""
+    """User has Pro access if they are admin OR their pro_until is in the future."""
+    if user.get("role") == "admin":
+        return True
     pu = user.get("pro_until")
     if not pu:
         return False
@@ -343,6 +345,7 @@ async def get_plan_config_public():
 @api.get("/me/subscription")
 async def my_subscription(user: dict = Depends(get_current_user)):
     full = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0}) or {}
+    is_admin = full.get("role") == "admin"
     pro = _is_pro(full)
     pro_until = full.get("pro_until")
     days_left = 0
@@ -352,13 +355,15 @@ async def my_subscription(user: dict = Depends(get_current_user)):
             days_left = max(0, delta.days + (1 if delta.seconds > 0 else 0))
         except Exception:
             pass
+    # Admin always shows as pro (lifetime access)
+    plan = "admin" if is_admin else (full.get("plan") or ("pro" if pro else "basic"))
     return {
-        "plan": full.get("plan") or ("pro" if pro else "basic"),
+        "plan": plan,
         "pro": pro,
         "pro_until": pro_until,
         "days_left": days_left,
         "trial_used": bool(full.get("trial_used")),
-        "is_admin": full.get("role") == "admin",
+        "is_admin": is_admin,
     }
 
 

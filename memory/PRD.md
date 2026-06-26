@@ -43,7 +43,8 @@
 - **PWA** (Jan 2026): manifest, service worker for offline shell, app icons, installable on iOS/Android/desktop.
 - **Subscription & billing** (Jan 2026): Basic (free, 3-session cap) + Pro Monthly ($9.99/mo) + Pro Annual ($60/yr). 7-day free trial. Stripe Checkout via emergentintegrations. `/api/me/checkout`, `/api/payments/status/{id}`, `/api/webhook/stripe`. Pro unlocks Golden Stack, ambient layers, breathwork, custom freq generator, unlimited saves.
 - **Account dashboard** (Jan 2026): change password, current plan + days left, upgrade flow, billing history, admin price editor.
-- Backend + frontend tested end-to-end (testing agent iterations 1, 2 & 3: 100% pass)
+- **Admin user management** (Jan 2026): `/api/admin/users` list + search by email; `/api/admin/users/{id}/grant-pro` (extend from existing pro_until if active); `/api/admin/users/{id}/revoke-pro`. UI in AccountDashboard with per-row days input, Grant/Extend & Revoke buttons.
+- Backend + frontend tested end-to-end (testing agent iterations 1, 2, 3 & 4: 100% pass)
 
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login

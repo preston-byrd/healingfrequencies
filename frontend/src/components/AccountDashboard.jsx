@@ -41,10 +41,7 @@ export default function AccountDashboard({ onBack }) {
     try {
       const { data } = await api.get('/admin/users', { params: q ? { q } : {} });
       setUsers(data);
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error('loadUsers failed', e?.response?.status, e?.message);
-    }
+    } catch (e) { /* ignore non-admin */ }
   };
 
   const load = async () => {
