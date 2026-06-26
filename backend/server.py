@@ -541,6 +541,83 @@ async def admin_update_prices(body: PlanPricesIn, user: dict = Depends(get_curre
     return await _get_plan_config()
 
 
+class GrantProIn(BaseModel):
+    days: int = Field(365, ge=1, le=3650)
+
+
+@api.get("/admin/users")
+async def admin_list_users(
+    q: str = "",
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    query = {}
+    if q:
+        query = {"email": {"$regex": q.strip(), "$options": "i"}}
+    cursor = db.users.find(query, {"_id": 0, "password_hash": 0}).sort("created_at", -1).limit(200)
+    items = await cursor.to_list(200)
+    now = datetime.now(timezone.utc)
+    for u in items:
+        pu = u.get("pro_until")
+        is_pro = False
+        days_left = 0
+        if pu:
+            try:
+                until = datetime.fromisoformat(pu)
+                is_pro = until > now
+                if is_pro:
+                    days_left = max(0, (until - now).days + 1)
+            except Exception:
+                pass
+        u["pro"] = is_pro
+        u["days_left"] = days_left
+        u["plan"] = u.get("plan") or ("pro" if is_pro else "basic")
+    return items
+
+
+@api.post("/admin/users/{user_id}/grant-pro")
+async def admin_grant_pro(user_id: str, body: GrantProIn, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    now = datetime.now(timezone.utc)
+    current_until = None
+    pu = target.get("pro_until")
+    if pu:
+        try:
+            current_until = datetime.fromisoformat(pu)
+        except Exception:
+            current_until = None
+    base = current_until if (current_until and current_until > now) else now
+    new_until = base + timedelta(days=int(body.days))
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"plan": "pro", "pro_until": new_until.isoformat()}},
+    )
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "email": target["email"],
+        "plan": "pro",
+        "pro_until": new_until.isoformat(),
+        "days_added": int(body.days),
+    }
+
+
+@api.post("/admin/users/{user_id}/revoke-pro")
+async def admin_revoke_pro(user_id: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"plan": "basic", "pro_until": None}},
+    )
+    return {"ok": True, "user_id": user_id, "plan": "basic"}
+
+
 # --- App setup ----------------------------------------------------------------
 @api.get("/")
 async def root():

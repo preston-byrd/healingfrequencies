@@ -1,0 +1,43 @@
+{
+  "summary": "Admin user management (grant/revoke Pro) fully tested end-to-end. Backend pytest 13/13 PASS — auth gating (401 no-token / 403 non-admin), list with required fields, case-insensitive email substring search via ?q=, grant-pro returns ok+pro_until and reflected in list with days_left≈30, grant-pro on nonexistent user → 404, grant-pro is additive (second 30-day grant extends pro_until by ~30 days, not reset to now), revoke-pro sets plan='basic' pro_until=null pro=false days_left=0, regression on /api/admin/plan-prices and /api/me/subscription. Frontend: admin user (admin@example.com) sees admin-users-card with 34 initial rows; search filters list by email; default grant-days=365; setting 30 + clicking Grant Pro flips row to 'PRO · 30d' badge with button label changing to 'Extend' and Revoke button appearing; clicking Revoke flips row to BASIC and Revoke button is hidden. A freshly-registered non-admin user (TEST_ui_<tag>@example.com) does NOT see admin-users-card. Cookies+Bearer auth both verified working in this run.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/admin/users", "issue": "The 'role' field is only present on users that have it set in Mongo (admin only). Spec lists 'role' in the response shape but normal users have no 'role' key. Frontend currently handles this fine (checks u.role==='admin'), but worth defaulting to 'user' or null for schema consistency."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_users.py",
+    "/app/test_reports/pytest/admin_users_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Backend /api/admin/users does not paginate — hard-capped at 200 via .limit(200). For deployments with >200 users, admin would lose visibility of older accounts. Add skip/limit + total count, or instruct frontend to always pass a query.",
+    "Backend admin endpoints accept user_id in path with no UUID validation; bogus paths still hit Mongo. find_one returns None → 404, so safe, but Pydantic Path(..., regex=UUID4) would be cleaner and avoid an unnecessary DB roundtrip.",
+    "Backend GET /api/admin/users response includes 'role' for admin users but omits it for non-admins. Recommend defaulting to 'user' (or null) for schema consistency so clients don't have to handle the missing-key case.",
+    "Backend grant-pro/revoke-pro return slightly different shapes (grant returns pro_until/days_added; revoke just returns plan). Consider returning the full updated user record (or {plan, pro_until, days_left, pro}) for both so the frontend could optimistically update without an extra GET. (Currently the frontend triggers a full re-fetch via loadUsers(userQuery), which is fine but heavier.)",
+    "Frontend AccountDashboard.jsx is now 511 lines — getting close to the recommended 700-line split threshold. The admin-prices-card + admin-users-card could move into a dedicated AdminPanel.jsx.",
+    "Frontend admin-users-card has no pagination controls or 'load more' UI — coupled with the backend 200-row cap this silently hides users beyond 200. Add a hint like 'Showing first 200 — refine search to see more.'",
+    "Frontend grantDays state is keyed by user.id and never cleared after a successful grant — minor memory leak across long admin sessions, harmless in practice.",
+    "Frontend revokePro confirm dialog is missing — single click immediately revokes Pro. Consider a confirm() or modal to prevent fat-finger revokes for paying users.",
+    "Frontend admin-user-search-input does not debounce; user has to click Search. Acceptable for now but a 300ms debounced auto-search would feel more polished."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_users.py"
+  ],
+  "success_rate": {
+    "backend": "100% (13/13)",
+    "frontend": "100% of admin user-management flows tested (list, search, default days, grant→PRO+days_left badge+Extend label, revoke→BASIC+hide-revoke, non-admin hidden)"
+  },
+  "test_credentials": "admin@example.com / admin123 (admin). Fresh non-admin: TEST_ui_<uuid>@example.com / abcdef registered per test for clean state.",
+  "seed_data_creation": "Each test registers a fresh TEST_ user via /api/auth/register. Grant/revoke tests mutate that user only; admin user is never modified by grant/revoke.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New backend test file /app/backend/tests/test_admin_users.py covers all 10 admin-user scenarios. Use BASE_URL env or default fallback to preview URL. Frontend test approach: use page.evaluate() with in-page fetch for any pre-test API setup (urllib from the Python side returns 403 due to egress proxy). Default grantDays in UI is '365' (stringified). The cookie-based auth works fine alongside localStorage Bearer in this preview env — both flows tested and authenticated correctly. The 2x '401 Failed to load resource' console errors at app boot are pre-login /api/auth/me probes (expected, not a bug).",
+  "rca of the issue": "No bugs. All 16 features in the review request work end-to-end."
+}

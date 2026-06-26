@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt } from 'lucide-react';
+import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -32,6 +32,21 @@ export default function AccountDashboard({ onBack }) {
   const [annual, setAnnual] = useState('');
   const [trial, setTrial] = useState('');
 
+  // admin users panel
+  const [users, setUsers] = useState([]);
+  const [userQuery, setUserQuery] = useState('');
+  const [grantDays, setGrantDays] = useState({});
+
+  const loadUsers = async (q = '') => {
+    try {
+      const { data } = await api.get('/admin/users', { params: q ? { q } : {} });
+      setUsers(data);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('loadUsers failed', e?.response?.status, e?.message);
+    }
+  };
+
   const load = async () => {
     try {
       const [s, p, t] = await Promise.all([
@@ -45,6 +60,7 @@ export default function AccountDashboard({ onBack }) {
         setMonthly(String(ap.data.monthly.price));
         setAnnual(String(ap.data.annual.price));
         setTrial(String(ap.data.trial_days));
+        await loadUsers();
       }
     } catch (e) { setErr(formatApiError(e)); }
   };
@@ -138,6 +154,32 @@ export default function AccountDashboard({ onBack }) {
       await load();
     } catch (e2) { setErr(formatApiError(e2)); }
     finally { setBusy(''); }
+  };
+
+  const grantPro = async (uid) => {
+    const days = parseInt(grantDays[uid] || '365', 10);
+    setBusy(`grant-${uid}`); setErr(''); setMsg('');
+    try {
+      const { data } = await api.post(`/admin/users/${uid}/grant-pro`, { days });
+      setMsg(`Granted Pro to ${data.email} (+${data.days_added} days).`);
+      await loadUsers(userQuery);
+    } catch (e2) { setErr(formatApiError(e2)); }
+    finally { setBusy(''); }
+  };
+
+  const revokePro = async (uid, email) => {
+    setBusy(`revoke-${uid}`); setErr(''); setMsg('');
+    try {
+      await api.post(`/admin/users/${uid}/revoke-pro`);
+      setMsg(`Revoked Pro from ${email}.`);
+      await loadUsers(userQuery);
+    } catch (e2) { setErr(formatApiError(e2)); }
+    finally { setBusy(''); }
+  };
+
+  const searchUsers = (e) => {
+    e.preventDefault();
+    loadUsers(userQuery);
   };
 
   if (!sub || !plan) {
@@ -373,6 +415,93 @@ export default function AccountDashboard({ onBack }) {
                 </button>
               </div>
             </form>
+          </div>
+        )}
+
+        {/* Admin: user management */}
+        {sub.is_admin && (
+          <div className="glass p-6 border border-[#C4A67A]/30 mt-6" data-testid="admin-users-card">
+            <div className="flex items-center gap-2 mb-4">
+              <Users size={14} className="text-[#C4A67A]" />
+              <div className="label-tiny text-[#C4A67A]">Admin · User Management</div>
+            </div>
+
+            <form onSubmit={searchUsers} className="flex items-center gap-2 mb-4 max-w-md">
+              <Search size={14} className="text-[#8A9A92]" />
+              <input
+                data-testid="admin-user-search-input"
+                value={userQuery}
+                onChange={(e) => setUserQuery(e.target.value)}
+                placeholder="Search by email…"
+                className="flex-1 bg-transparent border-b border-[rgba(196,166,122,0.3)] focus:border-[#C4A67A] outline-none py-2 text-[#E8E3D9] text-sm"
+              />
+              <button
+                data-testid="admin-user-search-button"
+                type="submit"
+                className="text-[11px] text-[#C4A67A] hover:text-[#72C2AC] px-3 py-1 transition-colors"
+              >
+                Search
+              </button>
+            </form>
+
+            {users.length === 0 ? (
+              <div className="text-xs text-[#8A9A92]">No users found.</div>
+            ) : (
+              <div className="space-y-2 max-h-[420px] overflow-y-auto custom-scrollbar pr-1">
+                {users.map((u) => (
+                  <div
+                    key={u.id}
+                    data-testid={`admin-user-row-${u.id}`}
+                    className="glass-soft p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm text-[#E8E3D9] truncate">{u.name || '—'}</div>
+                      <div className="text-[11px] text-[#8A9A92] truncate">{u.email}</div>
+                      <div className="text-[10px] mt-1 flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded-full ${
+                          u.pro ? 'bg-[#C4A67A]/20 text-[#C4A67A]' : 'bg-[#1A332A]/60 text-[#8A9A92]'
+                        }`}>
+                          {u.pro ? `PRO · ${u.days_left}d` : 'BASIC'}
+                        </span>
+                        {u.role === 'admin' && (
+                          <span className="px-1.5 py-0.5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC]">ADMIN</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <input
+                        data-testid={`grant-days-${u.id}`}
+                        type="number" min="1" max="3650"
+                        value={grantDays[u.id] ?? '365'}
+                        onChange={(e) => setGrantDays({ ...grantDays, [u.id]: e.target.value })}
+                        className="w-16 bg-transparent border-b border-[rgba(196,166,122,0.3)] focus:border-[#C4A67A] outline-none py-1 text-[#E8E3D9] text-xs font-mono text-center"
+                        title="Days to add"
+                      />
+                      <span className="text-[10px] text-[#8A9A92]">days</span>
+                      <button
+                        data-testid={`grant-pro-${u.id}`}
+                        onClick={() => grantPro(u.id)}
+                        disabled={busy === `grant-${u.id}`}
+                        className="px-3 py-1.5 rounded-full bg-[#C4A67A]/20 hover:bg-[#C4A67A]/40 border border-[#C4A67A]/40 text-[#C4A67A] text-[11px] transition-colors disabled:opacity-50"
+                      >
+                        {busy === `grant-${u.id}` ? '…' : (u.pro ? 'Extend' : 'Grant Pro')}
+                      </button>
+                      {u.pro && (
+                        <button
+                          data-testid={`revoke-pro-${u.id}`}
+                          onClick={() => revokePro(u.id, u.email)}
+                          disabled={busy === `revoke-${u.id}`}
+                          className="px-3 py-1.5 rounded-full border border-[#D96C6C]/40 text-[#D96C6C] text-[11px] hover:bg-[#D96C6C]/10 transition-colors disabled:opacity-50"
+                        >
+                          {busy === `revoke-${u.id}` ? '…' : 'Revoke'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
