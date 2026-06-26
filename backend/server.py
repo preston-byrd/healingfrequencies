@@ -422,10 +422,21 @@ async def get_my_prefs(user: dict = Depends(get_current_user)):
 @api.put("/me/prefs")
 async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user)):
     """Persist the user's last-used dashboard config (frequency, ambient mix, duration, etc.).
-    Merges with existing prefs — frontend can send partial updates."""
+    Merges with existing prefs — frontend can send partial updates.
+
+    Defense-in-depth: silently ignores writes to Pro-only fields from non-Pro users
+    so a stale UI state can't clobber a user's saved Pro config after a downgrade.
+    """
     payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     if not payload:
         return {"ok": True}
+    # Strip Pro-only fields when the user isn't Pro.
+    full = await db.users.find_one({"id": user["id"]})
+    if not _is_pro(full):
+        for k in ("golden_stack", "breathwork", "binaural", "ambient"):
+            payload.pop(k, None)
+        if not payload:
+            return {"ok": True}
     # Merge with existing prefs (nested ambient dict gets replaced wholesale if sent).
     update_doc = {f"prefs.{k}": v for k, v in payload.items()}
     update_doc["prefs.updated_at"] = datetime.now(timezone.utc).isoformat()

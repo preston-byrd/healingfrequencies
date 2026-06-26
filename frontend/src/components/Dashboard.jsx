@@ -244,19 +244,27 @@ export default function Dashboard({ onOpenAccount }) {
     if (!prefsRestoredRef.current) return;
     if (prefsSaveTimerRef.current) clearTimeout(prefsSaveTimerRef.current);
     prefsSaveTimerRef.current = setTimeout(() => {
-      api.put('/me/prefs', {
+      // Always-allowed (non-Pro) fields.
+      const payload = {
         frequency: state.frequency,
         duration_minutes: duration,
         waveform: state.waveform,
-        binaural: state.binaural,
         tone_volume: state.toneVolume,
-        golden_stack: !!state.goldenStack,
-        breathwork: !!breathwork,
-        ambient: state.ambient && { ...state.ambient },
-      }).catch((e) => console.warn('[Dashboard] prefs save failed', e));
+      };
+      // Pro-only fields: only include in the PUT when the user is Pro. If they
+      // aren't, the backend partial-merge (PUT /me/prefs uses model_dump
+      // exclude_none + dotted-path $set) preserves whatever the user had saved
+      // when they WERE Pro — so prefs survive a downgrade or trial-expiry round-trip.
+      if (isPro) {
+        payload.binaural = state.binaural;
+        payload.golden_stack = !!state.goldenStack;
+        payload.breathwork = !!breathwork;
+        payload.ambient = state.ambient && { ...state.ambient };
+      }
+      api.put('/me/prefs', payload).catch((e) => console.warn('[Dashboard] prefs save failed', e));
     }, 1200);
     return () => { if (prefsSaveTimerRef.current) clearTimeout(prefsSaveTimerRef.current); };
-  }, [state.frequency, state.waveform, state.binaural, state.toneVolume, state.goldenStack, state.ambient, duration, breathwork]);
+  }, [state.frequency, state.waveform, state.binaural, state.toneVolume, state.goldenStack, state.ambient, duration, breathwork, isPro]);
 
   const togglePlay = () => {
     if (!audioEngine.playing) {

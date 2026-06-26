@@ -1,0 +1,36 @@
+{
+  "summary": "Iter 19 — Pro-gated prefs restore-after-upgrade bug is FIXED. The two-layer fix (frontend auto-save omits Pro-only fields when isPro=false, backend PUT /me/prefs strips Pro-only fields from non-Pro users) works end-to-end. Backend regression PASS 24/24 (15 prefs incl. new defense-in-depth test + 8 subscription + 1 payments_status). Frontend e2e PASS: (1) Registered TEST_progate_495901 via UI. (2) PUT non-Pro {freq:528,duration:15,tone:0.5} as non-Pro. (3) Logout+login: UI restored freq=528, duration=15, tone=0.5; GET /me/prefs after ~4s debounce shows ONLY {duration_minutes, frequency, tone_volume, updated_at, waveform} — no Pro-only leakage (golden_stack/binaural/breathwork/ambient absent). (4) POST /me/trial succeeded. (5) GET /me/prefs post-trial still tone_volume=0.5 (NOT clobbered to default 0.35). (6) PUT Pro fields {golden_stack:true, ambient.rain:0.6, binaural:6, breathwork:true} as Pro — persisted. (7) Logout+login as Pro. (8) UI screenshot confirms ALL Pro knobs restored: 'Golden Stack φ On', Binaural 6 Hz, Rain 60%, 'Breathwork On'. GET /me/prefs returns golden_stack:true, binaural:6, breathwork:true, ambient.rain:0.6. Cleanup: deleted 56 orphan TEST_ users (this run + prior).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_prefs.py",
+    "/app/backend/tests/test_subscription.py",
+    "/app/test_reports/pytest/iteration_19.xml",
+    "/app/test_reports/iter19_post_upgrade_restore.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dashboard.jsx L243-267 (AUTO-SAVE): Fix is correct — builds always-allowed payload first, then conditionally Object.assign's Pro-only fields when isPro=true. Effect deps include isPro so it re-runs immediately when the user upgrades mid-session (verified by step 5 — tone_volume not clobbered after trial). Good two-layer defense.",
+    "server.py L422-444 (PUT /me/prefs): Defense-in-depth strip is correct. Uses model_dump(exclude_none=True), strips golden_stack/breathwork/binaural/ambient for non-Pro, returns {ok:true} idempotently when payload is empty post-strip. Verified by new test test_non_pro_pro_fields_stripped_then_kept_after_trial.",
+    "Test gap closed: added test_non_pro_pro_fields_stripped_then_kept_after_trial to /app/backend/tests/test_prefs.py to regression-guard the backend defense layer. Also updated test_put_full_payload_then_get_roundtrip and test_partial_put_merges to POST /me/trial before PUTting Pro-only fields (previously they relied on the now-removed assumption that non-Pro users could write Pro fields).",
+    "Minor (non-blocking): GET /me/prefs for a Pro user with ambient {rain:0.6} returns the full denormalized ambient object {rain:0.6, ocean:0, forest:0, wind:0, crickets:0, bowls:0, brown:0, white:0}. This is benign (UI overlays correctly) but the backend appears to normalize/expand ambient keys somewhere. Not a bug, just FYI.",
+    "ThankYou modal: code path /app/frontend/src/components/AccountDashboard.jsx L91 (payment_status==='paid' → showThankYou) and L630 (<ThankYouCelebration>) unchanged from iter 17 (already verified there with page.route mock). No regression risk."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_prefs.py (updated 2 existing tests to start trial first; added test_non_pro_pro_fields_stripped_then_kept_after_trial)"
+  ],
+  "success_rate": {
+    "backend": "100% (24/24: 15 prefs + 8 subscription + 1 payments status — includes new defense-in-depth test)",
+    "frontend": "100% (full Pro-gated restore-after-upgrade e2e flow passed end-to-end; UI screenshot confirms all 4 Pro knobs restored correctly)"
+  },
+  "test_credentials": "Admin: admin@example.com / admin123. Fresh TEST_progate_495901@example.com (deleted post-test).",
+  "seed_data_creation": "None permanent. Created and deleted TEST_progate_495901 user. Also cleaned 55 pre-existing TEST_ orphans from prior iterations.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The Pro-gated restore-after-upgrade bug that has been chased across iters 17/18 is fully resolved as of iter 19. Both defense layers (frontend Dashboard.jsx auto-save conditional payload + backend server.py PUT /me/prefs strip) are in place and verified end-to-end. Backend regression suite now 24/24 (added 1 new test). If touching /api/me/prefs or Dashboard.jsx auto-save in the future, re-run /app/backend/tests/test_prefs.py to catch regressions. The auto-save effect deps array MUST include `isPro` — removing it would re-introduce the iter-17 stale-closure bug.",
+  "rca of the issue": "Iter 17 fixed the stale-isPro-closure in the RESTORE effect. Iter 18 found the AUTO-SAVE effect still clobbered Pro fields because it always PUT the full React state (with default false/{}/0/false for Pro-only knobs when non-Pro). Iter 19 verifies the iter-19 fix: (frontend) Dashboard.jsx L248-263 now builds the PUT payload conditionally — non-Pro fields always; Pro fields only when isPro=true. The effect's deps array includes `isPro` so it re-runs when the user upgrades. (backend) server.py L433-439 strips golden_stack/breathwork/binaural/ambient from a non-Pro user's PUT body before merging, returning {ok:true} idempotently. Verified by direct GET after non-Pro logout/login: response contains ONLY {duration_minutes, frequency, tone_volume, updated_at, waveform} — no Pro-only field leakage. After trial upgrade and Pro PUT, all four Pro fields persist through a fresh logout/login and surface correctly on the dashboard UI (Golden Stack On, Binaural 6 Hz, Rain 60%, Breathwork On)."
+}

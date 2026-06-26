@@ -37,6 +37,9 @@ class TestPrefs:
 
     def test_put_full_payload_then_get_roundtrip(self):
         _, t = _register()
+        # Start trial so Pro-only fields are accepted (defense-in-depth strips them otherwise).
+        rt = requests.post(f"{API}/me/trial", headers=_hdr(t))
+        assert rt.status_code == 200, rt.text
         payload = {
             "frequency": 528,
             "duration_minutes": 15,
@@ -60,6 +63,9 @@ class TestPrefs:
 
     def test_partial_put_merges(self):
         _, t = _register()
+        # Start trial so ambient (Pro-only) is accepted.
+        rt = requests.post(f"{API}/me/trial", headers=_hdr(t))
+        assert rt.status_code == 200, rt.text
         # initial
         full = {
             "frequency": 432, "duration_minutes": 20, "waveform": "sine",
@@ -76,6 +82,48 @@ class TestPrefs:
         assert data["waveform"] == "sine"
         assert data["ambient"] == {"rain": 0.7}
         assert data["tone_volume"] == 0.3
+
+    def test_non_pro_pro_fields_stripped_then_kept_after_trial(self):
+        """Defense-in-depth: PUT Pro-only fields as non-Pro -> not saved.
+        After /me/trial, same PUT succeeds and fields appear in GET."""
+        _, t = _register()
+        pro_payload = {
+            "frequency": 528,
+            "duration_minutes": 15,
+            "tone_volume": 0.5,
+            "golden_stack": True,
+            "binaural": 6,
+            "breathwork": True,
+            "ambient": {"rain": 0.6},
+        }
+        r = requests.put(f"{API}/me/prefs", headers=_hdr(t), json=pro_payload)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True}  # idempotent regardless
+
+        data = requests.get(f"{API}/me/prefs", headers=_hdr(t)).json()
+        # Non-Pro fields persisted
+        assert data.get("frequency") == 528
+        assert data.get("duration_minutes") == 15
+        assert data.get("tone_volume") == 0.5
+        # Pro-only fields STRIPPED
+        assert "golden_stack" not in data, f"golden_stack leaked: {data}"
+        assert "binaural" not in data, f"binaural leaked: {data}"
+        assert "breathwork" not in data, f"breathwork leaked: {data}"
+        assert "ambient" not in data, f"ambient leaked: {data}"
+
+        # Now upgrade via trial
+        rt = requests.post(f"{API}/me/trial", headers=_hdr(t))
+        assert rt.status_code == 200, rt.text
+
+        # Same Pro payload should now persist all fields
+        r2 = requests.put(f"{API}/me/prefs", headers=_hdr(t), json=pro_payload)
+        assert r2.status_code == 200
+        data2 = requests.get(f"{API}/me/prefs", headers=_hdr(t)).json()
+        assert data2.get("golden_stack") is True
+        assert data2.get("binaural") == 6
+        assert data2.get("breathwork") is True
+        assert data2.get("ambient") == {"rain": 0.6}
+        assert data2.get("tone_volume") == 0.5
 
     @pytest.mark.parametrize("payload", [
         {"frequency": 0.05},
