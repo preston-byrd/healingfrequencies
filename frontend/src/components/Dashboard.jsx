@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -21,6 +21,19 @@ const SOLFEGGIO = [
   { hz: 963, name: 'Unity', desc: 'Pure being' },
 ];
 
+const SPECIALS = [
+  { hz: 2,    name: 'Delta',     desc: 'Deep sleep' },
+  { hz: 6,    name: 'Theta',     desc: 'Meditation' },
+  { hz: 7.83, name: 'Schumann',  desc: 'Earth pulse' },
+  { hz: 10,   name: 'Alpha',     desc: 'Relaxation' },
+  { hz: 40,   name: 'Gamma',     desc: 'Focus' },
+  { hz: 111,  name: '111 Hz',    desc: 'Cellular' },
+  { hz: 222,  name: '222 Hz',    desc: 'Alignment' },
+  { hz: 369,  name: 'Tesla',     desc: '3·6·9 key' },
+  { hz: 444,  name: 'Angel',     desc: 'Higher self' },
+  { hz: 1111, name: '1111 Hz',   desc: 'Manifestation' },
+];
+
 const WAVEFORMS = ['sine', 'triangle', 'square', 'sawtooth'];
 const PHI = 1.6180339887;
 const GOLDEN_BASE = 144; // Fibonacci number; 144 × φ ≈ 233 (Fib); × φ² ≈ 377 (Fib). Creates a pure golden chord.
@@ -29,6 +42,11 @@ const AMBIENT = [
   { key: 'rain', label: 'Rain', Icon: Droplet },
   { key: 'ocean', label: 'Ocean', Icon: Waves },
   { key: 'forest', label: 'Forest', Icon: Trees },
+  { key: 'wind', label: 'Wind', Icon: Wind },
+  { key: 'crickets', label: 'Crickets', Icon: Bug },
+  { key: 'bowls', label: 'Singing Bowls', Icon: Music },
+  { key: 'brown', label: 'Brown Noise', Icon: CloudRain },
+  { key: 'white', label: 'White Noise', Icon: Sparkles },
 ];
 
 function formatTime(secs) {
@@ -285,6 +303,32 @@ export default function Dashboard({ onOpenAccount }) {
             </button>
           </div>
 
+          {/* Brainwave & Specials */}
+          <div className="glass p-5">
+            <div className="label-tiny mb-3">Brainwave &amp; Specials</div>
+            <div className="grid grid-cols-2 gap-2">
+              {SPECIALS.map((p) => {
+                const active = Math.abs(state.frequency - p.hz) < 0.05 && !state.goldenStack;
+                return (
+                  <button
+                    key={p.hz}
+                    data-testid={`special-freq-${p.hz}`}
+                    onClick={() => selectFrequency(p.hz)}
+                    className={`glass-soft p-3 text-left transition-all duration-300 hover:-translate-y-0.5 ${
+                      active ? 'border-[#72C2AC]/60 bg-[#1A332A]/60' : ''
+                    }`}
+                  >
+                    <div className={`font-mono text-sm ${active ? 'text-[#72C2AC]' : 'text-[#E8E3D9]'}`}>
+                      {p.hz}<span className="text-[10px] ml-1 text-[#8A9A92]">Hz</span>
+                    </div>
+                    <div className="text-[11px] text-[#E8E3D9]/80 mt-0.5">{p.name}</div>
+                    <div className="text-[10px] text-[#8A9A92]">{p.desc}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           <StreakPanel refreshKey={streakBump} />
 
           <div className="glass p-5">
@@ -358,12 +402,12 @@ export default function Dashboard({ onOpenAccount }) {
             </label>
             <input
               data-testid="custom-freq-slider"
-              type="range" min="20" max="1200" step="0.5"
+              type="range" min="1" max="1200" step="0.1"
               value={state.frequency}
               onChange={onCustomFreqChange}
               disabled={!isPro}
               className="slider disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ '--v': `${((state.frequency - 20) / 1180) * 100}%` }}
+              style={{ '--v': `${((state.frequency - 1) / 1199) * 100}%` }}
             />
             {!isPro && (
               <button

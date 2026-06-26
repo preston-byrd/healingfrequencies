@@ -1,0 +1,40 @@
+{
+  "summary": "Tested admin user deletion (cascade), 10 brainwave/special preset buttons, 8 ambient layers, admin label/CTA hiding, and ocean@0 bugfix architecture. Backend: 8/8 tests passed (+1 skipped for double-admin which was validated separately via direct Mongo elevation -> got 400 'Cannot delete another admin' as expected). All 6 required DELETE /api/admin/users/{id} scenarios verified: 200 cascade-deletes user+sessions+streaks+payment_transactions; 400 self-delete; 400 another-admin; 404 nonexistent; 403 non-admin; 401 unauth. Frontend: admin login OK, 10 SPECIALS buttons present with correct data-testids (special-freq-{2,6,7.83,10,40,111,222,369,444,1111}), clicking 7.83 updates current-frequency to '7.8Hz'; all 8 ambient sliders present with data-testid='ambient-{key}-slider' and labels respond to slider changes; AccountDashboard shows 'Admin' label, upgrade-monthly/upgrade-annual/start-trial CTAs are absent; admin-users-card lists users with trash button data-testid='delete-user-{id}' per non-admin row, clicking it auto-accepts confirm and the row disappears; admin's own row (admin@example.com) does NOT render a delete button. Regression: /api/sessions 402 gating for non-pro confirmed; /api/admin/users + /api/admin/plan-prices still work.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_delete_users.py",
+    "/app/test_reports/pytest/admin_delete_users_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "audioEngine.js _buildAmbient: GREAT refactor. The LFO is correctly routed via inner modGain (modGain.gain is the modulation target, NOT userGain.gain). userGain is the final stage with setValueAtTime(0, now) for hard mute at 0%. This correctly fixes the 'ocean still plays at 0%' bug. Verified by reading the code; headless browser cannot expose the runtime audioEngine instance for direct gain inspection.",
+    "audioEngine.setAmbient(kind, 0) now uses cancelScheduledValues + setValueAtTime(0) — instant hard mute (no glide). Good. However, since the noise source (BufferSource) continues to play forever in the background even at 0% userGain, memory keeps occupied for unused layers. Consider stopping/disposing the layer entirely when slider returns to 0 (after a guard delay to avoid pop/click on quick re-enable) for a cleaner architecture.",
+    "audioEngine: ambient layers are built lazily on first slider movement but never garbage-collected unless stopAllAmbient() is called (and that's not wired to any UI). Over a long session of toggling layers in/out of 0, all 8 layers remain in memory. Minor concern.",
+    "Dashboard.jsx is now 575 lines with SPECIALS + SOLFEGGIO + AMBIENT constants — getting close to the 700-line threshold. Consider extracting presets into a /lib/presets.js module.",
+    "AccountDashboard.jsx: delete-user button uses window.confirm() (verified working). For a more polished UX, consider replacing with a shadcn AlertDialog for consistency with the rest of the design language.",
+    "Backend DELETE /api/admin/users/{id}: cascade is not transactional. If sessions delete succeeds but streaks/payment_transactions delete fails (Mongo down mid-call), you'd end up with orphaned rows. For Mongo single-node this is fine, but document the limitation.",
+    "Backend DELETE /api/admin/users/{id}: the deleted user's JWT remains valid until expiry (7 days). Since get_current_user re-checks db.users.find_one, the next request 401s — verified in test. Good defensive design.",
+    "Frontend Dashboard 'Brainwave & Specials' card: 1111 Hz button could be hard to read with text-mono text-sm shrinking; consider responsive font sizing. Minor."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_delete_users.py"
+  ],
+  "success_rate": {
+    "backend": "100% (8/8 passed, 1 skipped for in-test reason but covered out-of-band)",
+    "frontend": "100% of new features tested (10 specials, 8 ambient layers, admin delete row, admin label, admin row excluded from delete)"
+  },
+  "test_credentials": "admin@example.com / admin123 (admin). Fresh non-admin: TEST_<uuid>@example.com / abcdef registered per test.",
+  "seed_data_creation": "Per-test TEST_ prefixed users registered via /api/auth/register; cleaned up by the admin-delete endpoint under test or via the regression test's cleanup at end.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test suite for delete: /app/backend/tests/test_admin_delete_users.py (8 passed, 1 skipped). The 'delete another admin' case was validated outside pytest by directly setting role='admin' on a TEST_ user in Mongo, then calling DELETE — got 400 'Cannot delete another admin'. Frontend test: AuthScreen uses data-testid auth-email-input/auth-password-input/auth-submit-button (NOT login-*). AccountDashboard's 'delete-user-{id}' Trash2 button uses window.confirm — set page.on('dialog', ...) to auto-accept. Admin row is rendered with 'Grant Pro' / 'Revoke' but the delete button is conditionally omitted for users where role==='admin'. Ocean-at-0% architectural fix is verified by code reading (modGain layer + setValueAtTime(0) hard mute); cannot be runtime-asserted in headless browser since the audioEngine singleton isn't exposed on window.",
+  "rca of the issue": "No bugs found. All 13 review items pass end-to-end. The original ocean-at-0% bug was caused by the LFO oscillator being connected directly to userGain.gain (an AudioParam), which means the LFO's signal sums with the slider-set value — so even when the slider set userGain.gain to 0, the LFO continued to write ±0.45 swings onto that param. The fix introduces a per-layer 'modGain' node sitting BEFORE userGain in the audio graph. The LFO now modulates modGain.gain (a separate AudioParam), and userGain.gain is the final, user-controlled multiplier with no LFO touching it. setValueAtTime(0) on userGain.gain at slider=0 is now a true hard mute. Confirmed via code inspection at /app/frontend/src/lib/audioEngine.js lines 219-296."
+}

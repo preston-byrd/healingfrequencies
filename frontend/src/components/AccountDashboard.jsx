@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search } from 'lucide-react';
+import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search, Trash2 } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -169,6 +169,17 @@ export default function AccountDashboard({ onBack }) {
     try {
       await api.post(`/admin/users/${uid}/revoke-pro`);
       setMsg(`Revoked Pro from ${email}.`);
+      await loadUsers(userQuery);
+    } catch (e2) { setErr(formatApiError(e2)); }
+    finally { setBusy(''); }
+  };
+
+  const deleteUser = async (uid, email) => {
+    if (!window.confirm(`Delete user ${email}? This permanently removes their account, sessions, streak and billing history. This cannot be undone.`)) return;
+    setBusy(`del-${uid}`); setErr(''); setMsg('');
+    try {
+      await api.delete(`/admin/users/${uid}`);
+      setMsg(`Deleted ${email}.`);
       await loadUsers(userQuery);
     } catch (e2) { setErr(formatApiError(e2)); }
     finally { setBusy(''); }
@@ -492,6 +503,17 @@ export default function AccountDashboard({ onBack }) {
                           className="px-3 py-1.5 rounded-full border border-[#D96C6C]/40 text-[#D96C6C] text-[11px] hover:bg-[#D96C6C]/10 transition-colors disabled:opacity-50"
                         >
                           {busy === `revoke-${u.id}` ? '…' : 'Revoke'}
+                        </button>
+                      )}
+                      {u.role !== 'admin' && (
+                        <button
+                          data-testid={`delete-user-${u.id}`}
+                          onClick={() => deleteUser(u.id, u.email)}
+                          disabled={busy === `del-${u.id}`}
+                          title="Delete user permanently"
+                          className="p-1.5 rounded-full text-[#8A9A92] hover:text-[#D96C6C] hover:bg-[#D96C6C]/10 transition-colors disabled:opacity-50"
+                        >
+                          <Trash2 size={14} />
                         </button>
                       )}
                     </div>

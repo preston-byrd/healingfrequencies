@@ -623,6 +623,24 @@ async def admin_revoke_pro(user_id: str, user: dict = Depends(get_current_user))
     return {"ok": True, "user_id": user_id, "plan": "basic"}
 
 
+@api.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    if user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account")
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") == "admin":
+        raise HTTPException(status_code=400, detail="Cannot delete another admin")
+    # Cascade delete all data scoped to this user
+    await db.users.delete_one({"id": user_id})
+    await db.sessions.delete_many({"user_id": user_id})
+    await db.streaks.delete_many({"user_id": user_id})
+    await db.payment_transactions.delete_many({"user_id": user_id})
+    return {"ok": True, "user_id": user_id, "email": target["email"], "deleted": True}
+
+
 # --- App setup ----------------------------------------------------------------
 @api.get("/")
 async def root():

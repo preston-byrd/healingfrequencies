@@ -215,46 +215,93 @@ class AudioEngine {
     const ctx = this.ctx;
     const src = this._makeNoise();
     const filter = ctx.createBiquadFilter();
-    const gain = ctx.createGain();
-    gain.gain.value = 0;
+    // User-controlled gain — always the FINAL stage. When set to 0, output is truly 0.
+    const userGain = ctx.createGain();
+    userGain.gain.value = 0;
+    // Modulation gain — only used by ocean for wave swells; chained BEFORE userGain
+    // so the LFO never touches the user gain (fixes the "0% still plays" bug).
+    let modGain = null;
+    let lfo = null;
 
     if (kind === 'rain') {
-      filter.type = 'highpass';
-      filter.frequency.value = 1200;
-      filter.Q.value = 0.5;
+      filter.type = 'highpass'; filter.frequency.value = 1400; filter.Q.value = 0.5;
+      src.connect(filter).connect(userGain);
     } else if (kind === 'ocean') {
-      filter.type = 'lowpass';
-      filter.frequency.value = 600;
-      filter.Q.value = 0.8;
-      // slow LFO for waves
-      const lfo = ctx.createOscillator();
-      lfo.frequency.value = 0.12;
-      const lfoGain = ctx.createGain();
-      lfoGain.gain.value = 0.6;
-      lfo.connect(lfoGain).connect(gain.gain);
+      filter.type = 'lowpass'; filter.frequency.value = 600; filter.Q.value = 0.8;
+      modGain = ctx.createGain(); modGain.gain.value = 0.55; // center of wave swell
+      lfo = ctx.createOscillator(); lfo.frequency.value = 0.12;
+      const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.45;
+      lfo.connect(lfoAmp).connect(modGain.gain);
       lfo.start();
+      src.connect(filter).connect(modGain).connect(userGain);
     } else if (kind === 'forest') {
-      filter.type = 'bandpass';
-      filter.frequency.value = 2200;
-      filter.Q.value = 0.7;
+      filter.type = 'bandpass'; filter.frequency.value = 2200; filter.Q.value = 0.7;
+      src.connect(filter).connect(userGain);
+    } else if (kind === 'white') {
+      // Full-spectrum noise — no filter
+      src.connect(userGain);
+    } else if (kind === 'brown') {
+      filter.type = 'lowpass'; filter.frequency.value = 220; filter.Q.value = 0.7;
+      src.connect(filter).connect(userGain);
+    } else if (kind === 'wind') {
+      filter.type = 'bandpass'; filter.frequency.value = 900; filter.Q.value = 1.4;
+      modGain = ctx.createGain(); modGain.gain.value = 0.6;
+      lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
+      const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.4;
+      lfo.connect(lfoAmp).connect(modGain.gain);
+      lfo.start();
+      src.connect(filter).connect(modGain).connect(userGain);
+    } else if (kind === 'crickets') {
+      filter.type = 'bandpass'; filter.frequency.value = 4800; filter.Q.value = 6;
+      modGain = ctx.createGain(); modGain.gain.value = 0.5;
+      lfo = ctx.createOscillator(); lfo.frequency.value = 7; // chirp-rate
+      const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.45;
+      lfo.connect(lfoAmp).connect(modGain.gain);
+      lfo.start();
+      src.connect(filter).connect(modGain).connect(userGain);
+    } else if (kind === 'bowls') {
+      // Singing-bowl-ish: low resonant band
+      filter.type = 'bandpass'; filter.frequency.value = 380; filter.Q.value = 8;
+      modGain = ctx.createGain(); modGain.gain.value = 0.7;
+      lfo = ctx.createOscillator(); lfo.frequency.value = 0.05;
+      const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.3;
+      lfo.connect(lfoAmp).connect(modGain.gain);
+      lfo.start();
+      src.connect(filter).connect(modGain).connect(userGain);
+    } else {
+      src.connect(filter).connect(userGain);
     }
-    src.connect(filter).connect(gain).connect(this.master);
+
+    userGain.connect(this.master);
     src.start();
-    return { src, filter, gain, volume: 0 };
+    return { src, filter, gain: userGain, modGain, lfo, volume: 0 };
   }
 
   setAmbient(kind, volume) {
     this._ensureCtx();
     if (!this.ambient[kind]) this.ambient[kind] = this._buildAmbient(kind);
     const a = this.ambient[kind];
-    a.volume = volume;
-    a.gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.2);
+    const v = Math.max(0, Math.min(1, Number(volume) || 0));
+    a.volume = v;
+    const ctx = this.ctx;
+    if (v === 0) {
+      // Hard mute: cancel any scheduled values + set both gain ramp target and current value to 0
+      a.gain.gain.cancelScheduledValues(ctx.currentTime);
+      a.gain.gain.setValueAtTime(0, ctx.currentTime);
+    } else {
+      a.gain.gain.cancelScheduledValues(ctx.currentTime);
+      a.gain.gain.setTargetAtTime(v, ctx.currentTime, 0.2);
+    }
     this._emit();
   }
 
   stopAllAmbient() {
     Object.values(this.ambient).forEach((a) => {
-      try { a.gain.gain.value = 0; a.src.stop(); a.src.disconnect(); } catch (e) { /* noop */ }
+      try {
+        if (this.ctx) a.gain.gain.setValueAtTime(0, this.ctx.currentTime);
+        if (a.lfo) { try { a.lfo.stop(); a.lfo.disconnect(); } catch (e) { /* noop */ } }
+        a.src.stop(); a.src.disconnect();
+      } catch (e) { /* noop */ }
     });
     this.ambient = {};
     this._emit();
