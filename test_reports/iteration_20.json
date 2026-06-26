@@ -1,0 +1,32 @@
+{
+  "summary": "Iter 20 — Payment-methods refactor (Apple Pay / Google Pay / Card / Payment Link) tested end-to-end. Backend: new payment_method_preference Pydantic field on /api/me/checkout works for all 4 valid values (card, apple_pay, google_pay, link), defaults to 'card' when omitted, returns 422 on invalid values (bitcoin/paypal/APPLE_PAY/empty/wire/venmo), Stripe Checkout URL returned in all happy cases, invalid plan still 400, unauth still 401/403 — 12 new tests + 26 regression tests = 38/38 PASS. Frontend e2e: Registered fresh user via API+injected token, opened Account via [data-testid=account-button], verified plan-selector with [data-testid=plan-monthly-card]+[data-testid=plan-annual-card] (aria-pressed default monthly), switch to annual works, Apple Pay/Google Pay buttons correctly HIDDEN in Chromium AND [data-testid=wallet-unavailable-hint] shown (both acceptance states true), [data-testid=pay-link-button] opens [data-testid=payment-link-modal] with QR/input/copy/open/close all rendered, URL value is https://checkout.stripe.com/..., clipboard.readText() == URL after copy click, target=_blank on the open anchor, title='Your Pro Monthly payment link' on monthly and 'Your Pro Annual payment link' after switching to annual, close button dismisses modal, [data-testid=pay-card-button] redirects to checkout.stripe.com — 13/13 frontend assertions PASS. Cleanup: test user deleted via admin DELETE.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_payment_methods.py",
+    "/app/test_reports/pytest/payment_methods.xml",
+    "/app/test_reports/pytest/iteration_20.xml",
+    "/app/test_reports/pytest/iteration_20_regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py L327-336 CheckoutIn — Pydantic pattern '^(card|apple_pay|google_pay|link)$' with default='card' is correct and tight; case-sensitive, no leading/trailing space allowed (verified by 422 on 'APPLE_PAY' and ''). Metadata block L474-480 correctly forwards body.payment_method_preference (or 'card' fallback) into Stripe metadata for analytics.",
+    "PaymentLinkModal.jsx — clean implementation; QR uses qrcode.react QRCodeSVG with M error correction, outside-click close wired via target===currentTarget comparison, copy uses navigator.clipboard.writeText with a tasteful fallback to .select() if denied. Confirmed clipboard works in headless Chromium when permissions granted.",
+    "usePaymentMethodSupport.js — correctly returns ready=true even when both flags are false, so the wallet-unavailable-hint can render. In headless Chromium ApplePaySession is undefined and PaymentRequest.canMakePayment() returns false → AP/GP buttons correctly hidden and hint shown.",
+    "AccountDashboard.jsx upgrade() L143-171 — switches behavior on method: 'link' shows the modal, all other methods redirect to Stripe Checkout URL via window.location.href. busy key uses `${selectedPlan}-${method}` to avoid cross-plan state leaks. Good.",
+    "No FAILING assertions found. App is production-ready for the payment-method UX refactor."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_payment_methods.py (NEW — 12 tests covering all 4 payment methods + invalid value + auth)"
+  ],
+  "success_rate": {
+    "backend": "100% (38/38: 12 new payment_methods + 11 subscription + 15 prefs; +36/36 admin/billing/streak regression)",
+    "frontend": "100% (13/13 e2e assertions including plan selector, switch, wallet hidden+hint, link modal, QR, copy-to-clipboard, close, annual title, card-redirect-to-Stripe)"
+  },
+  "test_credentials": "Admin: admin@example.com / admin123. Fresh TEST_pmui5_* user created+deleted per run.",
+  "seed_data_creation": "None permanent. Created and deleted TEST_pmui*_* and TEST_pm_* test users via admin DELETE.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Payment-method UX is verified end-to-end as of iter 20. The OLD testids upgrade-monthly-button/upgrade-annual-button DO NOT exist anymore — current testids are: plan-monthly-card, plan-annual-card (selector buttons with aria-pressed); pay-card-button, pay-link-button (always visible); pay-apple-pay-button, pay-google-pay-button (conditional on device); wallet-unavailable-hint (shown when ready && !applePay && !googlePay); and the modal: payment-link-modal, payment-link-qr, payment-link-input, payment-link-copy, payment-link-open (target=_blank), payment-link-close. To enter the Account screen from the player, click [data-testid=account-button] (NOT a /account direct URL — SPA route requires the click). New backend regression file: /app/backend/tests/test_payment_methods.py. Headless Chromium reliably hides AP/GP buttons and shows the wallet-unavailable-hint — this is the expected Playwright state.",
+  "rca of the issue": "N/A — no defects found. The implementation cleanly: (1) re-uses one Stripe Checkout Session for all 4 methods (architecturally correct since Stripe Checkout URLs are sharable across devices and auto-render Apple Pay/Google Pay when supported); (2) records the user-chosen method as metadata for analytics without altering the Stripe call; (3) gracefully hides wallet buttons in unsupported environments and surfaces a clear hint instead of broken UI."
+}

@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search, Trash2 } from 'lucide-react';
+import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search, Trash2, CreditCard, Link2, Apple } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { ThankYouCelebration } from '@/components/ThankYouCelebration';
+import { PaymentLinkModal } from '@/components/PaymentLinkModal';
+import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -34,6 +36,11 @@ export default function AccountDashboard({ onBack }) {
 
   // post-payment celebration
   const [celebratingPlan, setCelebratingPlan] = useState(null);
+
+  // upgrade UI state
+  const [selectedPlan, setSelectedPlan] = useState('monthly');     // 'monthly' | 'annual'
+  const [paymentLinkUrl, setPaymentLinkUrl] = useState(null);      // shown in PaymentLinkModal
+  const paymentSupport = usePaymentMethodSupport();
 
   // admin price form
   const [monthly, setMonthly] = useState('');
@@ -125,21 +132,38 @@ export default function AccountDashboard({ onBack }) {
     finally { setBusy(''); }
   };
 
-  const upgrade = async (planKey) => {
-    setBusy(planKey); setErr(''); setMsg('');
+  /**
+   * Start a checkout for the currently-selected plan.
+   * @param {'card'|'apple_pay'|'google_pay'|'link'} method — informs both the
+   *   metadata sent to Stripe (for analytics) and HOW we present the resulting
+   *   URL: 'card' / 'apple_pay' / 'google_pay' redirect this device to Stripe
+   *   Checkout (which auto-renders the AP/GP buttons when supported); 'link'
+   *   shows a QR + copy UI so the user can pay on another device.
+   */
+  const upgrade = async (method = 'card') => {
+    const busyKey = `${selectedPlan}-${method}`;
+    setBusy(busyKey); setErr(''); setMsg('');
     try {
       const { data } = await api.post('/me/checkout', {
-        plan: planKey,
+        plan: selectedPlan,
         origin_url: window.location.origin,
+        payment_method_preference: method,
       });
-      if (data?.url) {
-        window.location.href = data.url;
-      } else {
-        // Should never happen now that backend raises on missing URL — but guard
-        // defensively so the user doesn't see a silent "nothing happens" symptom.
+      if (!data?.url) {
         setErr('Checkout could not start: no Stripe URL returned. Check the server logs and your STRIPE_API_KEY.');
         setBusy('');
         window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+      if (method === 'link') {
+        setPaymentLinkUrl(data.url);
+        setBusy('');
+      } else {
+        // Apple Pay, Google Pay and Card all redirect to the same Stripe Checkout
+        // URL. Stripe Checkout auto-renders Apple Pay / Google Pay buttons inside
+        // its hosted page when the browser supports them — graceful degradation
+        // to card form when it doesn't.
+        window.location.href = data.url;
       }
     } catch (e) {
       setErr(formatApiError(e));
@@ -354,50 +378,112 @@ export default function AccountDashboard({ onBack }) {
           </div>
 
           {!sub.pro && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-              <button
-                data-testid="upgrade-monthly-button"
-                onClick={() => upgrade('monthly')}
-                disabled={!!busy}
-                className="glass-soft p-4 text-left hover:-translate-y-0.5 transition-all border border-[#72C2AC]/20 hover:border-[#72C2AC]/60 disabled:opacity-50"
-              >
-                <div className="label-tiny text-[#72C2AC]">Monthly</div>
-                <div className="font-mono text-2xl text-[#E8E3D9] mt-1">
-                  {fmtMoney(plan.monthly.price, plan.currency)}
-                  <span className="text-xs text-[#8A9A92] ml-1">/ month</span>
-                </div>
-                <div className="text-[11px] text-[#8A9A92] mt-2">
-                  {busy === 'monthly' ? 'Redirecting…' : 'Cancel anytime'}
-                </div>
-              </button>
-              <button
-                data-testid="upgrade-annual-button"
-                onClick={() => upgrade('annual')}
-                disabled={!!busy}
-                className="glass-soft p-4 text-left hover:-translate-y-0.5 transition-all border border-[#C4A67A]/30 hover:border-[#C4A67A]/60 disabled:opacity-50 relative"
-              >
-                <div className="absolute top-3 right-3 text-[9px] tracking-widest text-[#C4A67A] bg-[#C4A67A]/10 px-2 py-1 rounded-full">
-                  BEST VALUE
-                </div>
-                <div className="label-tiny text-[#C4A67A]">Annual</div>
-                <div className="font-mono text-2xl text-[#E8E3D9] mt-1">
-                  {fmtMoney(plan.annual.price, plan.currency)}
-                  <span className="text-xs text-[#8A9A92] ml-1">/ year</span>
-                </div>
-                <div className="text-[11px] text-[#8A9A92] mt-2">
-                  {busy === 'annual' ? 'Redirecting…' : `Save vs ${fmtMoney(plan.monthly.price * 12, plan.currency)}`}
-                </div>
-              </button>
+            <div className="mt-5">
+              {/* Plan selector */}
+              <div data-testid="plan-selector" className="grid grid-cols-2 gap-3 mb-5">
+                {['monthly', 'annual'].map((key) => {
+                  const price = plan[key].price;
+                  const active = selectedPlan === key;
+                  const isAnnual = key === 'annual';
+                  return (
+                    <button
+                      key={key}
+                      data-testid={`plan-${key}-card`}
+                      onClick={() => setSelectedPlan(key)}
+                      aria-pressed={active}
+                      className={`relative glass-soft p-4 text-left transition-all border ${
+                        active
+                          ? (isAnnual ? 'border-[#C4A67A]/80 ring-1 ring-[#C4A67A]/40' : 'border-[#72C2AC]/80 ring-1 ring-[#72C2AC]/40')
+                          : (isAnnual ? 'border-[#C4A67A]/20 hover:border-[#C4A67A]/40' : 'border-[#72C2AC]/15 hover:border-[#72C2AC]/40')
+                      }`}
+                    >
+                      {isAnnual && (
+                        <div className="absolute top-3 right-3 text-[9px] tracking-widest text-[#C4A67A] bg-[#C4A67A]/10 px-2 py-1 rounded-full">
+                          BEST VALUE
+                        </div>
+                      )}
+                      <div className={`label-tiny ${isAnnual ? 'text-[#C4A67A]' : 'text-[#72C2AC]'}`}>{isAnnual ? 'Annual' : 'Monthly'}</div>
+                      <div className="font-mono text-2xl text-[#E8E3D9] mt-1">
+                        {fmtMoney(price, plan.currency)}
+                        <span className="text-xs text-[#8A9A92] ml-1">/ {isAnnual ? 'year' : 'month'}</span>
+                      </div>
+                      <div className="text-[11px] text-[#8A9A92] mt-2">
+                        {isAnnual ? `Save vs ${fmtMoney(plan.monthly.price * 12, plan.currency)}` : 'Cancel anytime'}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Payment method buttons */}
+              <div data-testid="payment-methods" className="space-y-2">
+                <div className="label-tiny mb-2 text-[#8A9A92]">Choose a payment method</div>
+
+                {/* Apple Pay — only when device/browser supports it */}
+                {paymentSupport.applePay && (
+                  <button
+                    data-testid="pay-apple-pay-button"
+                    onClick={() => upgrade('apple_pay')}
+                    disabled={!!busy}
+                    className="w-full flex items-center justify-center gap-2 py-3 rounded-full bg-[#E8E3D9] hover:bg-white text-[#08120F] font-medium text-sm transition-colors disabled:opacity-50"
+                  >
+                    <Apple size={16} />
+                    <span>Pay with Apple Pay</span>
+                  </button>
+                )}
+
+                {/* Google Pay — only when device/browser supports it */}
+                {paymentSupport.googlePay && (
+                  <button
+                    data-testid="pay-google-pay-button"
+                    onClick={() => upgrade('google_pay')}
+                    disabled={!!busy}
+                    className="w-full flex items-center justify-center gap-2 py-3 rounded-full bg-[#0A1A16] hover:bg-[#0F2620] border border-[#5C9E8C]/40 text-[#E8E3D9] font-medium text-sm transition-colors disabled:opacity-50"
+                  >
+                    <span className="font-mono tracking-wider text-[#72C2AC]">G</span>
+                    <span>Pay with Google Pay</span>
+                  </button>
+                )}
+
+                {/* Card / Stripe Checkout — always available */}
+                <button
+                  data-testid="pay-card-button"
+                  onClick={() => upgrade('card')}
+                  disabled={!!busy}
+                  className="w-full flex items-center justify-center gap-2 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium text-sm transition-colors disabled:opacity-50"
+                >
+                  {busy === `${selectedPlan}-card` ? <Loader2 size={14} className="animate-spin" /> : <CreditCard size={14} />}
+                  <span>{busy === `${selectedPlan}-card` ? 'Redirecting…' : 'Pay with Card (Stripe Checkout)'}</span>
+                </button>
+
+                {/* Payment Link — always available, cross-device */}
+                <button
+                  data-testid="pay-link-button"
+                  onClick={() => upgrade('link')}
+                  disabled={!!busy}
+                  className="w-full flex items-center justify-center gap-2 py-3 rounded-full bg-transparent hover:bg-[#5C9E8C]/10 border border-[#5C9E8C]/40 text-[#72C2AC] font-medium text-sm transition-colors disabled:opacity-50"
+                >
+                  {busy === `${selectedPlan}-link` ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                  <span>{busy === `${selectedPlan}-link` ? 'Generating link…' : 'Get a payment link (pay on any device)'}</span>
+                </button>
+
+                {/* Capability hint — only when the device CAN do wallets but we hide them */}
+                {paymentSupport.ready && !paymentSupport.applePay && !paymentSupport.googlePay && (
+                  <p data-testid="wallet-unavailable-hint" className="text-[10px] text-[#8A9A92] mt-1 leading-snug">
+                    Apple Pay and Google Pay aren&apos;t available on this device or browser. They appear automatically on supported devices.
+                  </p>
+                )}
+              </div>
 
               {!sub.trial_used && (
                 <button
                   data-testid="start-trial-button"
                   onClick={startTrial}
                   disabled={!!busy}
-                  className="md:col-span-2 py-3 rounded-full border border-[#72C2AC]/40 text-[#72C2AC] hover:bg-[#5C9E8C]/15 transition-colors disabled:opacity-50"
+                  className="w-full mt-4 py-3 rounded-full border border-[#72C2AC]/30 text-[#72C2AC] hover:bg-[#5C9E8C]/15 transition-colors disabled:opacity-50 text-sm"
                 >
                   {busy === 'trial' ? <Loader2 size={14} className="inline animate-spin mr-2" /> : null}
-                  Start {plan.trial_days}-day free trial — no card required
+                  Or start a {plan.trial_days}-day free trial — no card required
                 </button>
               )}
             </div>
@@ -633,6 +719,14 @@ export default function AccountDashboard({ onBack }) {
             setCelebratingPlan(null);
             onBack();
           }}
+        />
+      )}
+
+      {paymentLinkUrl && (
+        <PaymentLinkModal
+          url={paymentLinkUrl}
+          planLabel={selectedPlan === 'annual' ? 'Pro Annual' : 'Pro Monthly'}
+          onClose={() => setPaymentLinkUrl(null)}
         />
       )}
     </div>

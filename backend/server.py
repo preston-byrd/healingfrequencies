@@ -327,6 +327,13 @@ class ProfileUpdateIn(BaseModel):
 class CheckoutIn(BaseModel):
     plan: str  # "monthly" | "annual"
     origin_url: str
+    # How the user wants to pay — recorded in metadata for analytics. All values
+    # produce the same Stripe Checkout Session; the frontend chooses how to
+    # present the resulting URL (redirect vs QR/copy).
+    payment_method_preference: Optional[str] = Field(
+        default="card",
+        pattern=r"^(card|apple_pay|google_pay|link)$",
+    )
 
 
 class PlanPricesIn(BaseModel):
@@ -469,6 +476,7 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
         "email": user["email"],
         "plan": body.plan,
         "days": str(pkg["days"]),
+        "payment_method_preference": body.payment_method_preference or "card",
     }
     req = CheckoutSessionRequest(
         amount=amount,
