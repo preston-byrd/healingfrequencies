@@ -1,0 +1,53 @@
+{
+  "summary": "Tested Sleep Mode one-tap preset feature end-to-end via Playwright + code review. All FUNCTIONAL audio-side outcomes (4Hz freq, 30:00 timer, brown ambient at 0.45, other ambients reset to 0, playback starts, lock icon for non-Pro, navigation to Account on locked click) work. However, a critical React state race condition causes the `sleepMode` flag to flip back to false immediately after `startSleepMode()`, which breaks the highlighted-border visual, the description-text swap to 'Drifting · fades at 60s', the toggle-to-stop on 2nd click, the 60s fade-out useEffect, AND the auto-clear on timer-reaching-0.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Dashboard.jsx - Sleep Mode card",
+        "issue": "Active-state visual never appears. The card's className when sleep mode is supposedly active comes back as 'mt-2 w-full glass-soft p-3 flex items-center gap-3 transition-all duration-300 hover:-translate-y-0.5 ' (no `border-[#72C2AC]/60 bg-[#0E1F18]/80`), and the description text stays '4 Hz · brown noise · 30 min fade' instead of changing to 'Drifting · fades at 60s'. Root cause: the auto-clear useEffect at Dashboard.jsx:104-107 [`if (!state.playing && sleepMode) setSleepMode(false);`] fires synchronously the moment `setSleepMode(true)` is called inside `startSleepMode()` (Dashboard.jsx:189) because `state.playing` is still false at that point — `audioEngine.start()` is only scheduled 100ms later via setTimeout (Dashboard.jsx:191). React commits the sleepMode→true update, runs the effect, sees !playing && sleepMode and immediately flips sleepMode back to false before the timer ever fires.",
+        "selector": "[data-testid=\"sleep-mode-preset\"]",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "Sleep Mode 60-second fade-to-silence",
+        "issue": "Because sleepMode is silently false during the entire session (see bug above), the fade-out useEffect at Dashboard.jsx:98-102 condition `sleepMode && state.playing && remaining === SLEEP_FADE_SECONDS` will NEVER evaluate true, so audioEngine.fadeOutAll(60) is never invoked. The audio engine API itself (lib/audioEngine.js:187-199) is correctly implemented (linearRampToValueAtTime on toneGain + every ambient gain), but it is never reached from the UI in this flow.",
+        "affected_selectors": ["[data-testid=\"sleep-mode-preset\"]", "[data-testid=\"timer-display\"]"]
+      },
+      {
+        "flow": "Second click should stop / exit sleep mode",
+        "issue": "Because the click handler is `onClick={sleepMode ? stopSleepMode : startSleepMode}` and `sleepMode` is already false by the time of the 2nd click (due to the race above), the second click re-runs `startSleepMode()` (which restarts audio after stop) instead of cleanly exiting. In our test the engine briefly halted (we observed Play icon at +1.2s), but this is a side-effect of `audioEngine.stop()` inside startSleepMode, not the intended `stopSleepMode()` exit path. The visual 'exit sleep mode' state was already incorrect since the card was never highlighted to begin with.",
+        "affected_selectors": ["[data-testid=\"sleep-mode-preset\"]", "[data-testid=\"play-pause-button\"]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Fix the sleepMode race condition in Dashboard.jsx. Suggested fixes (any one): (a) Set sleepMode to true INSIDE the setTimeout AFTER `audioEngine.start()` so state.playing is already true when sleepMode flips; (b) Gate the auto-clear effect with an additional check (e.g., a ref `justStartedSleepRef` that swallows the first run, or `if (!state.playing && sleepMode && !isStartingRef.current)`); (c) Drive sleepMode end-of-life off `remaining<=0` rather than `!state.playing`, since playback briefly stops/starts during startSleepMode anyway.",
+    "After fix, re-verify: (1) card gets `border-[#72C2AC]/60 bg-[#0E1F18]/80` while sleep is active, (2) description swaps to 'Drifting · fades at 60s', (3) second click cleanly stops (no audio restart), (4) when timer hits 60s remaining, fadeOutAll(60) fires exactly once, (5) when timer hits 0, audioEngine.stop() fires and sleepMode then clears."
+  ],
+  "critical_code_review_comments": [
+    "Dashboard.jsx:104-107 — auto-clear effect lacks guard against the startup race; runs on every (state.playing, sleepMode) tuple change and incorrectly clears the flag during the 100ms window between setSleepMode(true) and audioEngine.start().",
+    "Dashboard.jsx:174-192 startSleepMode — ordering of `setSleepMode(true)` before the deferred `audioEngine.start()` is the root cause; consider moving setSleepMode(true) into the setTimeout callback OR setting it after a microtask once `state.playing` has settled.",
+    "audioEngine.fadeOutAll (lib/audioEngine.js:187-199) — implementation is correct (cancels scheduled values, sets current value, then linearRampToValueAtTime to 0 over `seconds`), covers both toneGain and every ambient.gain.gain. Verified by reading.",
+    "Dashboard.jsx:97-102 fade-out effect — logic is fine BUT depends on sleepMode being true, which it currently isn't. Fixing the race makes this work automatically.",
+    "Sleep card lock icon (Dashboard.jsx:369) and non-Pro paywall flow via onOpenAccount() — verified working in browser."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only request)",
+    "frontend": "60% (audio-side effects pass; sleepMode-flag-driven UI/fade/toggle path fails)"
+  },
+  "test_credentials": "Admin admin@example.com / admin123 (Pro, used to exercise active flow). Registered nonpro_<ts>@example.com for paywall path.",
+  "seed_data_creation": "Registered ephemeral non-Pro test users with timestamped emails (nonpro_<ts>@example.com).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "After main agent fixes the sleepMode race, re-run: (1) admin login → click sleep-mode-preset → assert card.className contains 'border-[#72C2AC]/60' AND card text contains 'Drifting · fades at 60s'; (2) second click should call stopSleepMode (not re-start audio) — verify Play icon appears within ~600ms and card de-highlights; (3) for the fade-at-60s and stop-at-0 effects, suggest unit-testing by temporarily setting SLEEP_FADE_SECONDS to a larger threshold (e.g., 1795 so it fires ~5s after start with duration=30) to make e2e verifiable, OR rely on code-review confirmation. Audio amplitude itself cannot be asserted in headless. Verified passing items already (do not regress): 4.0Hz frequency, 30:00 timer, ambient-brown-slider=0.45, all 7 other ambients reset to 0, pause icon shows ~800ms after click, Lock icon for non-Pro, non-Pro click routes to Account Dashboard with 'Current Plan: Basic' and upgrade CTA.",
+  "rca of the issue": "ROOT CAUSE: React effect race in Dashboard.jsx. startSleepMode() calls `setSleepMode(true)` and then schedules `audioEngine.start()` via setTimeout(...,100). Between those two events React commits the sleepMode→true state and runs the auto-clear effect (`if (!state.playing && sleepMode) setSleepMode(false)`), which immediately flips sleepMode back to false because state.playing is still false (audio hasn't started yet). REPRODUCTION: login as admin → click `[data-testid=sleep-mode-preset]` → wait 800ms → read element.className → observe it lacks `border-[#72C2AC]/60`; read element.innerText → observe description still says '4 Hz · brown noise · 30 min fade' instead of 'Drifting · fades at 60s'. MITIGATION OPTIONS: (1) move `setSleepMode(true)` inside the setTimeout after audioEngine.start() emits state.playing=true; (2) use a `useRef` flag set true at startSleepMode entry and cleared after a short delay; skip auto-clear while that ref is true; (3) replace the auto-clear with an explicit transition driven off `remaining<=0` in the existing timer-end branch."
+}

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -68,6 +68,10 @@ export default function Dashboard({ onOpenAccount }) {
   const [streakBump, setStreakBump] = useState(0);
   const [sessionStart, setSessionStart] = useState(null);
   const [checkedInThisRun, setCheckedInThisRun] = useState(false);
+  const [sleepMode, setSleepMode] = useState(false);
+
+  const SLEEP_FADE_SECONDS = 60;
+  const SLEEP_DURATION_MIN = 30;
 
   const checkIn = async (minutes) => {
     try {
@@ -89,6 +93,18 @@ export default function Dashboard({ onOpenAccount }) {
     }, 1000);
     return () => clearInterval(id);
   }, [state.playing, remaining]);
+
+  // Sleep Mode: fade everything out over SLEEP_FADE_SECONDS at the end
+  useEffect(() => {
+    if (sleepMode && state.playing && remaining === SLEEP_FADE_SECONDS) {
+      audioEngine.fadeOutAll(SLEEP_FADE_SECONDS);
+    }
+  }, [remaining, sleepMode, state.playing]);
+
+  // Auto-clear sleepMode when playback stops
+  useEffect(() => {
+    if (!state.playing && sleepMode) setSleepMode(false);
+  }, [state.playing, sleepMode]);
 
   // Auto check-in: when user has been playing for >= 60s in this run, record it once.
   useEffect(() => {
@@ -153,6 +169,33 @@ export default function Dashboard({ onOpenAccount }) {
   const toggleGoldenStack = () => {
     if (!isPro) { onOpenAccount(); return; }
     audioEngine.setGoldenStack(!state.goldenStack);
+  };
+
+  const startSleepMode = () => {
+    if (!isPro) { onOpenAccount(); return; }
+    // Reset everything to a clean sleep config
+    if (state.playing) audioEngine.stop();
+    audioEngine.setGoldenStack(false);
+    audioEngine.setWaveform('sine');
+    audioEngine.setBinaural(0);
+    audioEngine.setToneVolume(0.22);
+    audioEngine.setFrequency(4); // Theta–Delta boundary, deep relaxation
+    // Clear any currently-playing ambient, then layer brown noise gently
+    Object.keys(state.ambient).forEach((k) => audioEngine.setAmbient(k, 0));
+    audioEngine.setAmbient('brown', 0.45);
+    setBreathwork(false);
+    setDuration(SLEEP_DURATION_MIN);
+    setRemaining(SLEEP_DURATION_MIN * 60);
+    setSleepMode(true);
+    // Small delay so previous oscillators finish stopping
+    setTimeout(() => audioEngine.start(), 100);
+  };
+
+  const stopSleepMode = () => {
+    setSleepMode(false);
+    audioEngine.stop();
+    setRemaining(0);
+    Object.keys(state.ambient).forEach((k) => audioEngine.setAmbient(k, 0));
   };
 
   const setAmbient = (key, v) => {
@@ -300,6 +343,30 @@ export default function Dashboard({ onOpenAccount }) {
                   {GOLDEN_BASE} · {Math.round(GOLDEN_BASE * PHI)} · {Math.round(GOLDEN_BASE * PHI * PHI)} Hz
                 </div>
               </div>
+            </button>
+
+            {/* Sleep Mode preset */}
+            <button
+              data-testid="sleep-mode-preset"
+              onClick={sleepMode ? stopSleepMode : startSleepMode}
+              className={`mt-2 w-full glass-soft p-3 flex items-center gap-3 transition-all duration-300 hover:-translate-y-0.5 ${
+                sleepMode ? 'border-[#72C2AC]/60 bg-[#0E1F18]/80' : ''
+              }`}
+            >
+              <Moon
+                size={20}
+                className={sleepMode ? 'text-[#72C2AC]' : 'text-[#8A9A92]'}
+                style={sleepMode ? { filter: 'drop-shadow(0 0 10px rgba(114,194,172,0.5))' } : {}}
+              />
+              <div className="flex-1 text-left">
+                <div className={`font-mono text-base ${sleepMode ? 'text-[#72C2AC]' : 'text-[#E8E3D9]'}`}>
+                  Sleep Mode
+                </div>
+                <div className="text-[10px] text-[#8A9A92]">
+                  {sleepMode ? 'Drifting · fades at 60s' : '4 Hz · brown noise · 30 min fade'}
+                </div>
+              </div>
+              {!isPro && <Lock size={12} className="text-[#C4A67A]" />}
             </button>
           </div>
 

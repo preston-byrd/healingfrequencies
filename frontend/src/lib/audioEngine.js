@@ -182,6 +182,22 @@ class AudioEngine {
     this._emit();
   }
 
+  // Gracefully ramp tone + all ambient gains down to 0 over `seconds`.
+  // Used by Sleep Mode for a gentle fade-to-silence at the end of a session.
+  fadeOutAll(seconds = 60) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const ramp = (param) => {
+      const cur = param.value;
+      param.cancelScheduledValues(t);
+      param.setValueAtTime(cur, t);
+      param.linearRampToValueAtTime(0, t + seconds);
+    };
+    if (this.toneGain) ramp(this.toneGain.gain);
+    Object.values(this.ambient).forEach((a) => { if (a.gain) ramp(a.gain.gain); });
+  }
+
   setGoldenStack(on) {
     this.goldenStack = !!on;
     if (this.playing) {
