@@ -94,6 +94,10 @@ export default function Dashboard({ onOpenAccount }) {
   const [sessionStart, setSessionStart] = useState(null);
   const [checkedInThisRun, setCheckedInThisRun] = useState(false);
   const [sleepMode, setSleepMode] = useState(false);
+  // Track when initial prefs restore is complete so auto-save doesn't fire on the
+  // very first render (which would overwrite saved prefs with defaults).
+  const prefsRestoredRef = React.useRef(false);
+  const prefsSaveTimerRef = React.useRef(null);
 
   const SLEEP_FADE_SECONDS = 60;
   const SLEEP_DURATION_MIN = 30;
@@ -194,6 +198,59 @@ export default function Dashboard({ onOpenAccount }) {
   const refreshSessions = async () => {
     try { const { data } = await api.get('/sessions'); setSessions(data); } catch (e) { console.warn('[Dashboard] sessions fetch failed', e); }
   };
+
+  // Restore last-used config on mount — frequency, duration, ambient mix, etc.
+  // Pro-gated features (ambient, golden, breathwork) are only restored if the
+  // user is still Pro at restore time; otherwise they stay at defaults.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get('/me/prefs');
+        if (cancelled || !data || typeof data !== 'object') return;
+        if (typeof data.frequency === 'number') audioEngine.setFrequency(data.frequency);
+        if (typeof data.duration_minutes === 'number') setDuration(data.duration_minutes);
+        if (typeof data.waveform === 'string') audioEngine.setWaveform(data.waveform);
+        if (typeof data.binaural === 'number' && isPro) audioEngine.setBinaural(data.binaural);
+        if (typeof data.tone_volume === 'number') audioEngine.setToneVolume(data.tone_volume);
+        if (isPro) {
+          if (typeof data.golden_stack === 'boolean') audioEngine.setGoldenStack(data.golden_stack);
+          if (typeof data.breathwork === 'boolean') setBreathwork(data.breathwork);
+          if (data.ambient && typeof data.ambient === 'object') {
+            Object.entries(data.ambient).forEach(([k, v]) => {
+              if (typeof v === 'number') audioEngine.setAmbient(k, v);
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('[Dashboard] prefs restore failed', e);
+      } finally {
+        // Allow auto-save effects to run from now on.
+        prefsRestoredRef.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Debounced auto-save of prefs whenever the user changes a config knob.
+  // 1.2s window — coalesces rapid slider drags into a single PUT.
+  useEffect(() => {
+    if (!prefsRestoredRef.current) return;
+    if (prefsSaveTimerRef.current) clearTimeout(prefsSaveTimerRef.current);
+    prefsSaveTimerRef.current = setTimeout(() => {
+      api.put('/me/prefs', {
+        frequency: state.frequency,
+        duration_minutes: duration,
+        waveform: state.waveform,
+        binaural: state.binaural,
+        tone_volume: state.toneVolume,
+        golden_stack: !!state.goldenStack,
+        breathwork: !!breathwork,
+        ambient: state.ambient && { ...state.ambient },
+      }).catch((e) => console.warn('[Dashboard] prefs save failed', e));
+    }, 1200);
+    return () => { if (prefsSaveTimerRef.current) clearTimeout(prefsSaveTimerRef.current); };
+  }, [state.frequency, state.waveform, state.binaural, state.toneVolume, state.goldenStack, state.ambient, duration, breathwork]);
 
   const togglePlay = () => {
     if (!audioEngine.playing) {

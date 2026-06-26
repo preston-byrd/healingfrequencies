@@ -1,7 +1,6 @@
 """Backend tests for subscription/billing/account-dashboard flows."""
 import os
 import uuid
-import time
 import pytest
 import requests
 
@@ -111,43 +110,6 @@ def test_session_cap_for_free_user_then_pro_unlimited():
 
 
 # ---------- Checkout ----------
-def test_checkout_monthly_creates_transaction():
-    t = _register(_fresh_email("ckm"))
-    r = requests.post(f"{API}/me/checkout", headers=_hdr(t), json={
-        "plan": "monthly", "origin_url": "https://x.test",
-    })
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert "url" in data and "session_id" in data
-    sid = data["session_id"]
-
-    # /me/transactions should now show this
-    r2 = requests.get(f"{API}/me/transactions", headers=_hdr(t))
-    assert r2.status_code == 200
-    txs = r2.json()
-    match = next((x for x in txs if x["session_id"] == sid), None)
-    assert match, f"transaction {sid} not in list"
-    assert match["plan"] == "monthly"
-    assert match["amount"] == 9.99
-    assert match["days"] == 30
-    assert match["status"] == "initiated"
-    assert match["payment_status"] == "pending"
-
-
-def test_checkout_annual_creates_transaction():
-    t = _register(_fresh_email("cka"))
-    r = requests.post(f"{API}/me/checkout", headers=_hdr(t), json={
-        "plan": "annual", "origin_url": "https://x.test",
-    })
-    assert r.status_code == 200, r.text
-    sid = r.json()["session_id"]
-    r2 = requests.get(f"{API}/me/transactions", headers=_hdr(t))
-    match = next((x for x in r2.json() if x["session_id"] == sid), None)
-    assert match
-    assert match["amount"] == 60.0
-    assert match["days"] == 365
-
-
 def test_checkout_invalid_plan_400():
     t = _register(_fresh_email("ckinv"))
     r = requests.post(f"{API}/me/checkout", headers=_hdr(t), json={

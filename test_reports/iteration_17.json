@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 17 — Validated 3 new features: (1) /api/me/prefs CRUD (15 tests, 100% pass) including auth-required, full-payload roundtrip, partial-merge, and 9 parametrized 422-validation cases (frequency 0.05/25000, duration 0/181, waveform 'noise', binaural -1/41, tone_volume -0.1/1.1); (2) /api/payments/status/{sid} now returns plan='monthly' for monthly checkouts (verified end-to-end against real Stripe via emergentintegrations); (3) Frontend prefs auto-save + restore — Playwright e2e: registered fresh user, set duration=25 + clicked 528 Hz, waited 3s for debounce, logged out, logged back in → current-frequency='528.0Hz', duration-slider.value='25' restored correctly. (4) Frontend ThankYou modal — via page.route mocking /api/payments/status to return paid+plan=monthly on 2nd poll: [data-testid=thank-you-celebration] appeared, title='Thank you for tuning in.', plan label 'Pro Monthly' rendered, Start button closes modal AND returns to Dashboard (Solfeggio buttons reappear). (5) test_subscription.py — confirmed 8 passing tests (NOT 7 as review-request claims; the 2 stale tests `test_checkout_{monthly,annual}_creates_transaction` are correctly removed, but 8 tests remain). Pytest total: 23/23 pass (15 prefs + 8 subscription) in 10.34s. FOUND 1 BUG: Pro-gated prefs restore does NOT work correctly — when a non-Pro user upgrades to Pro (via trial) and re-logs in, their previously-saved golden_stack:true and ambient.rain:0.6 still do NOT restore. The Dashboard restore useEffect (Dashboard.jsx L205-233) closes over `isPro` at first render — but isPro is loaded asynchronously from /me/subscription AFTER the prefs effect fires, so `isPro` is false when the Pro-gating branch evaluates, regardless of the user's actual Pro status. Frontend regression spot-check skipped (covered iter 12-16). Cleanup: 2 test users deleted via admin API.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Pro-gated prefs restore after trial/upgrade",
+        "issue": "Dashboard.jsx L205-233 restore useEffect has empty deps [] and reads `isPro` from closure. On login, /me/prefs is fetched before /me/subscription resolves, so isPro is false at restore time even for Pro users. Result: golden_stack, breathwork, binaural, and ambient.* fields are NEVER restored from prefs unless the user was already Pro at component mount. Reproduces in test: NON-Pro user PUT prefs with golden_stack:true + ambient.rain:0.6 → on first login (non-Pro) correctly ignored; START TRIAL → log out → log back in (now Pro) → golden_stack stays Off, ambient.rain stays 0%. Expected: Pro fields should now restore.",
+        "affected_selectors": ["[data-testid=golden-stack-toggle]", "[data-testid=ambient-rain-slider]", "[data-testid=binaural-slider]", "[data-testid=breathwork-toggle]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_prefs.py",
+    "/app/backend/tests/test_subscription.py",
+    "/app/test_reports/pytest/iteration_17.xml",
+    "/app/test_reports/prefs_restored.png",
+    "/app/test_reports/thankyou_modal.png"
+  ],
+  "action_items": [
+    "FIX Dashboard.jsx L205-233: either (a) gate the prefs-restore effect on subscription having loaded (e.g. add `if (subscription === null) return;` and include subscription/isPro in deps so the effect re-runs once subscription resolves) AND track restoration with a ref so it only runs once; OR (b) fetch /me/subscription FIRST in App.jsx and only mount Dashboard after the Pro flag is known. Currently Pro users who upgrade and re-login lose their saved Pro-only knobs.",
+    "Minor: review_request says test_subscription.py should have 7 tests; it actually has 8 (test_plan_config_public_no_auth, test_new_user_subscription_defaults, test_start_trial_then_reuse_rejected, test_session_cap_for_free_user_then_pro_unlimited, test_checkout_invalid_plan_400, test_change_password_then_login_with_new, test_admin_prices_non_admin_403, test_admin_prices_update_persists_and_reflected_in_public_config). All 8 pass; the count discrepancy is just a typo in the request — no action needed unless the request intended for one more to be removed."
+  ],
+  "critical_code_review_comments": [
+    "Dashboard.jsx L205-233 (PRO-GATED RESTORE BUG): empty dependency array + closure over isPro = race condition. The prefs fetch resolves before /me/subscription does, so the gating branch always sees isPro=false on a fresh login. This silently breaks the feature for the exact upgrade path the review request asks us to validate. Fix is non-trivial — needs either a guard on subscription-loaded or an App-level subscription bootstrap before mounting Dashboard.",
+    "Dashboard.jsx L237-253 auto-save: clean implementation — 1.2s debounce, gated on prefsRestoredRef so the initial restore PUTs don't bounce-back. Verified ambient/duration/freq all saved correctly in /me/prefs GET response.",
+    "server.py L310-321 PrefsIn: solid Pydantic v2 validation — ge/le bounds + regex pattern for waveform all enforced. 422s observed for all 9 invalid-input scenarios.",
+    "server.py L422-433 PUT /me/prefs: model_dump(exclude_none=True) + dotted-path $set is the right merge strategy for partial updates. Verified that partial PUT preserves the existing ambient dict (not overwritten). Note: when frontend sends `ambient: {rain: 0.5}`, the entire ambient subdoc gets replaced wholesale by Mongo's $set on `prefs.ambient` — which is documented behavior in the model docstring, but may surprise users if they expect per-key merge of ambient.",
+    "ThankYouCelebration.jsx: well-built — useMemo for particles avoids re-randomization on re-renders, ESC key handler, role=dialog/aria-modal for a11y, data-testids on title/start/overlay. Visual is on-brand (φ glyph in gold-bronze, confetti palette matches teal/sand). Pointer-events:none on aurora layers prevents click interception."
+  ],
+  "updated_files": ["/app/backend/tests/test_prefs.py (new — 15 tests, 100% pass)"],
+  "success_rate": {
+    "backend": "100% (23/23: 15 prefs + 8 subscription)",
+    "frontend": "67% (2/3 review scenarios: prefs-restore ✓, ThankYou modal ✓, Pro-gated restore-after-upgrade ✗)"
+  },
+  "test_credentials": "Admin: admin@example.com / admin123 (from /app/memory/test_credentials.md). Test users created during run were deleted via admin DELETE /api/admin/users/{id}. STRIPE_API_KEY=sk_test_emergent (untouched).",
+  "seed_data_creation": "None permanent. Transient test users: test_prefs_*, test_progate_*, test_thanks_* — all deleted via admin API at end of each scenario. Admin /me/prefs NOT modified.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "After main agent fixes the Pro-gated restore race condition (Dashboard.jsx L205-233), re-run the Pro-gate scenario: (1) register fresh user, (2) PUT /api/me/prefs with frequency:528, duration_minutes:15, golden_stack:true, ambient:{rain:0.6} (use the test_progate_* pattern from this iter), (3) log in via UI — verify golden_stack=Off (correct, non-Pro), rain=0% (correct, non-Pro), but freq=528 and duration=15 restored ✓; (4) POST /api/me/trial, (5) log out, log back in via UI, (6) verify golden-stack-toggle text='Golden Stack φ On' and ambient-rain-slider.value='0.6'. Other notes: ThankYou modal can be tested via Playwright page.route mocking /api/payments/status/{any_sid} to return paid+plan=monthly on 2nd call — no real Stripe round-trip needed. Important Dashboard testids: current-frequency, duration-slider, solfeggio-freq-528, golden-stack-toggle, ambient-rain-slider, binaural-slider, breathwork-toggle, tone-volume-slider, logout-button, account-button. Auth testids: auth-email-input, auth-password-input, auth-name-input, auth-submit-button, auth-mode-toggle.",
+  "rca of the issue": "Dashboard.jsx restore useEffect (L205-233) deps=[], so it captures `isPro` from the first render. App.jsx fetches /me/subscription asynchronously — at mount time of Dashboard, that fetch is in-flight, so isPro=false. The effect runs once, sees isPro=false, and skips the Pro-gated branch FOREVER. Even when subscription resolves seconds later setting isPro=true, the effect has already completed. Reproduction: as shown in playwright run, Pro user with `Pro · all features unlocked` in header still sees golden=Off and rain=0%. Mitigation options: (a) include `isPro` in deps + use a useRef to ensure single execution AFTER both prefs and subscription have loaded; (b) hoist the prefs fetch to after subscription resolves; (c) lift subscription state to App and pass it as a prop, only rendering Dashboard once subscription is non-null."
+}

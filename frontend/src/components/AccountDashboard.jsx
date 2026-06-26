@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search, Trash2 } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
+import { ThankYouCelebration } from '@/components/ThankYouCelebration';
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -30,6 +31,9 @@ export default function AccountDashboard({ onBack }) {
   // password
   const [curPw, setCurPw] = useState('');
   const [newPw, setNewPw] = useState('');
+
+  // post-payment celebration
+  const [celebratingPlan, setCelebratingPlan] = useState(null);
 
   // admin price form
   const [monthly, setMonthly] = useState('');
@@ -88,6 +92,10 @@ export default function AccountDashboard({ onBack }) {
             setMsg('Payment confirmed — welcome to Pro!');
             setBusy('');
             window.history.replaceState({}, '', window.location.pathname);
+            // Celebrate! Use the plan stored on the transaction (monthly/annual) for the label.
+            const planRaw = data.plan || data.metadata?.plan || '';
+            const planLabel = planRaw === 'annual' ? 'Pro Annual' : (planRaw === 'monthly' ? 'Pro Monthly' : 'Pro');
+            setCelebratingPlan(planLabel);
             load();
             return;
           }
@@ -617,6 +625,16 @@ export default function AccountDashboard({ onBack }) {
           </div>
         )}
       </div>
+
+      {celebratingPlan && (
+        <ThankYouCelebration
+          planLabel={celebratingPlan}
+          onStart={() => {
+            setCelebratingPlan(null);
+            onBack();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -10,7 +10,7 @@ import uuid
 import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
 from starlette.middleware.cors import CORSMiddleware
@@ -307,6 +307,19 @@ class PasswordChangeIn(BaseModel):
     new_password: str = Field(min_length=6)
 
 
+class PrefsIn(BaseModel):
+    """User-saved 'last used config' on the dashboard. All fields optional so
+    the frontend can do partial updates as values change."""
+    frequency: Optional[float] = Field(None, ge=0.1, le=20000)
+    duration_minutes: Optional[int] = Field(None, ge=1, le=180)
+    waveform: Optional[str] = Field(None, pattern=r"^(sine|triangle|square|sawtooth)$")
+    binaural: Optional[float] = Field(None, ge=0, le=40)
+    golden_stack: Optional[bool] = None
+    breathwork: Optional[bool] = None
+    ambient: Optional[Dict[str, float]] = None
+    tone_volume: Optional[float] = Field(None, ge=0, le=1)
+
+
 class ProfileUpdateIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
 
@@ -397,6 +410,27 @@ async def start_trial(user: dict = Depends(get_current_user)):
         {"$set": {"plan": "trial", "pro_until": until.isoformat(), "trial_used": True}},
     )
     return {"ok": True, "pro_until": until.isoformat()}
+
+
+@api.get("/me/prefs")
+async def get_my_prefs(user: dict = Depends(get_current_user)):
+    """Return the user's last-saved dashboard config so the player can restore it on login."""
+    full = await db.users.find_one({"id": user["id"]}, {"_id": 0, "prefs": 1}) or {}
+    return full.get("prefs") or {}
+
+
+@api.put("/me/prefs")
+async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user)):
+    """Persist the user's last-used dashboard config (frequency, ambient mix, duration, etc.).
+    Merges with existing prefs — frontend can send partial updates."""
+    payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
+    if not payload:
+        return {"ok": True}
+    # Merge with existing prefs (nested ambient dict gets replaced wholesale if sent).
+    update_doc = {f"prefs.{k}": v for k, v in payload.items()}
+    update_doc["prefs.updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one({"id": user["id"]}, {"$set": update_doc})
+    return {"ok": True}
 
 
 @api.post("/me/checkout")
@@ -521,6 +555,7 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
         "amount_total": status.amount_total,
         "currency": status.currency,
         "fulfilled": (status.payment_status == "paid"),
+        "plan": tx.get("plan"),
     }
 
 
