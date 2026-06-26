@@ -210,6 +210,7 @@ export default function AccountDashboard({ onBack }) {
 
   const proFeatures = [
     'Unlimited saved sessions',
+    'Soundscapes — 6 curated multi-layer mixes',
     'Brainwave & Specials presets (Delta, Theta, Schumann, 111, Tesla 369, Angel 444, …)',
     'φ Golden Stack harmonic mode',
     'Sleep Mode (30-min fade-to-silence)',

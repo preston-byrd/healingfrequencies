@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -47,6 +47,31 @@ const AMBIENT = [
   { key: 'bowls', label: 'Singing Bowls', Icon: Music },
   { key: 'brown', label: 'Brown Noise', Icon: CloudRain },
   { key: 'white', label: 'White Noise', Icon: Sparkles },
+];
+
+// Curated multi-layer mixes — one tap applies frequency + ambient blend. Pro-gated.
+const SOUNDSCAPES = [
+  { key: 'forest-rain', name: 'Forest Rain', desc: 'Theta 6Hz · forest · rain', freq: 6, Icon: Trees,
+    ambient: { forest: 0.6, rain: 0.35 } },
+  { key: 'cosmic-drift', name: 'Cosmic Drift', desc: '963Hz Unity · ocean · bowls', freq: 963, Icon: Sparkles,
+    ambient: { ocean: 0.4, bowls: 0.5 } },
+  { key: 'deep-sleep', name: 'Deep Sleep', desc: 'Delta 2Hz · brown · ocean', freq: 2, Icon: Moon,
+    ambient: { brown: 0.5, ocean: 0.25 } },
+  { key: 'morning-focus', name: 'Morning Focus', desc: 'Gamma 40Hz · crickets · wind', freq: 40, Icon: Sunrise,
+    ambient: { crickets: 0.2, wind: 0.25 } },
+  { key: 'heart-open', name: 'Heart Open', desc: '528Hz Miracle · bowls · wind', freq: 528, Icon: Heart,
+    ambient: { bowls: 0.35, wind: 0.2 } },
+  { key: 'earth-pulse', name: 'Earth Pulse', desc: 'Schumann 7.83 · forest · brown', freq: 7.83, Icon: Globe,
+    ambient: { forest: 0.4, brown: 0.3 } },
+];
+
+// Pro feature index for the "What's in Pro" banner row
+const PRO_PREVIEW = [
+  { label: 'Brainwave & Specials', Icon: Brain },
+  { label: 'φ Golden Stack', Icon: Sparkles },
+  { label: 'Sleep Mode', Icon: Moon },
+  { label: 'Ambient Layers', Icon: Layers },
+  { label: 'Soundscapes', Icon: Cloud },
 ];
 
 function formatTime(secs) {
@@ -228,6 +253,23 @@ export default function Dashboard({ onOpenAccount }) {
     Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
   };
 
+  const selectSoundscape = (s) => {
+    if (!isPro) { onOpenAccount(); return; }
+    // Apply the curated mix in one beat: fresh start, requested freq, sine, no binaural/golden
+    if (audioEngine.playing) audioEngine.stop();
+    audioEngine.setGoldenStack(false);
+    audioEngine.setWaveform('sine');
+    audioEngine.setBinaural(0);
+    audioEngine.setFrequency(s.freq);
+    // Zero every ambient first, then apply the mix — guarantees sample-aligned playback
+    Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
+    Object.entries(s.ambient).forEach(([k, v]) => audioEngine.setAmbient(k, v));
+    setBreathwork(false);
+    setSleepMode(false);
+    setRemaining(duration * 60);
+    audioEngine.start();
+  };
+
   const setAmbient = (key, v) => {
     if (!isPro && v > 0) { onOpenAccount(); return; }
     audioEngine.setAmbient(key, v);
@@ -289,6 +331,34 @@ export default function Dashboard({ onOpenAccount }) {
     <div className="relative min-h-screen w-full overflow-x-hidden">
       <div className="aurora-bg" />
       <div className="grain" />
+
+      {/* Pro preview banner — only for free/Basic users */}
+      {!isPro && (
+        <div
+          data-testid="pro-preview-banner"
+          className="relative z-10 mx-4 mt-4 lg:mx-6 lg:mt-6 glass-soft px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap border border-[#C4A67A]/25"
+        >
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="label-tiny text-[#C4A67A] flex items-center gap-1 whitespace-nowrap">
+              <Sparkles size={11} /> Pro includes
+            </span>
+            <div className="flex items-center gap-3 flex-wrap">
+              {PRO_PREVIEW.map(({ label, Icon }) => (
+                <span key={label} className="flex items-center gap-1 text-[11px] text-[#E8E3D9]/90 whitespace-nowrap">
+                  <Icon size={11} className="text-[#72C2AC]" /> {label}
+                </span>
+              ))}
+            </div>
+          </div>
+          <button
+            data-testid="pro-preview-cta"
+            onClick={onOpenAccount}
+            className="text-[11px] tracking-wider font-medium text-[#08120F] bg-[#C4A67A] hover:bg-[#d6b88c] px-3 py-1.5 rounded-full transition-colors whitespace-nowrap"
+          >
+            Try free for 7 days →
+          </button>
+        </div>
+      )}
 
       <div className="relative z-10 min-h-screen lg:h-screen w-full flex flex-col lg:flex-row p-4 lg:p-6 gap-4 lg:gap-6">
 
@@ -451,6 +521,61 @@ export default function Dashboard({ onOpenAccount }) {
                   </div>
                   <div className="text-[10px] text-[#8A9A92] mt-1">
                     Unlock 10 brainwave &amp; sacred frequencies
+                  </div>
+                </div>
+              </button>
+            )}
+          </div>
+
+          {/* Soundscapes — curated multi-layer mixes, Pro only */}
+          <div className={`glass p-5 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="soundscapes-section">
+            <div className="flex items-center justify-between mb-3">
+              <div className="label-tiny flex items-center gap-2">
+                <Cloud size={11} /> Soundscapes
+                {!isPro && <Lock size={11} className="text-[#C4A67A]" />}
+              </div>
+              {!isPro && (
+                <span
+                  data-testid="soundscapes-pro-badge"
+                  className="text-[9px] tracking-widest text-[#C4A67A] bg-[#C4A67A]/10 px-2 py-0.5 rounded-full"
+                >
+                  PRO
+                </span>
+              )}
+            </div>
+
+            <div className={`grid grid-cols-1 gap-2 transition-opacity ${!isPro ? 'opacity-45 pointer-events-none select-none' : ''}`}>
+              {SOUNDSCAPES.map((s) => {
+                const Icon = s.Icon;
+                return (
+                  <button
+                    key={s.key}
+                    data-testid={`soundscape-${s.key}`}
+                    onClick={() => selectSoundscape(s)}
+                    className="glass-soft p-3 flex items-center gap-3 text-left transition-all duration-300 hover:-translate-y-0.5 hover:border-[#72C2AC]/40"
+                  >
+                    <Icon size={18} className="text-[#72C2AC] flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[#E8E3D9]">{s.name}</div>
+                      <div className="text-[10px] text-[#8A9A92] truncate">{s.desc}</div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {!isPro && (
+              <button
+                data-testid="soundscapes-unlock-cta"
+                onClick={onOpenAccount}
+                className="absolute inset-0 flex items-end justify-center pb-5 px-5 cursor-pointer group"
+              >
+                <div className="glass-soft px-4 py-3 border border-[#C4A67A]/40 hover:border-[#C4A67A] hover:-translate-y-0.5 transition-all text-center w-full max-w-[260px]">
+                  <div className="flex items-center justify-center gap-2 text-[#C4A67A] text-xs font-medium">
+                    <Lock size={12} /> Included in Pro
+                  </div>
+                  <div className="text-[10px] text-[#8A9A92] mt-1">
+                    6 curated multi-layer mixes
                   </div>
                 </div>
               </button>
