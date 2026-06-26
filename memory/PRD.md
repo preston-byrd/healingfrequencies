@@ -49,7 +49,9 @@
 - **More ambient layers** (Jan 2026): 5 new layers added (wind, crickets, singing bowls, brown noise, white noise) → 8 total. Each generated live via filtered noise + per-layer LFO modulation.
 - **Ocean-at-0% bug fix** (Jan 2026): refactored ambient audio graph so the LFO modulates an inner `modGain` node, never the user-controlled `userGain`. `setAmbient(kind, 0)` now does `cancelScheduledValues` + `setValueAtTime(0)` for an instant hard mute.
 - **Sleep Mode** (Jan 2026): one-tap preset = 4 Hz Theta–Delta + brown noise @ 45% + 30-min timer with 60-second linear fade-to-silence on tone AND every ambient gain. Auto-clear gated on `remaining === 0` (avoids race with deferred audio start). Pro-gated.
-- Backend + frontend tested end-to-end (testing agent iterations 1, 2, 3, 4, 5, 6 & 7: 100% pass)
+- **Brainwave & Specials Pro paywall** (Jan 2026): all 10 special-freq presets (Delta, Theta, Schumann, Alpha, Gamma, 111, 222, Tesla 369, Angel 444, 1111) are now Pro-gated via `selectFrequency(hz, {special:true})`. Locked-state UI: Lock icon next to title, PRO badge, dimmed grid + pointer-events disabled, centered "Included in Pro" CTA. Admin and Pro users get unrestricted access.
+- **Audio reliability fix** (Jan 2026): `_ensureCtx()` async + awaits `ctx.resume()`; `start()` async with `_starting` guard; `stop()` uses local osc refs + immediate null of instance refs (race-window safe); window-level first-gesture unlock listener (`pointerdown/touchstart/keydown`) → audioEngine.unlock() for iOS Safari.
+- Backend + frontend tested end-to-end (testing agent iterations 1–9: 100% pass)
 
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
