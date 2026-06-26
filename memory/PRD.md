@@ -48,7 +48,8 @@
 - **More frequencies** (Jan 2026): 10 new "Brainwave & Specials" presets (Delta 2 Hz, Theta 6 Hz, Schumann 7.83 Hz, Alpha 10 Hz, Gamma 40 Hz, 111, 222, Tesla 369, Angel 444, 1111 Hz). Custom freq slider now 1–1200 Hz (was 20–1200).
 - **More ambient layers** (Jan 2026): 5 new layers added (wind, crickets, singing bowls, brown noise, white noise) → 8 total. Each generated live via filtered noise + per-layer LFO modulation.
 - **Ocean-at-0% bug fix** (Jan 2026): refactored ambient audio graph so the LFO modulates an inner `modGain` node, never the user-controlled `userGain`. `setAmbient(kind, 0)` now does `cancelScheduledValues` + `setValueAtTime(0)` for an instant hard mute.
-- Backend + frontend tested end-to-end (testing agent iterations 1, 2, 3, 4 & 5: 100% pass)
+- **Sleep Mode** (Jan 2026): one-tap preset = 4 Hz Theta–Delta + brown noise @ 45% + 30-min timer with 60-second linear fade-to-silence on tone AND every ambient gain. Auto-clear gated on `remaining === 0` (avoids race with deferred audio start). Pro-gated.
+- Backend + frontend tested end-to-end (testing agent iterations 1, 2, 3, 4, 5, 6 & 7: 100% pass)
 
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
