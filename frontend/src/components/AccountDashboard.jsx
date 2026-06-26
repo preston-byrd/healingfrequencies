@@ -142,13 +142,22 @@ export default function AccountDashboard({ onBack }) {
     e.preventDefault();
     setBusy('admin'); setErr(''); setMsg('');
     try {
-      await api.put('/admin/plan-prices', {
+      const { data } = await api.put('/admin/plan-prices', {
         monthly_price: parseFloat(monthly),
         annual_price: parseFloat(annual),
         trial_days: parseInt(trial, 10),
       });
-      setMsg('Plan prices updated.');
-      await load();
+      // Use the PUT response directly — the canonical post-save config —
+      // instead of a stale re-GET. Eliminates any race or cache surprise.
+      setMonthly(String(data.monthly.price));
+      setAnnual(String(data.annual.price));
+      setTrial(String(data.trial_days));
+      // Also refresh the public plan config so the upgrade cards reflect new prices
+      try {
+        const { data: planData } = await api.get('/plan/config');
+        setPlan(planData);
+      } catch (_) { /* ignore */ }
+      setMsg(`Saved · Monthly $${data.monthly.price.toFixed(2)} · Annual $${data.annual.price.toFixed(2)} · ${data.trial_days}-day trial`);
     } catch (e2) { setErr(formatApiError(e2)); }
     finally { setBusy(''); }
   };

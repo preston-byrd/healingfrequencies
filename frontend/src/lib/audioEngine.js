@@ -36,6 +36,19 @@ class AudioEngine {
     if (this.ctx.state !== 'running') {
       try { await this.ctx.resume(); } catch (e) { /* noop */ }
     }
+    // iOS Safari + Chrome-on-iOS need a 1-sample silent BufferSource to fully unlock
+    // WebAudio. resume() alone is not always sufficient. Idempotent via this._unlocked.
+    if (!this._unlocked) {
+      try {
+        const buf = this.ctx.createBuffer(1, 1, 22050);
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(this.ctx.destination);
+        if (typeof src.start === 'function') src.start(0);
+        else if (typeof src.noteOn === 'function') src.noteOn(0);
+        this._unlocked = true;
+      } catch (e) { /* noop */ }
+    }
     if (created) this._prebuildAllAmbient();
     return this.ctx;
   }

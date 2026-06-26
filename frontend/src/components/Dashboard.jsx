@@ -84,16 +84,14 @@ export default function Dashboard({ onOpenAccount }) {
 
   // Unlock AudioContext on the very first user gesture anywhere on the dashboard.
   // Essential for iOS Safari which keeps the context suspended until a tap.
+  // Listens for the broadest set of "first gesture" events to catch every device.
   useEffect(() => {
     const unlock = () => audioEngine.unlock();
-    const opts = { once: true, passive: true };
-    window.addEventListener('pointerdown', unlock, opts);
-    window.addEventListener('touchstart', unlock, opts);
-    window.addEventListener('keydown', unlock, opts);
+    const opts = { once: true, passive: true, capture: true };
+    const events = ['pointerdown', 'touchstart', 'touchend', 'click', 'keydown'];
+    events.forEach((ev) => window.addEventListener(ev, unlock, opts));
     return () => {
-      window.removeEventListener('pointerdown', unlock, opts);
-      window.removeEventListener('touchstart', unlock, opts);
-      window.removeEventListener('keydown', unlock, opts);
+      events.forEach((ev) => window.removeEventListener(ev, unlock, opts));
     };
   }, []);
 

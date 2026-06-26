@@ -4,7 +4,7 @@
  *  - API calls (/api/*): always network (do not cache auth/state).
  *  - Pre-cache the app shell on install for instant offline open.
  */
-const CACHE = 'hf-shell-v1';
+const CACHE = 'hf-shell-v2';
 const SHELL = [
   '/',
   '/index.html',

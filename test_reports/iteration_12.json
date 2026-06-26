@@ -1,0 +1,36 @@
+{
+  "summary": "Validated (a) Admin plan-prices save E2E from frontend works as designed — PUT response is consumed directly, account-msg shows the new explicit confirmation 'Saved · Monthly $11.50 · Annual $75.00 · 10-day trial', inputs reflect saved values, persistence across navigation OK, reset to 9.99/60/7 works. (b) Backend pytest 3/3 pass — PUT /api/admin/plan-prices persists and is reflected in GET /api/admin/plan-prices and public GET /api/plan/config. (c) Free-user paywall flow: Solfeggio 528 tile selected (free), Golden preset → paywall (plan-card shows $9.99 + $60.00), Sleep mode → paywall, Specials section uses absolute-positioned specials-unlock-cta overlay over pointer-events-none tiles (intentional UX). (d) Code review of audioEngine.js + Dashboard.jsx + sw.js confirms the silent-buffer unlock + 5-event listener + cache bump are in place.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_plan_prices.py",
+    "/app/test_reports/pytest/admin_plan_prices_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "audioEngine.js L27-54 _ensureCtx: correct order — (1) create ctx + master if missing, (2) await ctx.resume() if !running, (3) silent-buffer unlock trick guarded by this._unlocked (idempotent — runs exactly once across the session), (4) _prebuildAllAmbient ONLY on the created path. The silent-buffer src is connected directly to ctx.destination (not via master) which is correct — it's a one-sample throwaway just to satisfy iOS WebAudio unlock. Both src.start(0) and the legacy src.noteOn(0) fallback are guarded with typeof checks for old Safari.",
+    "audioEngine.js L58-60 unlock(): correctly delegates to _ensureCtx — meaning unlock() now also pre-builds ambient layers on first call, which is a useful side-effect (no audible cost since gains are 0).",
+    "audioEngine.js L90-94 start() and L347-356 setAmbient: both go through _ensureCtx, so the silent-buffer trick runs even if the first user gesture is on the play button or on an ambient slider, not on the body-level listener. Belt-and-suspenders confirmed.",
+    "Dashboard.jsx L88-96 first-gesture listener: binds 5 event types ['pointerdown','touchstart','touchend','click','keydown'] with {once:true, passive:true, capture:true}. capture:true correctly ensures the unlock fires before any other React handler can stopPropagation. once:true means each event-type listener fires once — note: with 5 separate listeners + once:true, the FIRST event of any type fires its listener, and the OTHER 4 are still registered but will fire on their next respective event. Cleanup correctly removes all 5 in useEffect return. This is the broadest practical mobile coverage.",
+    "sw.js L7 CACHE = 'hf-shell-v2' bumped from v1 — install handler skipWaiting() + activate cleans old caches via keys().filter(k!=CACHE).delete. Existing clients on v1 will activate v2 on next nav and invalidate the old audioEngine.js — correct.",
+    "AccountDashboard.jsx L141-163 saveAdminPrices: PUT response is consumed directly (setMonthly/setAnnual/setTrial from data.monthly.price etc.), and /plan/config is refreshed via setPlan so upgrade-card prices update inline. account-msg uses .toFixed(2) for the confirmation string. Race-free — no re-GET.",
+    "Server-side: 5 of 5 prior pytest suites + new 3/3 admin_plan_prices suite all pass against the public preview URL."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_plan_prices.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (3/3 admin plan-prices tests pass; previous 5/5 billing history still pass)",
+    "frontend": "100% on the verified flows (admin price-save E2E + persistence + reset + free-user paywall for golden/sleep)"
+  },
+  "test_credentials": "Admin admin@example.com / admin123. Fresh free user registered per-run with email test_nopro_<timestamp>@example.com / Testpass123!",
+  "seed_data_creation": "Backend test PUTs 11.5/75/10 then restores 9.99/60/7. Frontend E2E does the same. Final state on /api/admin/plan-prices is 9.99/60/7 — clean.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Admin plan-prices flow is now fully verified end-to-end: backend PUT/GET, public /plan/config reflection, frontend explicit confirmation message format 'Saved · Monthly $X.XX · Annual $Y.YY · Z-day trial', and persistence across nav. AudioEngine silent-buffer unlock is in _ensureCtx (idempotent via this._unlocked) so unlock(), start(), and setAmbient all trigger it. Dashboard first-gesture listener binds 5 events with capture:true. sw.js CACHE bumped to hf-shell-v2 — old clients will auto-update on next nav. Note: special-freq-* tiles have pointer-events-none for non-Pro; the paywall is reached via the absolute-positioned specials-unlock-cta overlay sibling button — this is intentional UX, NOT a bug. New regression file: /app/backend/tests/test_admin_plan_prices.py.",
+  "rca of the issue": "N/A — feature/bug-fix validation iteration. Both fixes (admin price-save UX + mobile audio unlock) are correctly implemented and verified."
+}
