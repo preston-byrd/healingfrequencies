@@ -24,14 +24,23 @@ class AudioEngine {
     this.listeners = new Set();
   }
 
-  _ensureCtx() {
+  async _ensureCtx() {
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
       this.master = this.ctx.createGain();
       this.master.gain.value = 1;
       this.master.connect(this.ctx.destination);
     }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state !== 'running') {
+      try { await this.ctx.resume(); } catch (e) { /* noop */ }
+    }
+    return this.ctx;
+  }
+
+  // Warm-up: call from the first user gesture on the page to unlock audio on iOS/Safari
+  // BEFORE the user taps a specific frequency. Safe to call multiple times.
+  async unlock() {
+    try { await this._ensureCtx(); } catch (e) { /* noop */ }
   }
 
   on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
@@ -50,45 +59,49 @@ class AudioEngine {
   }
 
   // ---- Tone ------------------------------------------------------------------
-  start() {
-    this._ensureCtx();
-    if (this.playing) return;
-    const ctx = this.ctx;
+  async start() {
+    if (this.playing || this._starting) return;
+    this._starting = true;
+    try {
+      await this._ensureCtx();
+      if (this.playing) return;
+      const ctx = this.ctx;
 
-    this.toneGain = ctx.createGain();
-    this.toneGain.gain.value = 0;
-    this.toneGain.connect(this.master);
+      this.toneGain = ctx.createGain();
+      this.toneGain.gain.value = 0;
+      this.toneGain.connect(this.master);
 
-    this.osc = ctx.createOscillator();
-    this.osc.type = this.waveform;
-    this.osc.frequency.value = this.frequency;
+      this.osc = ctx.createOscillator();
+      this.osc.type = this.waveform;
+      this.osc.frequency.value = this.frequency;
 
-    if (this.binaural > 0) {
-      // Stereo split: left = freq, right = freq + binaural
-      const merger = ctx.createChannelMerger(2);
-      const gL = ctx.createGain();
-      const gR = ctx.createGain();
-      this.osc.connect(gL);
-      this.oscR = ctx.createOscillator();
-      this.oscR.type = this.waveform;
-      this.oscR.frequency.value = this.frequency + this.binaural;
-      this.oscR.connect(gR);
-      gL.connect(merger, 0, 0);
-      gR.connect(merger, 0, 1);
-      merger.connect(this.toneGain);
-      this.oscR.start();
-    } else {
-      this.osc.connect(this.toneGain);
+      if (this.binaural > 0) {
+        const merger = ctx.createChannelMerger(2);
+        const gL = ctx.createGain();
+        const gR = ctx.createGain();
+        this.osc.connect(gL);
+        this.oscR = ctx.createOscillator();
+        this.oscR.type = this.waveform;
+        this.oscR.frequency.value = this.frequency + this.binaural;
+        this.oscR.connect(gR);
+        gL.connect(merger, 0, 0);
+        gR.connect(merger, 0, 1);
+        merger.connect(this.toneGain);
+        this.oscR.start();
+      } else {
+        this.osc.connect(this.toneGain);
+      }
+
+      this.osc.start();
+      this.toneGain.gain.linearRampToValueAtTime(this.toneVolume, ctx.currentTime + 0.8);
+
+      if (this.goldenStack) this._spawnPhiHarmonics();
+
+      this.playing = true;
+      this._emit();
+    } finally {
+      this._starting = false;
     }
-
-    this.osc.start();
-    // Fade in
-    this.toneGain.gain.linearRampToValueAtTime(this.toneVolume, ctx.currentTime + 0.8);
-
-    if (this.goldenStack) this._spawnPhiHarmonics();
-
-    this.playing = true;
-    this._emit();
   }
 
   // Spawn the golden-ratio harmonic tones (φ¹ and φ²) at decreasing amplitude.
@@ -137,11 +150,15 @@ class AudioEngine {
       this.toneGain.gain.cancelScheduledValues(ctx.currentTime);
       this.toneGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
     }
-    const oscs = [this.osc, this.oscR].filter(Boolean);
+    // Capture the CURRENT oscillators locally and null the instance refs immediately
+    // so that a subsequent start() (within the 450ms cleanup window) doesn't get its
+    // brand-new oscillator clobbered when the cleanup timeout fires.
+    const oscsLocal = [this.osc, this.oscR].filter(Boolean);
+    this.osc = null;
+    this.oscR = null;
     this._killPhiHarmonics(0.4);
     setTimeout(() => {
-      oscs.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
-      this.osc = null; this.oscR = null;
+      oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
     }, 450);
     this.playing = false;
     this._emit();
@@ -294,14 +311,18 @@ class AudioEngine {
   }
 
   setAmbient(kind, volume) {
-    this._ensureCtx();
-    if (!this.ambient[kind]) this.ambient[kind] = this._buildAmbient(kind);
+    // Note: cannot make this async because slider events fire rapidly; we kick off
+    // the unlock fire-and-forget on first use.
+    if (!this.ctx) { this.unlock(); }
+    if (!this.ambient[kind]) {
+      if (!this.ctx) return; // ctx still warming up; user will need to interact again
+      this.ambient[kind] = this._buildAmbient(kind);
+    }
     const a = this.ambient[kind];
     const v = Math.max(0, Math.min(1, Number(volume) || 0));
     a.volume = v;
     const ctx = this.ctx;
     if (v === 0) {
-      // Hard mute: cancel any scheduled values + set both gain ramp target and current value to 0
       a.gain.gain.cancelScheduledValues(ctx.currentTime);
       a.gain.gain.setValueAtTime(0, ctx.currentTime);
     } else {

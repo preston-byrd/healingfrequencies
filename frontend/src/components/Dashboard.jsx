@@ -82,6 +82,21 @@ export default function Dashboard({ onOpenAccount }) {
 
   useEffect(() => audioEngine.on(setState), []);
 
+  // Unlock AudioContext on the very first user gesture anywhere on the dashboard.
+  // Essential for iOS Safari which keeps the context suspended until a tap.
+  useEffect(() => {
+    const unlock = () => audioEngine.unlock();
+    const opts = { once: true, passive: true };
+    window.addEventListener('pointerdown', unlock, opts);
+    window.addEventListener('touchstart', unlock, opts);
+    window.addEventListener('keydown', unlock, opts);
+    return () => {
+      window.removeEventListener('pointerdown', unlock, opts);
+      window.removeEventListener('touchstart', unlock, opts);
+      window.removeEventListener('keydown', unlock, opts);
+    };
+  }, []);
+
   // Timer
   useEffect(() => {
     if (!state.playing || remaining <= 0) return;
@@ -140,7 +155,7 @@ export default function Dashboard({ onOpenAccount }) {
   };
 
   const togglePlay = () => {
-    if (!state.playing) {
+    if (!audioEngine.playing) {
       setRemaining(duration * 60);
       audioEngine.start();
     } else {
@@ -152,16 +167,18 @@ export default function Dashboard({ onOpenAccount }) {
   const selectFrequency = (hz, opts = {}) => {
     const wantGolden = !!opts.golden;
     if (wantGolden && !isPro) { onOpenAccount(); return; }
+    const playing = audioEngine.playing;
     const isSame =
-      Math.round(state.frequency) === hz && state.goldenStack === wantGolden;
-    if (state.playing && isSame) {
+      Math.round(audioEngine.frequency) === Math.round(hz) &&
+      audioEngine.goldenStack === wantGolden;
+    if (playing && isSame) {
       audioEngine.stop();
       setRemaining(0);
       return;
     }
     audioEngine.setFrequency(hz);
     audioEngine.setGoldenStack(wantGolden);
-    if (!state.playing) {
+    if (!playing) {
       setRemaining(duration * 60);
       audioEngine.start();
     }
@@ -174,29 +191,31 @@ export default function Dashboard({ onOpenAccount }) {
 
   const startSleepMode = () => {
     if (!isPro) { onOpenAccount(); return; }
-    // Reset everything to a clean sleep config
-    if (state.playing) audioEngine.stop();
+    // If something is playing, stop it cleanly first. audioEngine.stop schedules
+    // a fade-out internally, but the new oscillator we'll create with start() will
+    // also be brand-new (we always create fresh on each start), so there's no clash.
+    if (audioEngine.playing) audioEngine.stop();
     audioEngine.setGoldenStack(false);
     audioEngine.setWaveform('sine');
     audioEngine.setBinaural(0);
     audioEngine.setToneVolume(0.22);
-    audioEngine.setFrequency(4); // Theta–Delta boundary, deep relaxation
+    audioEngine.setFrequency(4);
     // Clear any currently-playing ambient, then layer brown noise gently
-    Object.keys(state.ambient).forEach((k) => audioEngine.setAmbient(k, 0));
+    Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
     audioEngine.setAmbient('brown', 0.45);
     setBreathwork(false);
     setDuration(SLEEP_DURATION_MIN);
     setRemaining(SLEEP_DURATION_MIN * 60);
     setSleepMode(true);
-    // Small delay so previous oscillators finish stopping
-    setTimeout(() => audioEngine.start(), 100);
+    // Start in the SAME gesture frame (no setTimeout) — required for iOS audio unlock
+    audioEngine.start();
   };
 
   const stopSleepMode = () => {
     setSleepMode(false);
     audioEngine.stop();
     setRemaining(0);
-    Object.keys(state.ambient).forEach((k) => audioEngine.setAmbient(k, 0));
+    Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
   };
 
   const setAmbient = (key, v) => {
