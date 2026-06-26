@@ -82,7 +82,7 @@ function formatTime(secs) {
 
 export default function Dashboard({ onOpenAccount }) {
   const { user, logout } = useAuth();
-  const { isPro, refresh: refreshSub } = useSubscription();
+  const { isPro, refresh: refreshSub, sub } = useSubscription();
   const [state, setState] = useState(audioEngine.getState());
   const [duration, setDuration] = useState(10); // minutes
   const [remaining, setRemaining] = useState(0); // seconds; 0 = not running
@@ -94,8 +94,11 @@ export default function Dashboard({ onOpenAccount }) {
   const [sessionStart, setSessionStart] = useState(null);
   const [checkedInThisRun, setCheckedInThisRun] = useState(false);
   const [sleepMode, setSleepMode] = useState(false);
-  // Track when initial prefs restore is complete so auto-save doesn't fire on the
-  // very first render (which would overwrite saved prefs with defaults).
+  // Track restore lifecycle: restoreStartedRef prevents re-entry of the restore
+  // effect (it's set synchronously when restore begins); prefsRestoredRef gates
+  // the auto-save effect (set only when restore completes, so auto-save can't
+  // fire and clobber prefs while restoration is in-flight).
+  const restoreStartedRef = React.useRef(false);
   const prefsRestoredRef = React.useRef(false);
   const prefsSaveTimerRef = React.useRef(null);
 
@@ -200,20 +203,24 @@ export default function Dashboard({ onOpenAccount }) {
   };
 
   // Restore last-used config on mount — frequency, duration, ambient mix, etc.
-  // Pro-gated features (ambient, golden, breathwork) are only restored if the
-  // user is still Pro at restore time; otherwise they stay at defaults.
+  // Waits for /me/subscription to resolve (sub !== null) so the isPro check is
+  // correct for the user (otherwise a Pro user who just logged in would lose
+  // their golden/ambient/breathwork because isPro is still false during the
+  // brief window between auth and subscription resolution).
   useEffect(() => {
-    let cancelled = false;
+    if (sub === null) return;                // wait until subscription has loaded
+    if (restoreStartedRef.current) return;   // run exactly once per session
+    restoreStartedRef.current = true;
     (async () => {
       try {
         const { data } = await api.get('/me/prefs');
-        if (cancelled || !data || typeof data !== 'object') return;
+        if (!data || typeof data !== 'object') return;
         if (typeof data.frequency === 'number') audioEngine.setFrequency(data.frequency);
         if (typeof data.duration_minutes === 'number') setDuration(data.duration_minutes);
         if (typeof data.waveform === 'string') audioEngine.setWaveform(data.waveform);
-        if (typeof data.binaural === 'number' && isPro) audioEngine.setBinaural(data.binaural);
         if (typeof data.tone_volume === 'number') audioEngine.setToneVolume(data.tone_volume);
         if (isPro) {
+          if (typeof data.binaural === 'number') audioEngine.setBinaural(data.binaural);
           if (typeof data.golden_stack === 'boolean') audioEngine.setGoldenStack(data.golden_stack);
           if (typeof data.breathwork === 'boolean') setBreathwork(data.breathwork);
           if (data.ambient && typeof data.ambient === 'object') {
@@ -225,12 +232,11 @@ export default function Dashboard({ onOpenAccount }) {
       } catch (e) {
         console.warn('[Dashboard] prefs restore failed', e);
       } finally {
-        // Allow auto-save effects to run from now on.
+        // Open the gate for the debounced auto-save effect.
         prefsRestoredRef.current = true;
       }
     })();
-    return () => { cancelled = true; };
-  }, []);
+  }, [sub, isPro]);
 
   // Debounced auto-save of prefs whenever the user changes a config knob.
   // 1.2s window — coalesces rapid slider drags into a single PUT.

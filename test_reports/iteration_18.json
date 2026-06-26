@@ -1,0 +1,44 @@
+{
+  "summary": "Iter 18 — Re-tested the SINGLE Pro-gated prefs-restore bug from iter 17. Backend regression PASSES (23/23: 15 prefs + 8 subscription, 9.73s). Critical bug NOT FIXED on the frontend: even with the new restoreStartedRef+prefsRestoredRef gating, the auto-save effect still clobbers Pro-only fields. Reproduction: (1) registered TEST_progate_* user via UI, (2) PUT /api/me/prefs with golden_stack:true, ambient.rain:0.6, binaural:6, breathwork:true, tone_volume:0.5 (server confirmed roundtrip). (3) Logged out + back in as NON-Pro via UI: frequency=528 ✓, duration=15 ✓, tone_volume=0.5 ✓; Pro fields correctly gated off (golden=Off, rain=0, binaural=0, breathwork=Off) ✓. (4) POST /api/me/trial via API (200, pro_until set). (5) Logged out + back in (now Pro): header shows 'Pro · all features unlocked' BUT golden=Off, rain=0, binaural=0, breathwork=Off. (6) GET /api/me/prefs after step 5 shows golden_stack:false, ambient.rain:0.0, binaural:0.0, breathwork:false — i.e., the backend was CLOBBERED. Cleanup: 0 orphan TEST_ users remain.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Pro-gated prefs restore after trial upgrade — STILL BROKEN",
+        "issue": "Iter 17's reported fix (Dashboard.jsx L101-103, L210-239) only addresses the isPro-closure timing problem in the RESTORE effect. But the AUTO-SAVE effect (L243-259) introduces a second, equally fatal clobber path: after a non-Pro user logs in, the restore correctly skips Pro-only fields (golden_stack/ambient/binaural/breathwork stay at React-state defaults: false/{}/0/false). However the restore DOES change state.frequency (440→528) and duration (10→15), which triggers the auto-save effect (deps include all 8 knob fields). Because prefsRestoredRef is now true (set in finally), the 1.2s debounced PUT fires with the FULL state — including the DEFAULT Pro-only values — overwriting the user's previously-saved golden_stack:true, ambient:{rain:0.6}, binaural:6, breathwork:true with false/{}/0/false on the server. By the time the user upgrades and re-logs in, there are no Pro values left on the server to restore. Confirmed via direct GET /api/me/prefs after step 5: {golden_stack:false, ambient:{}, binaural:0.0, breathwork:false}.",
+        "affected_selectors": ["[data-testid=golden-stack-toggle]", "[data-testid=ambient-rain-slider]", "[data-testid=binaural-slider]", "[data-testid=breathwork-toggle]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_prefs.py",
+    "/app/backend/tests/test_subscription.py",
+    "/app/test_reports/pytest/iteration_18.xml",
+    "/app/test_reports/iter18_post_trial_restore.png"
+  ],
+  "action_items": [
+    "FIX the auto-save clobber for non-Pro users. Options (pick one): (a) In Dashboard.jsx auto-save effect, exclude Pro-only fields from the PUT payload when isPro=false: omit golden_stack/breathwork/binaural/ambient OR send them as null/undefined so the backend partial-merge preserves them. (b) Make the backend PUT /me/prefs ignore writes to Pro-only fields from non-Pro users (server-side gating; defense-in-depth). (c) Have the auto-save effect read isPro and skip altogether when isPro is false AND the user has Pro-only prefs saved. Option (a) is the smallest change and consistent with how restore already gates by isPro.",
+    "After fixing (a), also verify on the Pro path: when a Pro user is restored, the auto-save should still fire correctly (this currently works in iter-17 happy path — don't regress).",
+    "Consider: even without the upgrade flow, this bug means a non-Pro user who EVER had Pro prefs (e.g. trial expired) will silently lose them as soon as they touch the UI."
+  ],
+  "critical_code_review_comments": [
+    "Dashboard.jsx L210-239 (RESTORE EFFECT): The restoreStartedRef + sub-gating is correct in isolation — it does wait for /me/subscription and only runs once. However it doesn't address the auto-save clobber. The restore-side gating alone is insufficient; the auto-save side also needs Pro-awareness.",
+    "Dashboard.jsx L243-259 (AUTO-SAVE): unconditionally PUTs every field of state. This is the root cause of the clobber. Recommended diff: `const payload = { frequency: state.frequency, duration_minutes: duration, waveform: state.waveform, tone_volume: state.toneVolume }; if (isPro) Object.assign(payload, { binaural: state.binaural, golden_stack: !!state.goldenStack, breathwork: !!breathwork, ambient: state.ambient && {...state.ambient} }); api.put('/me/prefs', payload)`. Backend already supports partial-merge (verified by test_partial_put_merges), so the omitted fields will be preserved.",
+    "Defense-in-depth: server.py PUT /me/prefs currently accepts any field from any authenticated user. Adding a 402-style gate on Pro-only fields when sub.pro=false would prevent this entire class of bug.",
+    "test_prefs.py covers backend behavior thoroughly (15 tests, 100% pass). Backend is solid — bug is purely frontend.",
+    "Iter 17 description claimed 'auto-save effect's gate prefsRestoredRef is now only set in the finally block (so auto-save can't fire and clobber prefs while restore is in-flight)' — this is true but only protects DURING the restore async window. Once restore completes, auto-save fires normally and clobbers."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (23/23 regression: 15 prefs + 8 subscription)",
+    "frontend": "67% (basic-field restore ✓, non-Pro gating ✓; Pro-after-upgrade restore ✗ — the exact bug the iter-17 fix was supposed to address)"
+  },
+  "test_credentials": "Admin: admin@example.com / admin123 (from /app/memory/test_credentials.md). Fresh TEST_progate_* user created via UI for the e2e, deleted at end (0 orphans remain).",
+  "seed_data_creation": "None permanent.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "After main agent applies the auto-save Pro-aware payload fix (action_items option a), re-run the full e2e exactly as in iter 18: (1) register fresh user via UI, (2) capture token from localStorage and PUT /api/me/prefs with full Pro payload, (3) logout+login via UI — wait 4s for auto-save debounce — then GET /api/me/prefs and CONFIRM the Pro-only fields are STILL set (golden_stack:true, ambient.rain:0.6, binaural:6, breathwork:true). This is the key verification step iter 17/18 missed. (4) POST /api/me/trial, (5) logout+login via UI, (6) verify Pro fields restored to UI: golden 'On', rain slider 0.6, binaural 6, breathwork 'On'. (7) GET /api/me/prefs to confirm not re-clobbered post-trial. Backend regression already green — only frontend needs re-test. Testids: current-frequency, duration-slider, golden-stack-toggle, ambient-rain-slider, binaural-slider, breathwork-toggle, tone-volume-slider, logout-button, auth-email-input, auth-password-input, auth-name-input, auth-submit-button, auth-mode-toggle.",
+  "rca of the issue": "The iter-17 fix solved the FIRST of TWO race conditions but missed the second. (RC1, fixed) The restore useEffect captured isPro from a stale closure before /me/subscription resolved. (RC2, still present) The auto-save useEffect sends ALL knob fields, including Pro-only ones, regardless of the user's Pro status. When a non-Pro user logs in and the restore correctly skips Pro-only fields, the React state for those fields stays at the default React values (golden=false, ambient={}, binaural=0, breathwork=false). The restore DOES legitimately change non-Pro state.frequency and duration (because those are non-Pro-gated), which triggers the auto-save effect via its deps. With prefsRestoredRef now true (set in the restore's finally block), the auto-save fires unconditionally and PUTs the React state — overwriting the server's saved Pro values with the React defaults. Reproduction confirmed: GET /api/me/prefs immediately after non-Pro login shows golden_stack:false, ambient:{}, binaural:0, breathwork:false where the user had previously PUT true/0.6/6/true. Mitigation: gate the auto-save PUT payload by isPro — omit Pro-only fields when isPro=false, relying on the backend's partial-merge (model_dump exclude_none + dotted-path $set, server.py L422-433, already tested) to preserve them."
+}
