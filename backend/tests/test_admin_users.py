@@ -9,8 +9,8 @@ import requests
 BASE = os.environ.get("REACT_APP_BACKEND_URL", "https://frequency-healer-31.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
 
-ADMIN_EMAIL = "admin@example.com"
-ADMIN_PASSWORD = "admin123"
+ADMIN_EMAIL = os.environ.get('ADMIN_TEST_EMAIL', 'admin@example.com')
+ADMIN_PASSWORD = os.environ.get('ADMIN_TEST_PASSWORD', 'admin123')
 
 
 def _login(email: str, password: str) -> str:

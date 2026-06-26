@@ -102,7 +102,7 @@ export default function Dashboard({ onOpenAccount }) {
     try {
       await api.post('/streak/checkin', { minutes });
       setStreakBump((n) => n + 1);
-    } catch (e) { /* ignore */ }
+    } catch (e) { console.warn('[Dashboard] streak check-in failed', e); }
   };
 
   useEffect(() => audioEngine.on(setState), []);
@@ -192,7 +192,7 @@ export default function Dashboard({ onOpenAccount }) {
   // Fetch saved sessions
   useEffect(() => { refreshSessions(); }, []);
   const refreshSessions = async () => {
-    try { const { data } = await api.get('/sessions'); setSessions(data); } catch (e) { /* ignore */ }
+    try { const { data } = await api.get('/sessions'); setSessions(data); } catch (e) { console.warn('[Dashboard] sessions fetch failed', e); }
   };
 
   const togglePlay = () => {
@@ -209,8 +209,17 @@ export default function Dashboard({ onOpenAccount }) {
     const wantGolden = !!opts.golden;
     const wantSpecial = !!opts.special;
     if ((wantGolden || wantSpecial) && !isPro) { onOpenAccount(); return; }
-    // Per spec: tapping a frequency NEVER stops playback. It either starts (if idle)
-    // or live-retunes (if already playing). Only the explicit Play/Pause button stops audio.
+    // Tap-to-toggle: if the user taps the SAME selection that's currently playing
+    // (same frequency + same golden-stack mode), stop the session. Otherwise start
+    // or live-retune to the new frequency.
+    const sameFreq = Math.abs(audioEngine.frequency - hz) < 0.05;
+    const sameMode = wantGolden === !!audioEngine.goldenStack;
+    if (audioEngine.playing && sameFreq && sameMode) {
+      audioEngine.stop();
+      setRemaining(0);
+      setSleepMode(false);
+      return;
+    }
     audioEngine.setFrequency(hz);
     audioEngine.setGoldenStack(wantGolden);
     if (!audioEngine.playing) {
@@ -319,7 +328,7 @@ export default function Dashboard({ onOpenAccount }) {
   };
 
   const deleteSession = async (id) => {
-    try { await api.delete(`/sessions/${id}`); refreshSessions(); } catch (e) { /* ignore */ }
+    try { await api.delete(`/sessions/${id}`); refreshSessions(); } catch (e) { console.warn('[Dashboard] delete session failed', e); }
   };
 
   const activePreset = useMemo(

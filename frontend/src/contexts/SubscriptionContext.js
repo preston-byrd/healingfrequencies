@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import api from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -10,7 +10,7 @@ export function SubscriptionProvider({ children }) {
 
   const refresh = useCallback(async () => {
     try { const { data } = await api.get('/me/subscription'); setSub(data); }
-    catch { setSub(null); }
+    catch (e) { console.warn('[SubscriptionContext] refresh failed', e); setSub(null); }
   }, []);
 
   useEffect(() => {
@@ -18,8 +18,13 @@ export function SubscriptionProvider({ children }) {
     else setSub(null);
   }, [user, refresh]);
 
+  const value = useMemo(
+    () => ({ sub, refresh, isPro: !!sub?.pro }),
+    [sub, refresh],
+  );
+
   return (
-    <SubContext.Provider value={{ sub, refresh, isPro: !!sub?.pro }}>
+    <SubContext.Provider value={value}>
       {children}
     </SubContext.Provider>
   );

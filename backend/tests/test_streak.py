@@ -7,6 +7,9 @@ import pytest
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://frequency-healer-31.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
+ADMIN_EMAIL = os.environ.get("ADMIN_TEST_EMAIL", "admin@example.com")
+ADMIN_PASSWORD = os.environ.get("ADMIN_TEST_PASSWORD", "admin123")
+
 
 @pytest.fixture(scope="module")
 def fresh_user():
@@ -22,10 +25,10 @@ def fresh_user():
 
 # --- Auth regression ----------------------------------------------------------
 def test_admin_login_works():
-    r = requests.post(f"{API}/auth/login", json={"email": "admin@example.com", "password": "admin123"})
+    r = requests.post(f"{API}/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
     assert r.status_code == 200, r.text
     data = r.json()
-    assert "token" in data and data["email"] == "admin@example.com"
+    assert "token" in data and data["email"] == ADMIN_EMAIL
 
 
 def test_streak_requires_auth_get():

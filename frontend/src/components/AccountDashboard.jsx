@@ -6,12 +6,12 @@ import { useAuth } from '@/contexts/AuthContext';
 function fmtDate(iso) {
   if (!iso) return '—';
   try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); }
-  catch { return iso; }
+  catch (e) { console.warn('[AccountDashboard] fmtDate failed', e); return iso; }
 }
 
 function fmtMoney(amount, currency = 'usd') {
   try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(amount); }
-  catch { return `$${amount}`; }
+  catch (e) { console.warn('[AccountDashboard] fmtMoney failed', e); return `$${amount}`; }
 }
 
 export default function AccountDashboard({ onBack }) {
@@ -41,7 +41,7 @@ export default function AccountDashboard({ onBack }) {
     try {
       const { data } = await api.get('/admin/users', { params: q ? { q } : {} });
       setUsers(data);
-    } catch (e) { /* ignore non-admin */ }
+    } catch (e) { console.warn('[AccountDashboard] loadUsers failed (likely non-admin)', e); }
   };
 
   const load = async () => {
@@ -156,7 +156,7 @@ export default function AccountDashboard({ onBack }) {
       try {
         const { data: planData } = await api.get('/plan/config');
         setPlan(planData);
-      } catch (_) { /* ignore */ }
+      } catch (e) { console.warn('[AccountDashboard] plan/config refresh failed', e); }
       setMsg(`Saved · Monthly $${data.monthly.price.toFixed(2)} · Annual $${data.annual.price.toFixed(2)} · ${data.trial_days}-day trial`);
     } catch (e2) { setErr(formatApiError(e2)); }
     finally { setBusy(''); }

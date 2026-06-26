@@ -6,8 +6,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import asyncio
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://frequency-healer-31.preview.emergentagent.com').rstrip('/')
-ADMIN_EMAIL = "admin@example.com"
-ADMIN_PASSWORD = "admin123"
+ADMIN_EMAIL = os.environ.get("ADMIN_TEST_EMAIL", "admin@example.com")
+ADMIN_PASSWORD = os.environ.get("ADMIN_TEST_PASSWORD", "admin123")
 
 # Load backend env for mongo access
 from dotenv import load_dotenv
