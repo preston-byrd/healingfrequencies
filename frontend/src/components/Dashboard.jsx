@@ -101,10 +101,11 @@ export default function Dashboard({ onOpenAccount }) {
     }
   }, [remaining, sleepMode, state.playing]);
 
-  // Auto-clear sleepMode when playback stops
+  // Auto-clear sleepMode only when the session has actually completed
+  // (NOT when audio is briefly idle during startSleepMode's setTimeout window).
   useEffect(() => {
-    if (!state.playing && sleepMode) setSleepMode(false);
-  }, [state.playing, sleepMode]);
+    if (sleepMode && !state.playing && remaining === 0) setSleepMode(false);
+  }, [state.playing, sleepMode, remaining]);
 
   // Auto check-in: when user has been playing for >= 60s in this run, record it once.
   useEffect(() => {

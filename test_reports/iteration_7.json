@@ -1,0 +1,32 @@
+{
+  "summary": "Re-tested Sleep Mode after the race-condition fix (auto-clear useEffect now requires `remaining === 0`). The fix is confirmed working end-to-end. All previously-failing Sleep Mode visual/state assertions now PASS: card gets `border-[#72C2AC]/60` highlight, description swaps to 'Drifting · fades at 60s', current-frequency=4.0Hz, timer=30:00 (ticking), ambient-brown-slider=0.45, Pause icon visible, and a SECOND click cleanly calls stopSleepMode (card de-highlights, text reverts, Play icon appears). Solfeggio regression spot-check (528 Hz) also passes. fadeOutAll(60) code path verified by code review and is now reachable since sleepMode persists. Frontend success rate effectively 100% for the targeted Sleep Mode flow.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dashboard.jsx:106-108 — auto-clear useEffect now correctly guarded with `remaining === 0`, eliminating the React race that previously flipped sleepMode→false during the 100ms setTimeout window inside startSleepMode. Clean fix.",
+    "Dashboard.jsx:98-102 fade-out effect — condition `sleepMode && state.playing && remaining === SLEEP_FADE_SECONDS` is now reachable because sleepMode persists. SLEEP_FADE_SECONDS=60 confirmed. Cannot e2e-verify (would require 29-minute wait), but code path is correct.",
+    "audioEngine.fadeOutAll (lib/audioEngine.js:187-199) — verified by reading: cancels scheduled values, sets value at currentTime, then linearRampToValueAtTime(0, t+seconds) on toneGain.gain and every ambient[k].gain.gain. Correct implementation.",
+    "Dashboard.jsx:195-200 stopSleepMode — clean (sets sleepMode=false, stops engine, zeros all ambients, resets remaining). 2nd-click flow verified.",
+    "Minor (non-blocker): the timer useEffect at Dashboard.jsx:90 also drives `audioEngine.stop()` at r<=1, which means at end-of-fade the engine hard-stops in addition to fadeOutAll's ramp; fine because gain is already ~0 by then."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only request)",
+    "frontend": "100% (all Sleep Mode assertions pass; regression spot-check passes)"
+  },
+  "test_credentials": "Admin admin@example.com / admin123 used. Non-Pro paywall path not re-tested this iteration (confirmed working in iteration 6, no related code changed).",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Sleep Mode race condition is fully resolved as of iteration 7. Observed: after 1st click on [data-testid=sleep-mode-preset], card.className contains 'border-[#72C2AC]/60 bg-[#0E1F18]/80', text='Sleep Mode\\nDrifting · fades at 60s', current-frequency='4.0Hz', timer='29:59' (started at 30:00 and ticked), ambient-brown-slider.value='0.45', play-pause-button shows Pause icon. After 2nd click: border removed, text reverts to '4 Hz · brown noise · 30 min fade', Play icon shown. fadeOutAll-at-60s and auto-stop-at-0 paths are confirmed by code review only; e2e validation of the 29-minute timer is impractical — if needed, temporarily reduce SLEEP_DURATION_MIN for a manual run.",
+  "rca of the issue": "Previous race condition root cause: setSleepMode(true) committed before audioEngine.start() (deferred 100ms), causing the auto-clear effect to fire with !state.playing && sleepMode and reset the flag. FIX APPLIED (verified): the auto-clear effect now also requires `remaining === 0`, so it only fires at true session end. Since startSleepMode sets remaining = SLEEP_DURATION_MIN * 60 (1800) BEFORE setSleepMode(true), the clear effect's condition is never met during startup. Fully resolves the bug."
+}
