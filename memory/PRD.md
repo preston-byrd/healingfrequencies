@@ -70,6 +70,14 @@
   - Dashboard.jsx restores prefs on mount (waits for `/me/subscription` to resolve before evaluating `isPro`, then runs exactly once via `restoreStartedRef`). Debounced auto-save (1.2s) fires on any knob change; payload omits Pro-only fields when `isPro=false`. Auto-save effect deps include `isPro` so it re-runs immediately if the user upgrades mid-session.
   - Testing iterations 17/18/19 — converged on full pass: backend 24/24 (15 prefs + 8 subscription + 1 payments-status), frontend 100% on the full upgrade flow (saved Pro knobs survive logout/login + restore correctly after trial upgrade). Two race conditions caught and fixed: (i) iter-17 stale `isPro` closure in restore effect, (ii) iter-18 auto-save clobber of Pro-only fields with React defaults for non-Pro users.
 
+- **4-payment-method upgrade flow** (Feb 2026): Apple Pay / Google Pay / Card / Payment Link, with device-aware capability detection.
+  - Architectural insight: a Stripe Checkout Session URL IS a sharable cross-device URL. So all 4 methods hit the SAME `/api/me/checkout` endpoint and use the SAME Stripe session. Apple Pay / Google Pay / Card redirect this device to Stripe Checkout (which auto-renders Apple Pay / Google Pay buttons inside its hosted page when the browser supports them). Payment Link opens a modal with a QR code (`qrcode.react`) + copy-to-clipboard + open-in-new-tab — same URL, different presentation.
+  - NEW `usePaymentMethodSupport.js` hook detects wallets: Apple Pay via `window.ApplePaySession.canMakePayments()`, Google Pay via the `PaymentRequest` API with `google.com/pay` supportedMethods. Returns `{applePay, googlePay, ready}`; AP/GP buttons hidden when unsupported, "wallet-unavailable-hint" shown when both fail.
+  - NEW `PaymentLinkModal.jsx` — QR (M error correction, 188px), URL input with auto-select-on-click, copy-with-clipboard-fallback, open-in-new-tab anchor (target=_blank), outside-click + X-button close.
+  - Backend `CheckoutIn` gained `payment_method_preference: card|apple_pay|google_pay|link` (Pydantic regex pattern, defaults to 'card'). Forwarded to Stripe metadata for analytics; does NOT change the Stripe call.
+  - AccountDashboard upgrade card refactored: 2-card plan selector (Monthly/Annual with aria-pressed) + 4-button payment-methods grid below.
+  - Testing iteration 20 — 38/38 backend (12 new payment_methods tests + full regression) + 13/13 frontend e2e (plan switch, wallet hide+hint, link modal w/ QR/copy/open/close, annual title, card-redirect). Zero defects.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
