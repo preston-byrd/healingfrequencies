@@ -517,8 +517,17 @@ async def stripe_webhook(request: Request):
 
 @api.get("/me/transactions")
 async def my_transactions(user: dict = Depends(get_current_user)):
+    # Per UX requirement: surface ONLY active paid plans in Billing History.
+    # Pending/initiated/expired/canceled transactions are kept in the DB (we still need
+    # them for /payments/status polling + webhook reconciliation) but hidden from the user.
     items = await db.payment_transactions.find(
-        {"user_id": user["id"]},
+        {
+            "user_id": user["id"],
+            "$or": [
+                {"payment_status": "paid"},
+                {"fulfilled": True},
+            ],
+        },
         {"_id": 0, "metadata": 0},
     ).sort("created_at", -1).to_list(100)
     return items

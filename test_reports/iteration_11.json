@@ -1,0 +1,38 @@
+{
+  "summary": "Validated (a) Billing History backend filter — pending tx hidden from /api/me/transactions but kept in DB for status polling, paid/fulfilled tx appear; and (b) Audio sync engine + Dashboard timer/visibility code-review + live E2E. 5/5 backend pytest pass. Live admin E2E confirms wall-clock timer counts without drift across ambient slider changes and frequency retunes; pause icon persists through 528→432→7.83→golden retunes; all 3 ambient sliders preserved (Rain 50%, Ocean 30%, Forest 30%) post-retunes.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_billing_history.py",
+    "/app/test_reports/pytest/billing_history_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py L518-533 GET /api/me/transactions: correctly filters {payment_status:'paid'} OR {fulfilled:true}, projects out _id and metadata, sorts by created_at desc. Pending rows persist via _create_checkout insert at L422-435 (untouched) so /payments/status polling still resolves. VERIFIED end-to-end via pytest: pending insert -> /me/transactions excludes it; direct DB mark paid+fulfilled -> /me/transactions includes it.",
+    "audioEngine.js L27-41 _ensureCtx: creates ctx once, then calls _prebuildAllAmbient() exactly on the created path. Sequence is correct — master gain wired first, then prebuild. The `await this.ctx.resume()` happens BEFORE _prebuildAllAmbient when ctx pre-exists but is suspended, but on creation path resume runs first then prebuild; in both cases startAt = ctx.currentTime + 0.05 is computed inside prebuild AFTER any resume, so timestamps are valid.",
+    "audioEngine.js L52-59 _prebuildAllAmbient: const startAt = ctx.currentTime + 0.05 computed ONCE, then forEach builds all 8 kinds with the same startAt. Sample-accurate alignment confirmed by code: ['rain','ocean','forest','wind','crickets','bowls','brown','white'] all share startAt.",
+    "audioEngine.js L271-332 _buildAmbient(kind, startAt): t0 = startAt || ctx.currentTime; every lfo.start(t0) (ocean, wind, crickets, bowls) and the final src.start(t0) use the same t0 — all 8 noise sources + 4 LFOs begin at IDENTICAL audio-context time. No drift between layers.",
+    "audioEngine.js L334-356 setAmbient: NO lazy build on the hot path — the prebuilt node is just gain-toggled (setTargetAtTime or cancel+setValueAtTime). Defensive lazy build is only the `if (!this.ambient[kind])` fallback for hot-reload scenarios; aligned to ctx.currentTime which is acceptable for that edge case.",
+    "Dashboard.jsx L102-116 timer effect: wall-clock endAt = Date.now() + remaining*1000 captured ONCE per play start, tick recomputes secsLeft = Math.round((endAt - Date.now())/1000). Deps array is exactly [state.playing] — interval is NOT recreated each second, immune to drift from rapid setRemaining calls. setInterval(tick, 1000) is jitter-tolerant because the source-of-truth is endAt timestamp.",
+    "Dashboard.jsx L120-128 visibilitychange effect: registers ONE listener for the component lifetime; on visible-and-suspended it calls audioEngine.ctx.resume() with a .catch(()=>{}). Empty deps [] — listener never re-bound. Clean cleanup on unmount.",
+    "Live E2E (admin, dashboard, /api/me/transactions=0): tapped solfeggio-freq-528 → 10:00→09:54 (~6s elapsed from tap). Set ambient sliders via keyboard ArrowRight to rain=50, ocean=30, forest=30. Timer 09:54→09:51 (3s in 3s real wait — wall-clock OK). Retuned 432→7.83→golden — Pause icon persisted throughout, timer reached 09:49 and the THREE ambient sliders REMAIN at 50%/30%/30% in the post-retune screenshot. This proves prebuilt ambient layers are not torn down by setFrequency/setGoldenStack.",
+    "Live E2E billing: GET /api/me/transactions returned [] for admin (after the pytest-created pending tx was cleaned). Confirms (1) test cleanup worked, (2) no orphan paid txs leak. UI cannot render any pending row because the backend collection never reaches the frontend."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_billing_history.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (5/5 billing history tests pass)",
+    "frontend": "100% (audio sync + wall-clock timer + visibility + billing UI all verified live)"
+  },
+  "test_credentials": "Admin admin@example.com / admin123",
+  "seed_data_creation": "Test created one pending Stripe checkout tx (cs_test_*) then marked it paid+fulfilled, then DELETED it at end of the test class. No orphan rows.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Billing History filter (L518-533 in /app/backend/server.py) hides any tx whose payment_status != 'paid' AND fulfilled != true. Pending rows still exist in payment_transactions and are reachable by /api/payments/status/{session_id} polling. Audio engine pre-builds ALL 8 ambient layers at a single ctx.currentTime+0.05 timestamp on first _ensureCtx, so sliders just open gains — no realignment ever happens. Dashboard timer is wall-clock based (endAt) with deps [state.playing]; visibilitychange listener resumes audio ctx when tab refocuses. Live verified at https://frequency-healer-31.preview.emergentagent.com — 3 ambient sliders preserved through 3 frequency retunes, pause icon persists, timer counts cleanly. New regression test file: /app/backend/tests/test_billing_history.py.",
+  "rca of the issue": "N/A — feature validation iteration. All four spec items (backend tx filter, ambient prebuild, wall-clock timer, visibility resume) are implemented correctly and live-verified. No regressions detected."
+}

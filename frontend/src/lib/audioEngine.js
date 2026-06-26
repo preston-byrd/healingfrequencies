@@ -25,15 +25,18 @@ class AudioEngine {
   }
 
   async _ensureCtx() {
+    let created = false;
     if (!this.ctx) {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
       this.master = this.ctx.createGain();
       this.master.gain.value = 1;
       this.master.connect(this.ctx.destination);
+      created = true;
     }
     if (this.ctx.state !== 'running') {
       try { await this.ctx.resume(); } catch (e) { /* noop */ }
     }
+    if (created) this._prebuildAllAmbient();
     return this.ctx;
   }
 
@@ -41,6 +44,18 @@ class AudioEngine {
   // BEFORE the user taps a specific frequency. Safe to call multiple times.
   async unlock() {
     try { await this._ensureCtx(); } catch (e) { /* noop */ }
+  }
+
+  // Pre-build every ambient layer at the SAME audio-context time so that all loops
+  // are sample-accurately aligned for the entire session — no drift between layers.
+  // Each source has gain=0 until the user opens a slider, so this is silent until used.
+  _prebuildAllAmbient() {
+    const kinds = ['rain', 'ocean', 'forest', 'wind', 'crickets', 'bowls', 'brown', 'white'];
+    const startAt = this.ctx.currentTime + 0.05;
+    kinds.forEach((kind) => {
+      if (this.ambient[kind]) return;
+      this.ambient[kind] = this._buildAmbient(kind, startAt);
+    });
   }
 
   on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
@@ -253,34 +268,32 @@ class AudioEngine {
     return src;
   }
 
-  _buildAmbient(kind) {
+  _buildAmbient(kind, startAt) {
     const ctx = this.ctx;
     const src = this._makeNoise();
     const filter = ctx.createBiquadFilter();
-    // User-controlled gain — always the FINAL stage. When set to 0, output is truly 0.
     const userGain = ctx.createGain();
     userGain.gain.value = 0;
-    // Modulation gain — only used by ocean for wave swells; chained BEFORE userGain
-    // so the LFO never touches the user gain (fixes the "0% still plays" bug).
     let modGain = null;
     let lfo = null;
 
+    // All time-based starts use the unified `startAt` so every layer is sample-aligned.
+    const t0 = startAt || ctx.currentTime;
     if (kind === 'rain') {
       filter.type = 'highpass'; filter.frequency.value = 1400; filter.Q.value = 0.5;
       src.connect(filter).connect(userGain);
     } else if (kind === 'ocean') {
       filter.type = 'lowpass'; filter.frequency.value = 600; filter.Q.value = 0.8;
-      modGain = ctx.createGain(); modGain.gain.value = 0.55; // center of wave swell
+      modGain = ctx.createGain(); modGain.gain.value = 0.55;
       lfo = ctx.createOscillator(); lfo.frequency.value = 0.12;
       const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.45;
       lfo.connect(lfoAmp).connect(modGain.gain);
-      lfo.start();
+      lfo.start(t0);
       src.connect(filter).connect(modGain).connect(userGain);
     } else if (kind === 'forest') {
       filter.type = 'bandpass'; filter.frequency.value = 2200; filter.Q.value = 0.7;
       src.connect(filter).connect(userGain);
     } else if (kind === 'white') {
-      // Full-spectrum noise — no filter
       src.connect(userGain);
     } else if (kind === 'brown') {
       filter.type = 'lowpass'; filter.frequency.value = 220; filter.Q.value = 0.7;
@@ -291,41 +304,42 @@ class AudioEngine {
       lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
       const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.4;
       lfo.connect(lfoAmp).connect(modGain.gain);
-      lfo.start();
+      lfo.start(t0);
       src.connect(filter).connect(modGain).connect(userGain);
     } else if (kind === 'crickets') {
       filter.type = 'bandpass'; filter.frequency.value = 4800; filter.Q.value = 6;
       modGain = ctx.createGain(); modGain.gain.value = 0.5;
-      lfo = ctx.createOscillator(); lfo.frequency.value = 7; // chirp-rate
+      lfo = ctx.createOscillator(); lfo.frequency.value = 7;
       const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.45;
       lfo.connect(lfoAmp).connect(modGain.gain);
-      lfo.start();
+      lfo.start(t0);
       src.connect(filter).connect(modGain).connect(userGain);
     } else if (kind === 'bowls') {
-      // Singing-bowl-ish: low resonant band
       filter.type = 'bandpass'; filter.frequency.value = 380; filter.Q.value = 8;
       modGain = ctx.createGain(); modGain.gain.value = 0.7;
       lfo = ctx.createOscillator(); lfo.frequency.value = 0.05;
       const lfoAmp = ctx.createGain(); lfoAmp.gain.value = 0.3;
       lfo.connect(lfoAmp).connect(modGain.gain);
-      lfo.start();
+      lfo.start(t0);
       src.connect(filter).connect(modGain).connect(userGain);
     } else {
       src.connect(filter).connect(userGain);
     }
 
     userGain.connect(this.master);
-    src.start();
+    src.start(t0);
     return { src, filter, gain: userGain, modGain, lfo, volume: 0 };
   }
 
   setAmbient(kind, volume) {
-    // Note: cannot make this async because slider events fire rapidly; we kick off
-    // the unlock fire-and-forget on first use.
-    if (!this.ctx) { this.unlock(); }
+    // Ambient nodes are pre-built in _ensureCtx so all 8 layers are sample-aligned.
+    // If ctx isn't ready yet (very first interaction), trigger unlock — we'll catch
+    // the slider movement on the next tick.
+    if (!this.ctx) { this.unlock(); return; }
     if (!this.ambient[kind]) {
-      if (!this.ctx) return; // ctx still warming up; user will need to interact again
-      this.ambient[kind] = this._buildAmbient(kind);
+      // Fallback: lazily build if somehow missing (e.g., after a hot reload),
+      // aligned to the existing ambient layers via the same current time.
+      this.ambient[kind] = this._buildAmbient(kind, this.ctx.currentTime);
     }
     const a = this.ambient[kind];
     const v = Math.max(0, Math.min(1, Number(volume) || 0));

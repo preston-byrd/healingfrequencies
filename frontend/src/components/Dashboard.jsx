@@ -97,17 +97,35 @@ export default function Dashboard({ onOpenAccount }) {
     };
   }, []);
 
-  // Timer
+  // Drift-resistant timer: derive remaining from wall-clock end timestamp instead of
+  // decrementing — survives background-tab throttling and JS interval jitter.
   useEffect(() => {
     if (!state.playing || remaining <= 0) return;
-    const id = setInterval(() => {
-      setRemaining((r) => {
-        if (r <= 1) { audioEngine.stop(); return 0; }
-        return r - 1;
-      });
-    }, 1000);
+    const endAt = Date.now() + remaining * 1000;
+    const tick = () => {
+      const secsLeft = Math.max(0, Math.round((endAt - Date.now()) / 1000));
+      if (secsLeft <= 0) {
+        audioEngine.stop();
+        setRemaining(0);
+      } else {
+        setRemaining(secsLeft);
+      }
+    };
+    const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [state.playing, remaining]);
+  }, [state.playing]);
+
+  // Background/foreground sync: when tab becomes visible, resume the AudioContext
+  // (Chrome auto-suspends it when hidden) so playback continues cleanly.
+  useEffect(() => {
+    const onVis = () => {
+      if (!document.hidden && audioEngine.ctx && audioEngine.ctx.state !== 'running') {
+        audioEngine.ctx.resume().catch(() => { /* noop */ });
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
 
   // Sleep Mode: fade everything out over SLEEP_FADE_SECONDS at the end
   useEffect(() => {
