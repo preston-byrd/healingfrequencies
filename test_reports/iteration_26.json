@@ -1,0 +1,37 @@
+{
+  "summary": "Iter-26 landing-page feature verification: all 7 PRIMARY scenarios PASS on the live preview (https://frequency-healer-31.preview.emergentagent.com). Landing renders for unauth users with the correct testids/copy ('Tune in. Settle down. Resonate.', 'Start tuning', 'POWERED BY SILENCE'). CTA dismisses landing, writes solarisound:landing_dismissed=1, reveals AuthScreen. Reload preserves dismissal; sessionStorage clear brings landing back. Admin login (admin@example.com/admin123) skips landing and lands on Dashboard. ?stripe_session_id=cs_test_dummy bypasses landing for both authed (→AccountDashboard, 'Verifying payment…') and unauthed (→AuthScreen). Visualizer renders 24 .landing-bar spans with animation-name='landing-bar-wave'; orb has animation-name='landing-orb-breath' (4.5s). Mobile 390x844 layout: scrollWidth==clientWidth (no horizontal scroll), CTA at y=631 (above 844 fold), footer at bottom=804 (visible). REGRESSION: full backend pytest 113 passed / 1 skipped / 0 failed (iter-25 parity).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "FastAPI @app.on_event", "issue": "Pre-existing deprecation warning — migrate to lifespan handlers (carried from iter-25)."},
+      {"endpoint": "tests/test_stripe_routing.py::TestCheckoutLiveRegression", "issue": "Pre-existing PytestRemovedIn10Warning — class-scoped fixture defined as instance method (carried)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "LandingPage hero", "issues": ["The 4 concentric .landing-ring pulse rings appear visually off-center relative to the central .landing-orb (largest ring drifts down-right) on both desktop and mobile screenshots. Likely the ring pulse animation uses transform that includes a translation, or the rings inherit a non-centered absolute position. Decorative only — does not block any flow. Worth a small CSS tweak if visual centering is desired."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/test_reports/pytest/iteration_26.xml"
+  ],
+  "action_items": [
+    "Optional polish: investigate .landing-ring centering (rings drift bottom-right of orb mid-animation). Decorative — non-blocking."
+  ],
+  "critical_code_review_comments": [
+    "App.js Shell() correctly handles the 3 landing states: (1) unauth + !dismissed → LandingPage, (2) unauth + dismissed → AuthScreen, (3) authed → Dashboard/AccountDashboard. Stripe-return useEffect correctly forces showLanding=false AND view='account' for both authed and unauthed users (auth gate then routes correctly). sessionStorage access wrapped in try/catch — handles Safari private mode.",
+    "LandingPage.jsx is clean, single-purpose, ~100 LoC. All required data-testid attributes present and match the review_request spec exactly (landing-page, landing-wordmark, landing-visualizer, landing-headline, landing-start-button, landing-footer). 24 bars memoized so animation phase is stable across re-renders.",
+    "No backend changes — pure additive UX surface confirmed. 113/113 pytest still green.",
+    "Carry-over from iter-25: server.py at 1184 lines still exceeds 700-line guideline; recommend routers/ split in future iteration."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (113/113 passed, 1 skipped env-conditional)", "frontend": "100% (7/7 PRIMARY scenarios passed)"},
+  "test_credentials": "Admin: admin@example.com / admin123 (used for PRIMARY 4 admin-bypass test).",
+  "seed_data_creation": "None new. Backend tests re-create TEST_-prefixed users + harmless Stripe test-mode artefacts (same as iter-25).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Landing-page feature is fully verified on live preview. Key selectors for future regression: [data-testid=landing-page|landing-wordmark|landing-visualizer|landing-headline|landing-start-button|landing-footer]. sessionStorage key: 'solarisound:landing_dismissed'. To reset landing in tests: page.evaluate(\"() => sessionStorage.removeItem('solarisound:landing_dismissed')\") + reload. Stripe-return bypass uses ?stripe_session_id=… OR ?stripe_canceled=… on root URL. Backend pytest one-liner unchanged: cd /app && python -m pytest backend/tests/ -v.",
+  "rca of the issue": "N/A — this iteration was a pure feature-add verification. Landing-page rendered correctly on first attempt; all auth/route gates worked on first attempt. No bugs discovered."
+}

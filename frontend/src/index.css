@@ -189,3 +189,61 @@ input, select { font-family: inherit; }
   50% { transform: scale(1.06); }
 }
 .thankyou-phi { animation: thankyou-phi-pulse 2.4s ease-in-out infinite; }
+
+/* === Landing page === */
+/* Reveal cascade is driven by React state + Tailwind transitions for reliability.
+   These rules cover only the always-on visual effects (orb breath, ring pulse,
+   bar wave, CTA glow). */
+
+/* Concentric pulse rings around the central orb */
+@keyframes landing-ring-pulse {
+  0%   { transform: translate(-50%, -50%) scale(0.55); opacity: 0.7; }
+  100% { transform: translate(-50%, -50%) scale(1.5);  opacity: 0; }
+}
+.landing-ring {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  border: 1px solid rgba(114, 194, 172, 0.45);
+  pointer-events: none;
+  animation: landing-ring-pulse 4.8s ease-out infinite;
+}
+.landing-ring-1 { animation-delay: 0s; }
+.landing-ring-2 { animation-delay: 1.2s; border-color: rgba(196, 166, 122, 0.4); }
+.landing-ring-3 { animation-delay: 2.4s; border-color: rgba(232, 227, 217, 0.25); }
+.landing-ring-4 { animation-delay: 3.6s; border-color: rgba(114, 194, 172, 0.3); }
+
+/* The breathing orb at the centre */
+@keyframes landing-orb-breath {
+  0%, 100% { transform: scale(1);    box-shadow: 0 0 50px rgba(114, 194, 172, 0.35), inset 0 0 30px rgba(255,255,255,0.08); }
+  50%      { transform: scale(1.08); box-shadow: 0 0 80px rgba(114, 194, 172, 0.55), inset 0 0 40px rgba(255,255,255,0.14); }
+}
+.landing-orb {
+  background:
+    radial-gradient(circle at 32% 30%, rgba(232,227,217,0.4) 0%, rgba(196,166,122,0.85) 22%, rgba(92,158,140,0.95) 55%, #0a1a16 100%);
+  animation: landing-orb-breath 4.5s ease-in-out infinite;
+}
+
+/* Vertical bar visualizer beneath the orb */
+@keyframes landing-bar-wave {
+  0%, 100% { transform: scaleY(0.18); opacity: 0.45; }
+  50%      { transform: scaleY(1);    opacity: 1; }
+}
+.landing-bar {
+  display: inline-block;
+  width: 2px;
+  height: 100%;
+  background: linear-gradient(to top, rgba(114,194,172,0) 0%, rgba(114,194,172,0.85) 60%, rgba(196,166,122,0.95) 100%);
+  transform-origin: bottom center;
+  animation: landing-bar-wave 6s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+/* CTA breathing glow — applied alongside the reveal transition. */
+@keyframes landing-cta-breath-anim {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(196, 166, 122, 0.0); }
+  50%      { box-shadow: 0 0 32px 0 rgba(196, 166, 122, 0.4); }
+}
+.landing-cta-breath {
+  animation: landing-cta-breath-anim 4.5s ease-in-out infinite 1.5s;
+}
