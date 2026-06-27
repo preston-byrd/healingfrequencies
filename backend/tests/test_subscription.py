@@ -56,33 +56,32 @@ def test_new_user_subscription_defaults():
     assert data["days_left"] == 0
     assert data["trial_used"] is False
     assert data["is_admin"] is False
+    # New subscription-mode fields (Feb 2026)
+    assert data.get("stripe_subscription_status") in (None, "")
+    assert data.get("in_trial") is False
+    assert data.get("trial_end") in (None, "")
+    assert data.get("cancel_at_period_end") is False
+    assert data.get("has_billing_portal") is False
+    assert data.get("payment_failed_at") in (None, "")
 
 
-# ---------- /api/me/trial ----------
-def test_start_trial_then_reuse_rejected():
-    t = _register(_fresh_email("trial"))
-
-    r1 = requests.post(f"{API}/me/trial", headers=_hdr(t))
-    assert r1.status_code == 200, r1.text
-    assert r1.json().get("pro_until")
-
-    # While on trial, /me/subscription should show pro=True, plan='trial', ~7 days
-    r2 = requests.get(f"{API}/me/subscription", headers=_hdr(t))
-    assert r2.status_code == 200
-    d = r2.json()
-    assert d["pro"] is True
-    assert d["plan"] == "trial"
-    assert 6 <= d["days_left"] <= 7
-    assert d["trial_used"] is True
-
-    # Re-call should fail
-    r3 = requests.post(f"{API}/me/trial", headers=_hdr(t))
-    assert r3.status_code == 400
-    assert "trial" in r3.json().get("detail", "").lower()
+# ---------- /api/me/trial (DEPRECATED — now returns 410) ----------
+def test_start_trial_returns_410_gone():
+    """Feb 2026 migration: the no-card trial path is deprecated. /me/trial
+    must return HTTP 410 Gone with a message pointing clients to /me/checkout."""
+    t = _register(_fresh_email("trial410"))
+    r = requests.post(f"{API}/me/trial", headers=_hdr(t))
+    assert r.status_code == 410, r.text
+    detail = r.json().get("detail", "")
+    assert "payment method" in detail.lower()
+    assert "/me/checkout" in detail or "checkout" in detail.lower()
 
 
 # ---------- Session save cap for free users ----------
-def test_session_cap_for_free_user_then_pro_unlimited():
+def test_session_cap_for_free_user():
+    """Free tier capped at 3 saved sessions; trial-as-bypass is no longer
+    available (deprecated). Pro upgrade now requires Stripe Checkout
+    (covered in test_subscription_mode.py)."""
     t = _register(_fresh_email("cap"))
     # Create 3 sessions OK
     for i in range(3):
@@ -98,15 +97,6 @@ def test_session_cap_for_free_user_then_pro_unlimited():
     })
     assert r4.status_code == 402, r4.text
     assert "upgrade" in r4.json().get("detail", "").lower() or "pro" in r4.json().get("detail", "").lower()
-
-    # Start trial -> now unlimited
-    rt = requests.post(f"{API}/me/trial", headers=_hdr(t))
-    assert rt.status_code == 200
-    r5 = requests.post(f"{API}/sessions", headers=_hdr(t), json={
-        "name": "TEST_cap_pro", "frequency": 639.0, "waveform": "sine",
-        "binaural": 0, "duration_minutes": 5,
-    })
-    assert r5.status_code == 200, r5.text
 
 
 # ---------- Checkout ----------

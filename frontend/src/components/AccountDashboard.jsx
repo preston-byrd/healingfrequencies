@@ -122,14 +122,35 @@ export default function AccountDashboard({ onBack }) {
     }
   }, []);
 
-  const startTrial = async () => {
-    setBusy('trial'); setErr(''); setMsg('');
+  const openBillingPortal = async () => {
+    setBusy('portal'); setErr(''); setMsg('');
     try {
-      await api.post('/me/trial');
-      setMsg('7-day free trial started. Enjoy Pro!');
+      const { data } = await api.post('/me/billing-portal', { return_url: window.location.href });
+      if (data?.url) {
+        window.location.href = data.url;
+      } else {
+        setErr('Billing portal could not be opened. Try again in a moment.');
+        setBusy('');
+      }
+    } catch (e) {
+      setErr(formatApiError(e));
+      setBusy('');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const cancelSubscription = async () => {
+    if (!window.confirm('Cancel your subscription? You\'ll keep Pro access until the end of the current period, then return to Basic. You can also use Manage Billing for more options.')) return;
+    setBusy('cancel'); setErr(''); setMsg('');
+    try {
+      await api.post('/me/cancel-subscription');
+      setMsg('Subscription canceled. You\'ll keep Pro access until your current period ends.');
       await load();
-    } catch (e) { setErr(formatApiError(e)); }
-    finally { setBusy(''); }
+    } catch (e) {
+      setErr(formatApiError(e));
+    } finally {
+      setBusy('');
+    }
   };
 
   /**
@@ -474,16 +495,65 @@ export default function AccountDashboard({ onBack }) {
                   </p>
                 )}
               </div>
-
+              {/* Trial messaging — billing starts after 7 days, card required */}
               {!sub.trial_used && (
-                <button
-                  data-testid="start-trial-button"
-                  onClick={startTrial}
-                  disabled={!!busy}
-                  className="w-full mt-4 py-3 rounded-full border border-[#72C2AC]/30 text-[#72C2AC] hover:bg-[#5C9E8C]/15 transition-colors disabled:opacity-50 text-sm"
+                <div
+                  data-testid="trial-billing-info"
+                  className="mt-4 p-3 rounded-lg border border-[#72C2AC]/25 bg-[#5C9E8C]/8"
                 >
-                  {busy === 'trial' ? <Loader2 size={14} className="inline animate-spin mr-2" /> : null}
-                  Or start a {plan.trial_days}-day free trial — no card required
+                  <div className="flex items-start gap-2 text-[11px] text-[#8A9A92] leading-relaxed">
+                    <Sparkles size={12} className="text-[#72C2AC] mt-0.5 flex-shrink-0" />
+                    <span>
+                      <span className="text-[#E8E3D9]">First {plan.trial_days} days are free.</span> A payment method is required to start — Stripe collects card details upfront but you will <span className="text-[#72C2AC]">not be charged</span> until day {plan.trial_days + 1}. Cancel anytime in those {plan.trial_days} days from Manage Billing and nothing will be charged.
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Active subscription — billing management + cancel */}
+          {sub.pro && !sub.is_admin && sub.has_billing_portal && (
+            <div data-testid="active-sub-management" className="mt-5 space-y-2">
+              {sub.in_trial && (
+                <div data-testid="trial-active-banner" className="p-3 rounded-lg border border-[#C4A67A]/30 bg-[#C4A67A]/8 text-[11px] text-[#E8E3D9] leading-relaxed">
+                  <div className="flex items-start gap-2">
+                    <Sparkles size={12} className="text-[#C4A67A] mt-0.5 flex-shrink-0" />
+                    <span>
+                      <span className="text-[#C4A67A]">Trial active.</span>{' '}
+                      {sub.trial_end ? `Your card will be charged on ${fmtDate(sub.trial_end)}` : `Your trial ends in ${sub.days_left} day${sub.days_left === 1 ? '' : 's'}`}
+                      {sub.cancel_at_period_end ? ' — cancellation scheduled, you won\'t be charged.' : '. Cancel before then to avoid the first charge.'}
+                    </span>
+                  </div>
+                </div>
+              )}
+              {!sub.in_trial && sub.cancel_at_period_end && (
+                <div data-testid="cancellation-banner" className="p-3 rounded-lg border border-[#8A9A92]/30 bg-[#8A9A92]/8 text-[11px] text-[#8A9A92] leading-relaxed">
+                  Subscription canceled. You&apos;ll keep Pro access until {sub.pro_until ? fmtDate(sub.pro_until) : 'the end of the current period'}.
+                </div>
+              )}
+              {sub.payment_failed_at && (
+                <div data-testid="payment-failed-banner" className="p-3 rounded-lg border border-red-400/40 bg-red-400/10 text-[11px] text-red-200 leading-relaxed">
+                  We couldn&apos;t charge your card. Open Manage Billing to update your payment method.
+                </div>
+              )}
+              <button
+                data-testid="manage-billing-button"
+                onClick={openBillingPortal}
+                disabled={!!busy}
+                className="w-full py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium text-sm transition-colors disabled:opacity-50 inline-flex items-center justify-center gap-2"
+              >
+                {busy === 'portal' ? <Loader2 size={14} className="animate-spin" /> : <CreditCard size={14} />}
+                Manage Billing (cancel, update card, invoices)
+              </button>
+              {!sub.cancel_at_period_end && (
+                <button
+                  data-testid="cancel-subscription-button"
+                  onClick={cancelSubscription}
+                  disabled={!!busy}
+                  className="w-full py-2 rounded-full text-[11px] text-[#8A9A92] hover:text-[#E8E3D9] transition-colors disabled:opacity-50"
+                >
+                  {busy === 'cancel' ? 'Canceling…' : 'or, cancel here in one click'}
                 </button>
               )}
             </div>

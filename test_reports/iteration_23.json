@@ -1,0 +1,68 @@
+{
+  "summary": "Iter 23 — Validated Feb 2026 SUBSCRIPTION-mode migration (one-time payment → recurring Stripe Subscription with 7-day trial + Customer Portal). Backend: 106/107 pytest passing across the full suite (12 new tests in test_subscription_mode.py + updated test_subscription.py + updated test_prefs.py to remove dependency on the deprecated /me/trial). Confirmed: /me/checkout returns subscription-mode session with mode='subscription' + includes_trial=true (and includes_trial=false when user.trial_used was preset); /me/trial returns 410 with the new 'use POST /me/checkout' message; /me/billing-portal correctly 400s without stripe_customer_id and 200s with a billing.stripe.com URL after a checkout creates the customer; /me/cancel-subscription returns 400 without an active sub; /me/subscription exposes the 6 new fields (stripe_subscription_status, in_trial, trial_end, cancel_at_period_end, has_billing_portal, payment_failed_at); webhook unsigned-fallback handles customer.subscription.deleted (user→plan:basic), invoice.payment_failed (user→payment_failed_at set), and unknown-customer events (no 500). One regression failure surfaced as a real bug — see backend_issues.critical.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/me/checkout",
+        "issue": "Bad Stripe API key path returns raw 500 instead of the documented 502 with detail starting 'Stripe checkout failed:'. Root cause: in /app/backend/server.py L606, _get_or_create_stripe_customer(user) is called BEFORE the try/except block that wraps stripe.checkout.Session.create on L633-661. When the Stripe SDK raises AuthenticationError inside _stripe_call/Customer.create, the exception propagates uncaught into FastAPI as a generic 500 — bypassing the friendly 502 handler. Fix: wrap the customer_id = await _get_or_create_stripe_customer(user) call (and ideally the entire body from L606 onward) in the same try/except Exception block that already wraps Session.create, OR move the try/except up to cover both calls. Test that fails: backend/tests/test_checkout_error_handling.py::test_checkout_bad_stripe_key_returns_502.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/me/checkout",
+        "issue": "Pydantic V1 @validator deprecation warnings from emergentintegrations/payments/stripe/checkout.py (4 warnings on every checkout call). Non-blocking but will break on Pydantic V3."
+      },
+      {
+        "endpoint": "server startup",
+        "issue": "@app.on_event('startup'/'shutdown') deprecated — migrate to lifespan event handlers. Non-blocking."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "UI smoke test for trial-billing-info / pay-card-button",
+        "issue": "Playwright registration flow did NOT complete in my test run — the name field appears empty in the post-submit screenshot, suggesting either the auth-name-input testid is different or a timing/focus issue with the fill action. As a result I could not visually confirm trial-billing-info, pay-card-button, or active-sub-management on the rendered page. HOWEVER, source-code review of AccountDashboard.jsx (L498-560) confirms all required elements with correct testids exist: trial-billing-info (L501), active-sub-management (L517), trial-active-banner (L519), cancellation-banner (L531), payment-failed-banner (L536), manage-billing-button (L541), cancel-subscription-button (L551). The legacy start-trial-button is correctly REMOVED (grep confirms zero matches). Recommend main-agent self-test for the visual UI flow.",
+        "affected_selectors": ["auth-name-input", "trial-billing-info", "pay-card-button", "active-sub-management"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_subscription_mode.py",
+    "/app/backend/tests/test_subscription.py",
+    "/app/backend/tests/test_prefs.py",
+    "/app/test_reports/pytest/iter23_full.xml"
+  ],
+  "action_items": [
+    "PRIORITY-1: Wrap _get_or_create_stripe_customer(user) inside the try/except Exception block in create_checkout (server.py L606 → before L633) so bad/missing Stripe credentials produce the same 502 'Stripe checkout failed:' contract that test_checkout_error_handling expects. One-liner fix: move the customer_id assignment INSIDE the existing try block (and include _stripe.checkout.Session.create in the same try). This restores the 502 envelope for ALL Stripe-side failures, not just Session.create.",
+    "Optional: do a quick self-test of the frontend account dashboard for a fresh user — verify trial-billing-info renders with '7 days free' messaging and the pay-card-button click takes you to checkout.stripe.com. My Playwright run hit a selector/timing snag I couldn't resolve within the loop-prevention budget."
+  ],
+  "critical_code_review_comments": [
+    "Subscription-mode design is sound. _sync_subscription_to_user (server.py L535-568) cleanly maps Stripe states {trialing, active, past_due} → pro=true with pro_until=current_period_end, and {canceled, incomplete_expired, unpaid} → plan='basic' with pro_until=now (immediate revoke). The choice of past_due → keep access while Stripe retries is correct per Stripe best practice (Smart Retries handles billing recovery; revoking access on first failure produces angry customers).",
+    "The 25s STRIPE_CALL_TIMEOUT via asyncio.wait_for + asyncio.to_thread is correct, idiomatic, and the canonical Cloudflare-protection pattern. _normalise_stripe_api_base() called inside _stripe_call defensively rebinds api_base every call — protects against the iter-21 module-level mutation bug. Good.",
+    "Webhook handler (L772-845) handles both signed and unsigned paths correctly. Unsigned fallback uses json.loads(body) — safe because we only TRUST the polling path (/payments/status) for fulfilment; the webhook only PROJECTS state via _sync_subscription_to_user. Good defense-in-depth.",
+    "BUG (HIGH): /me/checkout error envelope is asymmetric — bad Stripe key fails at Customer.create (uncaught → 500) but bad-data fails at Session.create (caught → 502). Fix: move the try/except up to cover _get_or_create_stripe_customer. See action_items.",
+    "The /me/trial 410 message is clear and actionable: includes the exact replacement endpoint (POST /me/checkout) and plan param hints. Good UX for any stale frontend.",
+    "AccountDashboard.jsx: the !sub.trial_used gate for trial-billing-info (L499) is correct — once a user consumed their trial, the card disappears (no false 'first 7 days free' for returning subscribers). The active-sub-management gate uses sub.pro && !sub.is_admin && sub.has_billing_portal — admin (lifetime, no Stripe customer) correctly bypasses, matching the user's expectation.",
+    "/me/cancel-subscription is a thin wrapper around stripe.Subscription.modify(cancel_at_period_end=True) followed by _sync_subscription_to_user — idempotent and safe. The Customer Portal is still the canonical UX (linked from manage-billing-button); cancel-subscription-button is the one-click fallback as designed.",
+    "Minor: server.py is at 1124 lines — borderline on the 700-line guideline. Consider splitting into auth/payments/admin/prefs modules in a future iteration. Not blocking."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_subscription.py (updated /me/trial test to assert 410 instead of 200; split test_session_cap to drop trial-bypass branch; added new fields assertions to test_new_user_subscription_defaults)",
+    "/app/backend/tests/test_subscription_mode.py (NEW — 12 tests covering subscription-mode checkout, /me/trial 410, billing-portal, cancel-subscription, /me/subscription new fields, webhook events, timeout budget)",
+    "/app/backend/tests/test_prefs.py (replaced /me/trial calls with _grant_pro() helper that writes pro_until directly to mongo — needed because /me/trial now returns 410)"
+  ],
+  "success_rate": {
+    "backend": "99% (106/107 pytest passing; 1 failure is a genuine code bug in /me/checkout error envelope — see action_items)",
+    "frontend": "code-review-only (source confirms all required testids and testid removal; live Playwright run hit a selector issue I could not resolve under loop-prevention budget — recommend main-agent self-test)"
+  },
+  "test_credentials": "Admin: admin@example.com / admin123 (admin path verified separately; admin has no stripe_customer_id so /me/billing-portal would correctly 400 for admin — frontend gates Manage Billing on has_billing_portal so admin sees the existing admin section without the new buttons, as the spec requires).",
+  "seed_data_creation": "None — all backend tests create their own TEST_*-prefixed users with fresh emails. Customer-portal test creates a real Stripe customer via sk_test_emergent; these accumulate in Stripe test mode but are harmless.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend: 107 tests total in /app/backend/tests/. Run with: cd /app && MONGO_URL='mongodb://localhost:27017' DB_NAME='test_database' python -m pytest backend/tests/ -p xdist -n0 -v. The new subscription-mode contract lives in test_subscription_mode.py. After main agent fixes the _get_or_create_stripe_customer wrapping in create_checkout, all 107 tests should pass. /me/trial → 410, /me/checkout → subscription-mode session with optional trial_period_days=7, /me/billing-portal → 400 or billing.stripe.com URL, /me/cancel-subscription → 400 or {ok,cancel_at_period_end:true}. Webhook accepts unsigned events (no Stripe-Signature header) — convenient for synthetic tests. Frontend: AccountDashboard.jsx testids are stable — see frontend_issues.integration_issues for the selector hint (auth-name-input may need .focus() before .fill() or a longer wait). Test setup helper _grant_pro(user_id) in test_prefs.py is the canonical way to mark a user Pro without going through Stripe.",
+  "rca of the issue": "Bug: /api/me/checkout returns 500 instead of 502 when STRIPE_API_KEY is invalid. Reproduction: monkeypatch server.STRIPE_API_KEY='sk_live_invalid_key_for_test', POST /api/me/checkout {plan:'monthly', origin_url:'https://x.test'} with valid auth → response is 500 with raw stack-trace detail instead of the documented 502 detail starting 'Stripe checkout failed:'. RCA: in create_checkout (server.py L571-684), the call sequence is (1) _get_or_create_stripe_customer(user) on L606 → hits stripe.Customer.create via _stripe_call → AuthenticationError raised; (2) try/except on L633 wraps only stripe.checkout.Session.create. The customer-create call is OUTSIDE the try block, so the exception bypasses the 502 handler. Mitigation: move the try/except to start at L606 (covering both Customer.create and Session.create) — or wrap _get_or_create_stripe_customer in its own try/except that re-raises as HTTPException(502, 'Stripe checkout failed: ...'). One-block fix preferred to keep the error message uniform across the entire Stripe flow. This bug is INDEPENDENT of the Cloudflare-timeout fix — both protections are needed."
+}

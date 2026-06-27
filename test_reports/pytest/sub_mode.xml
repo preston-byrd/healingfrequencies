@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="2" failures="0" skipped="0" tests="10" time="6.327" timestamp="2026-06-27T03:32:37.251085+00:00" hostname="agent-env-ecc48b74-f010-4ac4-ad40-4999b9ebdf0d"><testcase classname="" name="tests.test_subscription_mode" time="0.000"><error message="collection failure">backend/tests/test_subscription_mode.py:18: in &lt;module&gt;
+    BASE_URL = os.environ['REACT_APP_BACKEND_URL'].rstrip('/')
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+&lt;frozen os&gt;:679: in __getitem__
+    ???
+E   KeyError: 'REACT_APP_BACKEND_URL'</error><error message="collection failure">backend/tests/test_subscription_mode.py:18: in &lt;module&gt;
+    BASE_URL = os.environ['REACT_APP_BACKEND_URL'].rstrip('/')
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+&lt;frozen os&gt;:679: in __getitem__
+    ???
+E   KeyError: 'REACT_APP_BACKEND_URL'</error></testcase><testcase classname="tests.test_subscription" name="test_plan_config_public_no_auth" time="0.223" /><testcase classname="tests.test_subscription" name="test_new_user_subscription_defaults" time="0.505" /><testcase classname="tests.test_subscription" name="test_start_trial_returns_410_gone" time="0.482" /><testcase classname="tests.test_subscription" name="test_session_cap_for_free_user" time="0.818" /><testcase classname="tests.test_subscription" name="test_checkout_invalid_plan_400" time="0.438" /><testcase classname="tests.test_subscription" name="test_change_password_then_login_with_new" time="1.867" /><testcase classname="tests.test_subscription" name="test_admin_prices_non_admin_403" time="0.535" /><testcase classname="tests.test_subscription" name="test_admin_prices_update_persists_and_reflected_in_public_config" time="0.760" /></testsuite></testsuites>

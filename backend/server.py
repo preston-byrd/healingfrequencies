@@ -5,6 +5,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import asyncio
 import logging
 import uuid
 import bcrypt
@@ -19,6 +20,13 @@ from pydantic import BaseModel, Field, EmailStr
 from emergentintegrations.payments.stripe.checkout import (
     StripeCheckout, CheckoutSessionRequest
 )
+
+
+# Hard cap on every outbound Stripe call. Cloudflare's edge cuts the
+# connection at 100s and reports "origin returned an invalid or incomplete
+# response" if we don't respond in time — by capping at 25s we always have
+# headroom to return a clean JSON 502 instead of a half-open socket.
+STRIPE_CALL_TIMEOUT = 25
 
 
 # --- Setup --------------------------------------------------------------------
@@ -392,6 +400,8 @@ async def my_subscription(user: dict = Depends(get_current_user)):
         except Exception:
             pass
     # Admin always shows as pro (lifetime access)
+    sub_status = full.get("stripe_subscription_status")
+    in_trial = sub_status == "trialing"
     plan = "admin" if is_admin else (full.get("plan") or ("pro" if pro else "basic"))
     return {
         "plan": plan,
@@ -400,23 +410,32 @@ async def my_subscription(user: dict = Depends(get_current_user)):
         "days_left": days_left,
         "trial_used": bool(full.get("trial_used")),
         "is_admin": is_admin,
+        "stripe_subscription_status": sub_status,
+        "in_trial": in_trial,
+        "trial_end": full.get("stripe_trial_end"),
+        "cancel_at_period_end": bool(full.get("stripe_cancel_at_period_end")),
+        "has_billing_portal": bool(full.get("stripe_customer_id")),
+        "payment_failed_at": full.get("payment_failed_at"),
     }
 
 
 @api.post("/me/trial")
 async def start_trial(user: dict = Depends(get_current_user)):
-    full = await db.users.find_one({"id": user["id"]})
-    if full.get("trial_used"):
-        raise HTTPException(status_code=400, detail="Free trial already used")
-    if _is_pro(full):
-        raise HTTPException(status_code=400, detail="You already have an active Pro plan")
-    cfg = await _get_plan_config()
-    until = datetime.now(timezone.utc) + timedelta(days=int(cfg.get("trial_days", 7)))
-    await db.users.update_one(
-        {"id": user["id"]},
-        {"$set": {"plan": "trial", "pro_until": until.isoformat(), "trial_used": True}},
+    """DEPRECATED — the no-card trial path. The new policy (Feb 2026) requires
+    a payment method to start the 7-day trial; clients should call
+    POST /me/checkout instead, which embeds `trial_period_days=7` into a
+    Stripe Subscription. We keep this endpoint returning a clear 410 so any
+    stale frontend redirects users to the new flow instead of silently
+    granting access without billing setup."""
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "The free trial now requires a payment method. "
+            "Use POST /api/me/checkout with plan=monthly or plan=annual to "
+            "start a Stripe Checkout session — the first 7 days are free and "
+            "you can cancel anytime before billing begins."
+        ),
     )
-    return {"ok": True, "pro_until": until.isoformat()}
 
 
 @api.get("/me/prefs")
@@ -452,30 +471,119 @@ async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user))
 
 
 # ---------- Stripe helper ----------
-def _stripe_client(webhook_url: str) -> StripeCheckout:
-    """Create a StripeCheckout instance and normalise the global `stripe.api_base`.
-
-    Why: the emergentintegrations wrapper sets `stripe.api_base` to Emergent's
-    proxy when the key contains 'sk_test_emergent' — but it NEVER resets that
-    global afterwards. Because `stripe.api_base` is a module-level singleton,
-    a single sk_test_emergent call earlier in the process lifetime would route
-    every subsequent live-key request through Emergent's proxy, producing a
-    Stripe Checkout Session URL that loads BLANK in the user's live account
-    (the session was never created on real Stripe).
-
-    We normalise it explicitly on every request so the routing is correct
-    regardless of what previous keys ran through this process.
-    """
+def _normalise_stripe_api_base():
+    """Defense against the upstream library's sticky module-level mutation —
+    see iter 21 RCA. Idempotent; call before every Stripe SDK call."""
     import stripe as _stripe
     if "sk_test_emergent" in STRIPE_API_KEY:
         _stripe.api_base = "https://integrations.emergentagent.com/stripe"
     else:
         _stripe.api_base = "https://api.stripe.com"
+    _stripe.api_key = STRIPE_API_KEY
+
+
+def _stripe_client(webhook_url: str) -> StripeCheckout:
+    """Create a StripeCheckout instance and normalise the global `stripe.api_base`.
+    Used by the legacy one-time payment path and the webhook handler.
+    """
+    _normalise_stripe_api_base()
     return StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+
+
+async def _stripe_call(fn, *args, **kwargs):
+    """Run a synchronous Stripe SDK call in a thread with a hard timeout.
+    Raises HTTPException(502) on timeout — guaranteed JSON response within
+    STRIPE_CALL_TIMEOUT seconds so Cloudflare never sees an incomplete reply.
+    """
+    _normalise_stripe_api_base()
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fn, *args, **kwargs),
+            timeout=STRIPE_CALL_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error("[stripe] call %s timed out after %ds", getattr(fn, "__qualname__", fn), STRIPE_CALL_TIMEOUT)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Stripe is taking too long to respond (>{STRIPE_CALL_TIMEOUT}s). Please try again in a moment.",
+        )
+
+
+async def _get_or_create_stripe_customer(user: dict) -> str:
+    """Return the user's Stripe customer ID, creating one on first call."""
+    import stripe as _stripe
+    full = await db.users.find_one({"id": user["id"]}) or {}
+    cust_id = full.get("stripe_customer_id")
+    if cust_id:
+        return cust_id
+    customer = await _stripe_call(
+        _stripe.Customer.create,
+        email=user["email"],
+        metadata={"user_id": user["id"], "name": full.get("name", "")},
+    )
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"stripe_customer_id": customer.id}},
+    )
+    return customer.id
+
+
+def _interval_for_plan(plan: str) -> str:
+    return "year" if plan == "annual" else "month"
+
+
+async def _sync_subscription_to_user(user_id: str, subscription) -> dict:
+    """Project a Stripe Subscription onto the user's pro_until / plan fields so
+    the existing _is_pro logic keeps working unchanged. Returns the patch dict
+    that was applied (for logging/tests)."""
+    sub_status = subscription.get("status") if isinstance(subscription, dict) else subscription.status
+    period_end = subscription.get("current_period_end") if isinstance(subscription, dict) else subscription.current_period_end
+    trial_end = subscription.get("trial_end") if isinstance(subscription, dict) else subscription.trial_end
+    cancel_at_period_end = subscription.get("cancel_at_period_end") if isinstance(subscription, dict) else subscription.cancel_at_period_end
+    sub_id = subscription.get("id") if isinstance(subscription, dict) else subscription.id
+
+    active_states = {"trialing", "active", "past_due"}  # past_due keeps access while Stripe retries
+    pro = sub_status in active_states
+    pro_until_dt = None
+    if period_end:
+        pro_until_dt = datetime.fromtimestamp(int(period_end), tz=timezone.utc)
+
+    patch = {
+        "stripe_subscription_id": sub_id,
+        "stripe_subscription_status": sub_status,
+        "stripe_cancel_at_period_end": bool(cancel_at_period_end),
+        "stripe_trial_end": (datetime.fromtimestamp(int(trial_end), tz=timezone.utc).isoformat() if trial_end else None),
+    }
+    if pro and pro_until_dt:
+        patch["pro_until"] = pro_until_dt.isoformat()
+        patch["plan"] = "trial" if sub_status == "trialing" else "pro"
+        if sub_status == "trialing":
+            patch["trial_used"] = True
+    elif sub_status in ("canceled", "incomplete_expired", "unpaid"):
+        # Revoke access by clearing pro_until in the past
+        patch["pro_until"] = datetime.now(timezone.utc).isoformat()
+        patch["plan"] = "basic"
+
+    await db.users.update_one({"id": user_id}, {"$set": patch})
+    return patch
 
 
 @api.post("/me/checkout")
 async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depends(get_current_user)):
+    """Create a Stripe Checkout Session in SUBSCRIPTION mode with a 7-day trial.
+
+    Behavior change (Feb 2026): we no longer create one-time payments. Every
+    new Pro signup is a recurring subscription with `trial_period_days=7`,
+    which means:
+      * card is collected upfront at signup
+      * no charge until the 7-day trial expires
+      * Stripe auto-charges monthly/annually after trial
+      * user can cancel anytime via the Customer Portal (/me/billing-portal)
+
+    Returns {url, session_id} just like before so the frontend redirect path
+    is unchanged. The Cloudflare-friendly 25-second hard timeout is applied
+    to every outbound Stripe call.
+    """
     if body.plan not in ("monthly", "annual"):
         raise HTTPException(status_code=400, detail="Invalid plan")
     if not STRIPE_API_KEY:
@@ -483,23 +591,19 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
 
     cfg = await _get_plan_config()
     pkg = cfg[body.plan]
-    amount = float(pkg["price"])  # SERVER-SIDE truth — never trust client
+    amount = float(pkg["price"])
     currency = cfg.get("currency", "usd")
+    interval = _interval_for_plan(body.plan)
+    unit_amount_cents = int(round(amount * 100))
 
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = _stripe_client(webhook_url)
+    # Reuse trial only if the user hasn't used theirs yet — Stripe will reject
+    # `trial_period_days` on a customer who already had a trial on this price,
+    # so we mirror that on our side defensively.
+    full = await db.users.find_one({"id": user["id"]}) or {}
+    trial_days = int(cfg.get("trial_days", 7))
+    include_trial = not full.get("trial_used")
 
-    # Diagnostic log — surfaces which Stripe environment we're actually talking
-    # to. If a sk_live_ key were ever routed to Emergent's proxy by accident,
-    # this single line in /var/log/supervisor/backend.out.log would show it.
-    import stripe as _stripe
-    logger.info(
-        "[checkout] user=%s plan=%s method=%s key_prefix=%s api_base=%s",
-        user.get("email"), body.plan, body.payment_method_preference,
-        (STRIPE_API_KEY[:12] + "…") if STRIPE_API_KEY else "(none)",
-        _stripe.api_base,
-    )
+    customer_id = await _get_or_create_stripe_customer(user)
 
     origin = body.origin_url.rstrip("/")
     success_url = f"{origin}/?stripe_session_id={{CHECKOUT_SESSION_ID}}"
@@ -511,72 +615,117 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
         "plan": body.plan,
         "days": str(pkg["days"]),
         "payment_method_preference": body.payment_method_preference or "card",
+        "includes_trial": "true" if include_trial else "false",
     }
-    req = CheckoutSessionRequest(
-        amount=amount,
-        currency=currency,
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata=metadata,
+
+    import stripe as _stripe
+    logger.info(
+        "[checkout] user=%s plan=%s method=%s key_prefix=%s api_base=%s trial=%s customer=%s",
+        user.get("email"), body.plan, body.payment_method_preference,
+        (STRIPE_API_KEY[:12] + "…") if STRIPE_API_KEY else "(none)",
+        _stripe.api_base, include_trial, customer_id,
     )
+
+    subscription_data = {"metadata": metadata}
+    if include_trial:
+        subscription_data["trial_period_days"] = trial_days
+
     try:
-        session = await sc.create_checkout_session(req)
+        session = await _stripe_call(
+            _stripe.checkout.Session.create,
+            mode="subscription",
+            customer=customer_id,
+            line_items=[{
+                "price_data": {
+                    "currency": currency,
+                    "product_data": {"name": pkg.get("label", f"Pro {body.plan.title()}")},
+                    "unit_amount": unit_amount_cents,
+                    "recurring": {"interval": interval},
+                },
+                "quantity": 1,
+            }],
+            payment_method_types=["card"],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata=metadata,
+            subscription_data=subscription_data,
+            allow_promotion_codes=True,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
-        # Surface the real Stripe error so the user can act on it (bad key,
-        # restricted account, currency not supported, etc.) instead of a
-        # silent failure that the frontend reads as "nothing happens".
-        logger.exception("[checkout] Stripe create_checkout_session failed for user=%s plan=%s", user.get("email"), body.plan)
+        logger.exception("[checkout] Stripe session.create failed for user=%s plan=%s", user.get("email"), body.plan)
         raise HTTPException(
             status_code=502,
-            detail=f"Stripe checkout failed: {str(e)}. Verify STRIPE_API_KEY is a valid key from your Stripe Dashboard and that USD card payments are enabled.",
+            detail=f"Stripe checkout failed: {str(e)}. Verify STRIPE_API_KEY is valid and recurring USD payments are enabled in your Stripe Dashboard.",
         )
 
     if not getattr(session, "url", None):
         logger.error("[checkout] Stripe returned no URL for user=%s plan=%s session=%r", user.get("email"), body.plan, session)
         raise HTTPException(status_code=502, detail="Stripe did not return a checkout URL")
 
-    # Create pending transaction BEFORE redirect
     await db.payment_transactions.insert_one({
-        "session_id": session.session_id,
+        "session_id": session.id,
         "user_id": user["id"],
         "email": user["email"],
         "plan": body.plan,
         "amount": amount,
         "currency": currency,
         "days": int(pkg["days"]),
+        "interval": interval,
+        "mode": "subscription",
+        "includes_trial": include_trial,
         "status": "initiated",
         "payment_status": "pending",
         "metadata": metadata,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "fulfilled": False,
     })
-    return {"url": session.url, "session_id": session.session_id}
+    return {"url": session.url, "session_id": session.id}
 
 
 async def _fulfill_payment(tx: dict):
-    """Idempotently apply a successful payment to the user's plan."""
+    """Idempotently apply a successful payment to the user's plan.
+
+    For SUBSCRIPTION mode (current default): pulls the Stripe Subscription and
+    projects status / current_period_end / trial_end onto the user record via
+    _sync_subscription_to_user. Source of truth is always Stripe.
+
+    For one-time PAYMENT mode (legacy txs only): just extends pro_until by the
+    package's `days` count.
+    """
     if tx.get("fulfilled"):
         return
     user_id = tx["user_id"]
-    days = int(tx.get("days", 30))
-    full = await db.users.find_one({"id": user_id}) or {}
-    now = datetime.now(timezone.utc)
-    current_until = None
-    pu = full.get("pro_until")
-    if pu:
-        try:
-            current_until = datetime.fromisoformat(pu)
-        except Exception:
-            current_until = None
-    base = current_until if (current_until and current_until > now) else now
-    new_until = base + timedelta(days=days)
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {"plan": "pro", "pro_until": new_until.isoformat()}},
-    )
+    is_sub = tx.get("mode") == "subscription"
+    if is_sub:
+        # Look up the Stripe Subscription via the Checkout Session
+        import stripe as _stripe
+        session = await _stripe_call(_stripe.checkout.Session.retrieve, tx["session_id"])
+        sub_id = session.subscription
+        if sub_id:
+            subscription = await _stripe_call(_stripe.Subscription.retrieve, sub_id)
+            await _sync_subscription_to_user(user_id, subscription)
+    else:
+        days = int(tx.get("days", 30))
+        full = await db.users.find_one({"id": user_id}) or {}
+        now = datetime.now(timezone.utc)
+        current_until = None
+        pu = full.get("pro_until")
+        if pu:
+            try:
+                current_until = datetime.fromisoformat(pu)
+            except Exception:
+                current_until = None
+        base = current_until if (current_until and current_until > now) else now
+        new_until = base + timedelta(days=days)
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"plan": "pro", "pro_until": new_until.isoformat()}},
+        )
     await db.payment_transactions.update_one(
         {"session_id": tx["session_id"]},
-        {"$set": {"fulfilled": True, "fulfilled_at": now.isoformat()}},
+        {"$set": {"fulfilled": True, "fulfilled_at": datetime.now(timezone.utc).isoformat()}},
     )
 
 
@@ -586,51 +735,184 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
 
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = _stripe_client(webhook_url)
-    status = await sc.get_checkout_status(session_id)
+    import stripe as _stripe
+    try:
+        session = await _stripe_call(_stripe.checkout.Session.retrieve, session_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[status] retrieve failed for sid=%s", session_id)
+        raise HTTPException(status_code=502, detail=f"Stripe status lookup failed: {e}")
 
     update = {
-        "status": status.status,
-        "payment_status": status.payment_status,
+        "status": session.status,
+        "payment_status": session.payment_status,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.payment_transactions.update_one({"session_id": session_id}, {"$set": update})
 
-    if status.payment_status == "paid" and not tx.get("fulfilled"):
+    # In subscription mode the session is "complete" with payment_status="paid"
+    # (or "no_payment_required" for trial-only signups). Either way fulfilment
+    # should fire so the trial activates immediately.
+    fulfilled = (session.status == "complete") and not tx.get("fulfilled")
+    if fulfilled:
         await _fulfill_payment({**tx, **update})
 
     return {
         "session_id": session_id,
-        "status": status.status,
-        "payment_status": status.payment_status,
-        "amount_total": status.amount_total,
-        "currency": status.currency,
-        "fulfilled": (status.payment_status == "paid"),
+        "status": session.status,
+        "payment_status": session.payment_status,
+        "amount_total": getattr(session, "amount_total", None),
+        "currency": getattr(session, "currency", None),
+        "fulfilled": (session.status == "complete"),
         "plan": tx.get("plan"),
     }
 
 
 @api.post("/webhook/stripe")
 async def stripe_webhook(request: Request):
+    """Handles both legacy one-time payment events AND subscription lifecycle
+    events (customer.subscription.{updated,deleted}, invoice.payment_{succeeded,failed}).
+    For subscriptions, we re-project Stripe state onto the user record via
+    _sync_subscription_to_user so the existing _is_pro logic keeps working.
+    """
     if not STRIPE_API_KEY:
         return {"received": False}
     body = await request.body()
     sig = request.headers.get("Stripe-Signature", "")
-    host_url = str(request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = _stripe_client(webhook_url)
+    import stripe as _stripe
+    _normalise_stripe_api_base()
+
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    event = None
     try:
-        resp = await sc.handle_webhook(body, sig)
+        if webhook_secret and sig:
+            event = _stripe.Webhook.construct_event(body, sig, webhook_secret)
+        else:
+            # Without a webhook secret we trust the polling path (/payments/status)
+            # for fulfilment. Still parse the body so subscription state stays fresh.
+            import json
+            event = json.loads(body.decode("utf-8"))
     except Exception as e:
-        logger.warning(f"Stripe webhook error: {e}")
+        logger.warning("[webhook] could not parse: %s", e)
         return {"received": True}
-    if resp.payment_status == "paid" and resp.session_id:
-        tx = await db.payment_transactions.find_one({"session_id": resp.session_id})
-        if tx and not tx.get("fulfilled"):
-            await _fulfill_payment(tx)
+
+    et = event.get("type") if isinstance(event, dict) else event["type"]
+    data_obj = (event.get("data") or {}).get("object") if isinstance(event, dict) else event["data"]["object"]
+    logger.info("[webhook] event=%s", et)
+
+    try:
+        if et == "checkout.session.completed":
+            sid = data_obj.get("id") if isinstance(data_obj, dict) else data_obj.id
+            tx = await db.payment_transactions.find_one({"session_id": sid})
+            if tx and not tx.get("fulfilled"):
+                await _fulfill_payment(tx)
+
+        elif et in ("customer.subscription.updated", "customer.subscription.created", "customer.subscription.deleted"):
+            sub_id = data_obj.get("id") if isinstance(data_obj, dict) else data_obj.id
+            cust_id = data_obj.get("customer") if isinstance(data_obj, dict) else data_obj.customer
+            full = await db.users.find_one({"stripe_customer_id": cust_id})
+            if full:
+                await _sync_subscription_to_user(full["id"], data_obj if isinstance(data_obj, dict) else data_obj.to_dict())
+            else:
+                logger.warning("[webhook] sub %s for unknown customer %s", sub_id, cust_id)
+
+        elif et == "invoice.payment_failed":
+            cust_id = data_obj.get("customer") if isinstance(data_obj, dict) else data_obj.customer
+            full = await db.users.find_one({"stripe_customer_id": cust_id})
+            if full:
+                # Flag the failure so the dashboard banner can surface it.
+                await db.users.update_one(
+                    {"id": full["id"]},
+                    {"$set": {"payment_failed_at": datetime.now(timezone.utc).isoformat()}},
+                )
+
+        elif et == "invoice.payment_succeeded":
+            cust_id = data_obj.get("customer") if isinstance(data_obj, dict) else data_obj.customer
+            sub_id = data_obj.get("subscription") if isinstance(data_obj, dict) else data_obj.subscription
+            if sub_id:
+                subscription = await _stripe_call(_stripe.Subscription.retrieve, sub_id)
+                full = await db.users.find_one({"stripe_customer_id": cust_id})
+                if full:
+                    await _sync_subscription_to_user(full["id"], subscription)
+                    # Clear any prior payment-failed flag
+                    await db.users.update_one({"id": full["id"]}, {"$unset": {"payment_failed_at": ""}})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[webhook] handler failed for event=%s: %s", et, e)
+
     return {"received": True}
+
+
+@api.post("/me/billing-portal")
+async def billing_portal(request: Request, user: dict = Depends(get_current_user)):
+    """Return a Stripe Customer Portal URL so users can manage their subscription
+    (cancel, update card, see invoices). Requires that the user has previously
+    completed a checkout (so we have a stripe_customer_id on file)."""
+    if not STRIPE_API_KEY:
+        raise HTTPException(status_code=500, detail="Payments not configured")
+    full = await db.users.find_one({"id": user["id"]}) or {}
+    cust_id = full.get("stripe_customer_id")
+    if not cust_id:
+        raise HTTPException(status_code=400, detail="No active subscription found. Start one from the Pro plan card to manage billing.")
+
+    payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    return_url = (payload.get("return_url") or "").rstrip("/")
+    if not return_url:
+        # Fall back to the request's own origin if the client didn't pass one
+        host_url = str(request.base_url).rstrip("/")
+        return_url = host_url
+
+    import stripe as _stripe
+    try:
+        portal = await _stripe_call(
+            _stripe.billing_portal.Session.create,
+            customer=cust_id,
+            return_url=return_url,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[billing-portal] create failed for user=%s", user.get("email"))
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Could not open Customer Portal: {e}. "
+                "Make sure the Stripe Customer Portal is activated at "
+                "Dashboard → Settings → Billing → Customer portal."
+            ),
+        )
+    return {"url": portal.url}
+
+
+@api.post("/me/cancel-subscription")
+async def cancel_subscription(user: dict = Depends(get_current_user)):
+    """In-app cancellation fallback: marks the user's active Stripe subscription
+    to cancel at the end of the current period. The Customer Portal is the
+    preferred UX; this endpoint exists so we can offer a one-click cancel CTA
+    too (e.g., from an email link or trial-ending banner).
+    """
+    if not STRIPE_API_KEY:
+        raise HTTPException(status_code=500, detail="Payments not configured")
+    full = await db.users.find_one({"id": user["id"]}) or {}
+    sub_id = full.get("stripe_subscription_id")
+    if not sub_id:
+        raise HTTPException(status_code=400, detail="No active subscription to cancel.")
+    import stripe as _stripe
+    try:
+        sub = await _stripe_call(
+            _stripe.Subscription.modify,
+            sub_id,
+            cancel_at_period_end=True,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[cancel] failed for user=%s", user.get("email"))
+        raise HTTPException(status_code=502, detail=f"Could not cancel subscription: {e}")
+    await _sync_subscription_to_user(user["id"], sub)
+    return {"ok": True, "cancel_at_period_end": True}
 
 
 @api.get("/me/transactions")
