@@ -1,15 +1,19 @@
 import React from 'react';
 import { ArrowRight } from 'lucide-react';
 
+const LOGO_URL = 'https://customer-assets.emergentagent.com/job_frequency-healer-31/artifacts/py9qq8mo_healing_frequencies_logo_512kb.jpg';
+
 /**
- * Solarisound landing page.
+ * Solarisound / Healing Frequencies landing page.
  *
- * Minimal, calm, single-purpose. The orb breathes + the bar visualizer
- * undulates continuously, so the page never feels static — we don't need a
- * one-shot reveal cascade on top of that. Tap "Start tuning" → enters auth.
+ * The brand logo (lotus figure + 7 chakra dots + sound waves) replaces the
+ * generic orb; rendered with mix-blend-mode:screen so the JPEG's white
+ * background dissolves into the dark cosmic theme while the violet/blue/teal
+ * line-art remains crisp. A soft halo behind it sells the "radiating" feel.
  */
 export function LandingPage({ onStart }) {
-  // 24 vertical bars, slight randomness so the wave never lines up perfectly.
+  // 24 vertical bars — slight per-bar timing variance keeps the wave from
+  // ever lining up perfectly. Seeded once on mount.
   const bars = React.useMemo(
     () => Array.from({ length: 24 }).map((_, i) => ({
       id: i,
@@ -22,37 +26,54 @@ export function LandingPage({ onStart }) {
   return (
     <div
       data-testid="landing-page"
-      className="relative min-h-screen overflow-hidden flex flex-col items-center justify-between px-6 py-10 sm:py-14 text-center"
+      className="relative min-h-screen overflow-hidden flex flex-col items-center justify-between px-6 py-8 sm:py-10 text-center"
     >
       <div className="aurora-bg" />
       <div className="grain" aria-hidden="true" />
 
-      {/* Wordmark */}
+      {/* Tiny top-of-page brand tag — kept minimal because the logo dominates
+          the hero. The full brandmark lives in the centre. */}
       <div
         data-testid="landing-wordmark"
-        className="relative z-10 inline-flex items-center gap-3"
+        className="relative z-10 inline-flex items-center gap-2"
       >
-        <span className="font-display italic text-3xl text-[#C4A67A] leading-none">φ</span>
-        <span className="font-display tracking-[0.4em] text-xs uppercase text-[#8A9A92]">
+        <span className="font-display italic text-2xl text-[#C4A67A] leading-none">φ</span>
+        <span className="font-display tracking-[0.4em] text-[10px] uppercase text-[#8A9A92]">
           Solarisound
         </span>
       </div>
 
       {/* Hero */}
-      <div className="relative z-10 flex-1 flex flex-col items-center justify-center w-full max-w-2xl py-10">
-        {/* Concentric pulse rings around the central orb */}
-        <div className="relative w-44 h-44 sm:w-56 sm:h-56 mb-8 sm:mb-10 flex items-center justify-center">
+      <div className="relative z-10 flex-1 flex flex-col items-center justify-center w-full max-w-2xl py-6">
+        {/* Logo with halo + concentric pulse rings */}
+        <div className="relative w-64 h-64 sm:w-80 sm:h-80 mb-6 sm:mb-8 flex items-center justify-center">
+          {/* Soft radial halo so the logo feels grounded, not floating on void */}
+          <span
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              background:
+                'radial-gradient(circle at 50% 45%, rgba(196,166,122,0.18) 0%, rgba(114,194,172,0.12) 35%, transparent 65%)',
+            }}
+          />
+          {/* Concentric pulse rings — same as before, scoped to the logo box */}
           <span className="landing-ring landing-ring-1" />
           <span className="landing-ring landing-ring-2" />
           <span className="landing-ring landing-ring-3" />
           <span className="landing-ring landing-ring-4" />
-          <span className="landing-orb relative w-20 h-20 sm:w-24 sm:h-24 rounded-full" />
+          {/* The logo itself — mix-blend-mode:screen dissolves the white JPEG bg */}
+          <img
+            data-testid="landing-logo"
+            src={LOGO_URL}
+            alt="Healing Frequencies"
+            className="relative w-full h-full object-contain landing-logo-img"
+            draggable={false}
+          />
         </div>
 
         {/* Bar visualizer */}
         <div
           data-testid="landing-visualizer"
-          className="flex items-end gap-[3px] h-12 sm:h-14 mb-8 sm:mb-10"
+          className="flex items-end gap-[3px] h-10 sm:h-12 mb-6 sm:mb-8"
           aria-hidden="true"
         >
           {bars.map((b) => (
@@ -70,12 +91,12 @@ export function LandingPage({ onStart }) {
         {/* 1-line value prop */}
         <h1
           data-testid="landing-headline"
-          className="font-display font-light text-[#E8E3D9] text-4xl sm:text-5xl lg:text-6xl leading-tight mb-4"
+          className="font-display font-light text-[#E8E3D9] text-3xl sm:text-4xl lg:text-5xl leading-tight mb-3"
         >
           Tune in. Settle down. <span className="italic text-[#72C2AC]">Resonate.</span>
         </h1>
 
-        <p className="text-sm text-[#8A9A92] max-w-md mx-auto mb-8 sm:mb-10 leading-relaxed">
+        <p className="text-sm text-[#8A9A92] max-w-md mx-auto mb-7 sm:mb-9 leading-relaxed">
           Solfeggio frequencies, brainwave entrainment, and ambient soundscapes —
           designed for the still moments in a noisy world.
         </p>
@@ -90,7 +111,7 @@ export function LandingPage({ onStart }) {
           <ArrowRight size={16} className="transition-transform group-hover:translate-x-0.5" />
         </button>
 
-        <p className="text-[10px] tracking-[0.3em] uppercase text-[#5C9E8C]/80 mt-6">
+        <p className="text-[10px] tracking-[0.3em] uppercase text-[#5C9E8C]/80 mt-5">
           7-day free trial · cancel anytime
         </p>
       </div>

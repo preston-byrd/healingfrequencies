@@ -251,3 +251,16 @@ input, select { font-family: inherit; }
 .landing-cta-breath {
   animation: landing-cta-breath-anim 4.5s ease-in-out infinite 1.5s;
 }
+
+/* Brand logo — dissolves the JPEG's white background into the dark theme
+   while preserving the violet→teal line-art and the chakra dots, then
+   floats gently so the hero never feels static. */
+@keyframes landing-logo-float {
+  0%, 100% { transform: translateY(0)    scale(1);    }
+  50%      { transform: translateY(-6px) scale(1.02); }
+}
+.landing-logo-img {
+  mix-blend-mode: screen;
+  filter: drop-shadow(0 0 24px rgba(114, 194, 172, 0.35)) drop-shadow(0 0 48px rgba(196, 166, 122, 0.2));
+  animation: landing-logo-float 6s ease-in-out infinite;
+}
