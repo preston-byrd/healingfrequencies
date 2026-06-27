@@ -106,6 +106,7 @@
   - Testing iteration 25 — **113/113 backend pytest pass** (107 prior + 6 new in `test_iter25_defensive.py`). Verified the outer guard converts non-HTTPException to 502, preserves inner HTTPException, AND that `/api/health/stripe` returns graceful JSON in every failure mode.
 
 - **Custom logo on landing page** (Feb 2026): user-provided `healing_frequencies_logo_512kb.jpg` integrated as the centerpiece of `LandingPage.jsx`, replacing the procedural breathing orb. Rendered with `mix-blend-mode: screen` (cuts white background → glows on dark canvas) + floating animation + 4 concentric pulse rings preserved around it. Smoke-tested via screenshot tool; user accepted the result and asked to skip the automated frontend regression run.
+  - **Reverted** (Feb 2026): user requested logo removal. `LandingPage.jsx` now renders the procedural `.landing-orb` (radial gradient + breath animation) inside the same 4 pulse rings. Removed `LOGO_URL` constant, `<img>` element, halo span, and unused `.landing-logo-img` CSS keyframes. Smoke-tested via screenshot — orb back, no logo.
 
 - **"Powered by silence" landing page** (Feb 2026): cinematic root URL splash for unauthenticated visitors.
   - NEW `/app/frontend/src/components/LandingPage.jsx` — always-on visuals (24-bar wave visualizer, breathing orb with radial gradient, 4 concentric pulse rings, gold CTA with breathing glow). 1-line value prop "**Tune in. Settle down. *Resonate.***" + sub-copy + "**Start tuning →**" CTA + "7-DAY FREE TRIAL · CANCEL ANYTIME" microcopy + "POWERED BY SILENCE" footer.

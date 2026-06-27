@@ -1,15 +1,12 @@
 import React from 'react';
 import { ArrowRight } from 'lucide-react';
 
-const LOGO_URL = 'https://customer-assets.emergentagent.com/job_frequency-healer-31/artifacts/py9qq8mo_healing_frequencies_logo_512kb.jpg';
-
 /**
  * Solarisound / Healing Frequencies landing page.
  *
- * The brand logo (lotus figure + 7 chakra dots + sound waves) replaces the
- * generic orb; rendered with mix-blend-mode:screen so the JPEG's white
- * background dissolves into the dark cosmic theme while the violet/blue/teal
- * line-art remains crisp. A soft halo behind it sells the "radiating" feel.
+ * Centerpiece is a procedural "breathing orb" (radial gradient + slow scale
+ * animation) surrounded by 4 concentric pulse rings — calm, cosmic, and
+ * lightweight (no image assets required).
  */
 export function LandingPage({ onStart }) {
   // 24 vertical bars — slight per-bar timing variance keeps the wave from
@@ -45,28 +42,18 @@ export function LandingPage({ onStart }) {
 
       {/* Hero */}
       <div className="relative z-10 flex-1 flex flex-col items-center justify-center w-full max-w-2xl py-6">
-        {/* Logo with halo + concentric pulse rings */}
-        <div className="relative w-64 h-64 sm:w-80 sm:h-80 mb-6 sm:mb-8 flex items-center justify-center">
-          {/* Soft radial halo so the logo feels grounded, not floating on void */}
-          <span
-            className="absolute inset-0 rounded-full pointer-events-none"
-            style={{
-              background:
-                'radial-gradient(circle at 50% 45%, rgba(196,166,122,0.18) 0%, rgba(114,194,172,0.12) 35%, transparent 65%)',
-            }}
-          />
-          {/* Concentric pulse rings — same as before, scoped to the logo box */}
+        {/* Breathing orb + concentric pulse rings */}
+        <div className="relative w-56 h-56 sm:w-72 sm:h-72 mb-6 sm:mb-8 flex items-center justify-center">
+          {/* Concentric pulse rings */}
           <span className="landing-ring landing-ring-1" />
           <span className="landing-ring landing-ring-2" />
           <span className="landing-ring landing-ring-3" />
           <span className="landing-ring landing-ring-4" />
-          {/* The logo itself — mix-blend-mode:screen dissolves the white JPEG bg */}
-          <img
-            data-testid="landing-logo"
-            src={LOGO_URL}
-            alt="Healing Frequencies"
-            className="relative w-full h-full object-contain landing-logo-img"
-            draggable={false}
+          {/* The orb itself */}
+          <span
+            data-testid="landing-orb"
+            className="landing-orb relative w-full h-full rounded-full"
+            aria-hidden="true"
           />
         </div>
 
