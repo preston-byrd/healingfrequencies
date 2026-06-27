@@ -204,6 +204,10 @@ input, select { font-family: inherit; }
   position: absolute;
   top: 50%; left: 50%;
   width: 100%; height: 100%;
+  /* Anchor the ring's own centre to the parent's centre BEFORE any animation
+     transform fires — without this the rings inherit (0,0) from the
+     keyframes' first frame and visibly snap on mount. */
+  transform: translate(-50%, -50%) scale(0.55);
   border-radius: 50%;
   border: 1px solid rgba(114, 194, 172, 0.45);
   pointer-events: none;

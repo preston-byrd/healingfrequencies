@@ -105,6 +105,11 @@
   - **NEW `GET /api/health/stripe`**: diagnostic endpoint that calls `stripe.Balance.retrieve` via the same `_stripe_call` path used by checkout. Returns 200 + `{ok, api_base, key_prefix, timeout_seconds}` on success, or 200 + `{ok:false, error, stage, api_base, key_prefix}` on any failure. No auth required (read-only). Doesn't echo the full key. One-curl production triage — instantly tells you if STRIPE_API_KEY is missing, mis-routed, or connectivity-broken.
   - Testing iteration 25 — **113/113 backend pytest pass** (107 prior + 6 new in `test_iter25_defensive.py`). Verified the outer guard converts non-HTTPException to 502, preserves inner HTTPException, AND that `/api/health/stripe` returns graceful JSON in every failure mode.
 
+- **"Powered by silence" landing page** (Feb 2026): cinematic root URL splash for unauthenticated visitors.
+  - NEW `/app/frontend/src/components/LandingPage.jsx` — always-on visuals (24-bar wave visualizer, breathing orb with radial gradient, 4 concentric pulse rings, gold CTA with breathing glow). 1-line value prop "**Tune in. Settle down. *Resonate.***" + sub-copy + "**Start tuning →**" CTA + "7-DAY FREE TRIAL · CANCEL ANYTIME" microcopy + "POWERED BY SILENCE" footer.
+  - Routing in `App.js` Shell(): unauth + landing-not-dismissed → LandingPage. CTA click writes `sessionStorage['solarisound:landing_dismissed']='1'` and reveals AuthScreen. Stripe-return URL params (`stripe_session_id` / `stripe_canceled`) auto-bypass the landing for any visitor. Authed users always skip. Safari private-mode safe (sessionStorage wrapped in try/catch).
+  - Testing iteration 26 — **7/7 frontend PRIMARY scenarios pass + 113/113 backend regression**. Verified: copy + testids, CTA → AuthScreen + sessionStorage persistence, reload-preserves-dismissal, admin-skip-landing, Stripe-return bypass (authed → AccountDashboard, unauth → AuthScreen), bar/orb animations active, mobile 390×844 layout fits without horizontal scroll. Tiny ring-centering polish applied post-test.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
