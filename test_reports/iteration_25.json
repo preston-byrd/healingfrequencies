@@ -1,0 +1,37 @@
+{
+  "summary": "Iter-25 defensive hardening verified end-to-end. All 6 new iter-25 tests (3 for /api/health/stripe + 2 for /me/checkout outer guard + 1 contract regression) PASS, plus full regression of the prior suite — 113 passed, 1 skipped (env-conditional live Stripe test, same as iter-24). Live preview /api/health/stripe returns the expected diagnostic JSON {ok:true, api_base:'https://integrations.emergentagent.com/stripe', key_prefix:'sk_test_emer…', timeout_seconds:25}. Outer guard correctly converts non-HTTPException to a 502 envelope 'Checkout failed unexpectedly (rid=<8hex>): RuntimeError: …' AND correctly preserves any inner HTTPException (503 maintenance stays 503, not wrapped). Inner try/except still wins for known Stripe errors (test_checkout_bad_stripe_key_returns_502 — 'Stripe checkout failed:…' — still passes).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/me/checkout", "issue": "Pydantic V1 @validator deprecation warnings from emergentintegrations checkout.py (carried from iter-24, third-party, non-blocking)."},
+      {"endpoint": "server startup", "issue": "@app.on_event('startup'/'shutdown') deprecated — migrate to FastAPI lifespan handlers. Non-blocking."},
+      {"endpoint": "tests/test_stripe_routing.py::TestCheckoutLiveRegression", "issue": "Class-scoped fixture defined as instance method — PytestRemovedIn10Warning. Cosmetic."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter25_defensive.py",
+    "/app/backend/tests/test_checkout_error_handling.py",
+    "/app/test_reports/pytest/iter25_full.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Outer guard at server.py L590-600 is correct: uuid.uuid4().hex[:8] generates the 8-char rid; HTTPException is re-raised intact (L593-594); generic Exception becomes 502 with detail 'Checkout failed unexpectedly (rid=<rid>): <ErrorClass>: <msg[:200]>'. Uses `except Exception` (not BaseException) so KeyboardInterrupt/SystemExit propagate as intended.",
+    "/api/health/stripe (L793-829) is correctly designed: returns 200 with JSON envelope in ALL paths (config-missing, stripe call failure, success) — never 500/520. Good for one-curl production triage. Does not echo the key (only first 12 chars + ellipsis). No auth requirement is intentional and safe (read-only Balance.retrieve).",
+    "Note for production debugging: /api/health/stripe will surface mis-routing immediately — if api_base shows 'https://api.stripe.com' but the key is sk_test_emergent, _normalise_stripe_api_base() is being bypassed somewhere. Currently the live preview is correctly routing emergent → integrations.emergentagent.com/stripe.",
+    "server.py is now 1184 lines — past 700-line guideline. Suggest splitting into routers/{auth,payments,admin,prefs}.py in a future iteration. Not blocking.",
+    "Carry-over: emergentintegrations imports `StripeCheckout` but the new subscription path uses the `stripe` SDK directly via _stripe_call(); StripeCheckout is now only used by legacy/webhook paths. Worth a future cleanup."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter25_defensive.py"],
+  "success_rate": {"backend": "100% (113/113 passed, 1 skipped env-conditional)", "frontend": "n/a — backend-only per review request"},
+  "test_credentials": "Admin: admin@example.com / admin123. STRIPE_API_KEY=sk_test_emergent (test mode) in /app/backend/.env.",
+  "seed_data_creation": "Backend tests create TEST_-prefixed users (TEST_i25_…, TEST_ckerr_…) + a few Stripe test-mode customers/sessions per happy-path test — harmless test-mode artefacts.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 113 backend tests green. To run: cd /app && REACT_APP_BACKEND_URL=<preview-url> python -m pytest backend/tests/ -v. Iter-25 tests live in /app/backend/tests/test_iter25_defensive.py — they use httpx.ASGITransport for in-process tests that monkeypatch server_mod.STRIPE_API_KEY and server_mod._get_plan_config; the _run_async helper rebinds Motor to a fresh event loop so each test gets a clean asyncio loop. Live /api/health/stripe is publicly exposed for production triage — use it as the first curl when debugging any Cloudflare 520.",
+  "rca of the issue": "Iter-25 was a defensive refactor (not a bug fix) targeting the still-unknown root cause of the production Cloudflare 520. The previous iter-24 inner try/except (at L645-682) already catches all KNOWN Stripe errors and surfaces them as 502s; the new outer try/except at L590-600 adds a belt-and-braces second layer that catches ANY other Exception (mongo timeout, pydantic edge case, threading issue, etc.) and converts it to a structured 502 with a request ID for log correlation, instead of letting a half-open socket reach Cloudflare. The new /api/health/stripe endpoint provides instant production triage — one curl tells you whether the issue is (a) STRIPE_API_KEY missing, (b) connectivity/auth to Stripe broken, or (c) something else entirely. Verified all paths behave as designed via the 6 new tests in test_iter25_defensive.py."
+}

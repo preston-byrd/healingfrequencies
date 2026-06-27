@@ -581,9 +581,26 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
       * user can cancel anytime via the Customer Portal (/me/billing-portal)
 
     Returns {url, session_id} just like before so the frontend redirect path
-    is unchanged. The Cloudflare-friendly 25-second hard timeout is applied
-    to every outbound Stripe call.
+    is unchanged. Cloudflare-friendly: every Stripe call is bounded by
+    STRIPE_CALL_TIMEOUT (25s) and the ENTIRE endpoint body is wrapped in an
+    outer try/except so even unexpected errors (mongo drops, pydantic edge
+    cases, threading issues) return a clean JSON 502 instead of an empty/half-
+    open socket that Cloudflare would render as a 520 page.
     """
+    rid = uuid.uuid4().hex[:8]
+    try:
+        return await _create_checkout_impl(body, request, user, rid)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[checkout rid=%s] unexpected error for user=%s plan=%s", rid, user.get("email"), getattr(body, "plan", "?"))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Checkout failed unexpectedly (rid={rid}): {type(e).__name__}: {str(e)[:200]}",
+        )
+
+
+async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, rid: str):
     if body.plan not in ("monthly", "annual"):
         raise HTTPException(status_code=400, detail="Invalid plan")
     if not STRIPE_API_KEY:
@@ -771,6 +788,45 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
         "fulfilled": (session.status == "complete"),
         "plan": tx.get("plan"),
     }
+
+
+@api.get("/health/stripe")
+async def health_stripe():
+    """Diagnostic endpoint — checks (a) STRIPE_API_KEY is set, (b) we can reach
+    the configured Stripe api_base with a minimal account-balance read, all
+    inside the 25s timeout budget. Returns 200 + diagnostic JSON on success,
+    502 + structured error on any failure. Safe to expose: only reads, never
+    writes; doesn't echo the key.
+    """
+    if not STRIPE_API_KEY:
+        return {"ok": False, "error": "STRIPE_API_KEY not set", "stage": "config"}
+    import stripe as _stripe
+    _normalise_stripe_api_base()
+    try:
+        # Cheapest read in the Stripe API — confirms connectivity + auth.
+        await _stripe_call(_stripe.Balance.retrieve)
+        return {
+            "ok": True,
+            "api_base": _stripe.api_base,
+            "key_prefix": (STRIPE_API_KEY[:12] + "…"),
+            "timeout_seconds": STRIPE_CALL_TIMEOUT,
+        }
+    except HTTPException as he:
+        return {
+            "ok": False,
+            "error": he.detail,
+            "stage": "stripe_call",
+            "api_base": _stripe.api_base,
+            "key_prefix": (STRIPE_API_KEY[:12] + "…"),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)[:200]}",
+            "stage": "stripe_call",
+            "api_base": _stripe.api_base,
+            "key_prefix": (STRIPE_API_KEY[:12] + "…"),
+        }
 
 
 @api.post("/webhook/stripe")
