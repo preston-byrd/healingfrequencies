@@ -1,0 +1,35 @@
+{
+  "summary": "Iter 24 — Confirmed the iter-23 bug fix in /me/checkout: the unified try/except (server.py L628-665) now wraps BOTH _get_or_create_stripe_customer AND stripe.checkout.Session.create. Backend full suite: 107 passed, 1 skipped (the live Stripe regression test that is environment-conditional). The previously-failing test_checkout_bad_stripe_key_returns_502 now PASSES. Frontend smoke verified end-to-end: register fresh user via UI (had to click auth-mode-toggle first since the form defaults to login mode — that was the iter-23 selector snag), open Account, [data-testid=trial-billing-info] is visible with 'First 7 days are free…' messaging, click [data-testid=pay-card-button] → real redirect to checkout.stripe.com confirmed (cs_test_b1i7Mivz… session minted).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/me/checkout", "issue": "Pydantic V1 @validator deprecation warnings from emergentintegrations checkout.py (4 warnings per call) — non-blocking, breaks on Pydantic V3."},
+      {"endpoint": "server startup", "issue": "@app.on_event('startup'/'shutdown') deprecated — migrate to lifespan event handlers. Non-blocking."},
+      {"endpoint": "tests/test_stripe_routing.py::TestCheckoutLiveRegression", "issue": "Class-scoped fixture defined as instance method — PytestRemovedIn10 deprecation. Cosmetic."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_checkout_error_handling.py",
+    "/app/backend/tests/test_subscription_mode.py",
+    "/app/test_reports/pytest/iter24_full.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "The unified try/except at server.py L628-665 is the correct fix: a single block wraps both _get_or_create_stripe_customer and _stripe_call(checkout.Session.create), so AuthenticationError / restricted-account / network-timeout / bad-data all surface as 502 with detail starting 'Stripe checkout failed:'. The comment block at L624-627 documents the rationale — good defensive-coding hygiene.",
+    "HTTPException re-raise on L658 correctly avoids double-wrapping any inner HTTPExceptions (e.g., from _stripe_call's timeout handler) — important to preserve the 504/502 distinction if one is added later.",
+    "Minor (carried from iter-23): server.py is 1128 lines — past the 700-line guideline. Consider splitting into routers (auth/payments/admin/prefs) in a future iteration. Not blocking."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (107/107 passed, 1 skipped env-conditional)", "frontend": "100% (registration → trial card → pay-card-button → Stripe checkout redirect all verified)"},
+  "test_credentials": "Admin: admin@example.com / admin123. STRIPE_API_KEY=sk_test_emergent (test mode).",
+  "seed_data_creation": "Frontend smoke created one fresh user smoke_<timestamp>@example.com plus a Stripe test-mode Customer + Checkout Session (cs_test_b1i7Mivz…). Backend tests create TEST_-prefixed users — harmless test-mode artefacts.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 107 backend tests green. Iter-23 selector snag explained: AuthScreen defaults to mode='login'; auth-name-input only renders when mode==='register', so any Playwright that fills auth-name-input must FIRST click [data-testid=auth-mode-toggle]. This is intentional UI behaviour, not a bug. The full end-to-end (register → account → pay-card-button → checkout.stripe.com) works. Stripe test key sk_test_emergent is valid and routes through global Stripe API base. Run backend suite: cd /app && python -m pytest backend/tests/ -v.",
+  "rca of the issue": "Original iter-23 bug RCA confirmed and fix verified. Bug was: _get_or_create_stripe_customer was OUTSIDE the try/except, so a stripe.error.AuthenticationError from Customer.create bubbled up as an uncaught 500. Fix: moved the customer-create call INSIDE the same try block that wraps Session.create, producing a uniform 502 envelope with detail 'Stripe checkout failed: <reason>. Verify STRIPE_API_KEY is valid…' for ALL Stripe-side failures. Re-tested via test_checkout_bad_stripe_key_returns_502 (PASS) and via the rest of the suite — no regressions."
+}

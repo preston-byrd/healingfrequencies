@@ -603,8 +603,6 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
     trial_days = int(cfg.get("trial_days", 7))
     include_trial = not full.get("trial_used")
 
-    customer_id = await _get_or_create_stripe_customer(user)
-
     origin = body.origin_url.rstrip("/")
     success_url = f"{origin}/?stripe_session_id={{CHECKOUT_SESSION_ID}}"
     cancel_url = f"{origin}/?stripe_canceled=1"
@@ -619,18 +617,24 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
     }
 
     import stripe as _stripe
-    logger.info(
-        "[checkout] user=%s plan=%s method=%s key_prefix=%s api_base=%s trial=%s customer=%s",
-        user.get("email"), body.plan, body.payment_method_preference,
-        (STRIPE_API_KEY[:12] + "…") if STRIPE_API_KEY else "(none)",
-        _stripe.api_base, include_trial, customer_id,
-    )
-
     subscription_data = {"metadata": metadata}
     if include_trial:
         subscription_data["trial_period_days"] = trial_days
 
+    # Unified try/except so ANY Stripe failure (Customer.create, Session.create,
+    # network/timeout, bad key, restricted account) produces the same 502
+    # envelope with a friendly message. Without this, AuthenticationError raised
+    # from Customer.create bubbles up as a raw 500 — see iter-23 test_checkout_bad_stripe_key_returns_502.
     try:
+        customer_id = await _get_or_create_stripe_customer(user)
+
+        logger.info(
+            "[checkout] user=%s plan=%s method=%s key_prefix=%s api_base=%s trial=%s customer=%s",
+            user.get("email"), body.plan, body.payment_method_preference,
+            (STRIPE_API_KEY[:12] + "…") if STRIPE_API_KEY else "(none)",
+            _stripe.api_base, include_trial, customer_id,
+        )
+
         session = await _stripe_call(
             _stripe.checkout.Session.create,
             mode="subscription",
@@ -654,7 +658,7 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("[checkout] Stripe session.create failed for user=%s plan=%s", user.get("email"), body.plan)
+        logger.exception("[checkout] Stripe call failed for user=%s plan=%s", user.get("email"), body.plan)
         raise HTTPException(
             status_code=502,
             detail=f"Stripe checkout failed: {str(e)}. Verify STRIPE_API_KEY is valid and recurring USD payments are enabled in your Stripe Dashboard.",
