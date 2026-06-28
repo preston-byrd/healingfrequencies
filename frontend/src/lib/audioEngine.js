@@ -20,6 +20,22 @@ class AudioEngine {
     this.binaural = 0; // hz offset for right ear
     this.toneVolume = 0.35;
     this.goldenStack = false; // when true, layer tones at f×φ and f×φ²
+    this.isochronic = 0; // Hz pulse rate (0 = off). True isochronic: carrier
+                         // amplitude is square-wave gated between 0 and 1 at
+                         // this rate, no phase relationship with binaural.
+
+    // Isochronic gate plumbing: a Gain node sitting between the oscillator(s)
+    // and toneGain. Its .gain is driven by a square LFO scaled to 0..1 when
+    // isochronic > 0, or held at constant 1 when off.
+    this.gateGain = null;
+    this.isoLfo = null;
+    this.isoOffset = null;
+    this.isoScale = null;
+
+    // Analyser for real-time visualizers (Chladni, ripples). Created lazily
+    // and tapped off the master bus so it sees everything (tone + ambient).
+    this.analyser = null;
+    this._analyserData = null;
 
     // Ambient layers: { rain, ocean, forest } -> { node, gain }
     this.ambient = {};
@@ -75,9 +91,41 @@ class AudioEngine {
     // Critical for lock-screen / backgrounded continuation on iOS + Android.
     if (created) {
       this._buildBackgroundSink();
+      this._buildAnalyser();
       this._prebuildAllAmbient();
     }
     return this.ctx;
+  }
+
+  // Real-time AnalyserNode tapped off master gain. Drives the cymatics
+  // visualizer. ~1024 fft = good resolution without blowing CPU on mobile.
+  _buildAnalyser() {
+    if (this.analyser || !this.ctx) return;
+    try {
+      const a = this.ctx.createAnalyser();
+      a.fftSize = 1024;
+      a.smoothingTimeConstant = 0.82;
+      this.master.connect(a);
+      this.analyser = a;
+      this._analyserData = new Uint8Array(a.frequencyBinCount);
+    } catch (e) { /* noop */ }
+  }
+
+  // Public: per-frame snapshot of audio amplitude (0..1) for visualizers.
+  // Cheap — reuses the same Uint8Array buffer.
+  getAmplitude() {
+    if (!this.analyser) return 0;
+    try {
+      this.analyser.getByteTimeDomainData(this._analyserData);
+      // RMS around 128 (DC bias for unsigned-byte time-domain data).
+      let sum = 0;
+      const N = this._analyserData.length;
+      for (let i = 0; i < N; i++) {
+        const v = (this._analyserData[i] - 128) / 128;
+        sum += v * v;
+      }
+      return Math.sqrt(sum / N);
+    } catch (e) { return 0; }
   }
 
   // Pipe master gain into a MediaStream → <audio> element. Some browsers
@@ -225,6 +273,7 @@ class AudioEngine {
       frequency: this.frequency,
       waveform: this.waveform,
       binaural: this.binaural,
+      isochronic: this.isochronic,
       toneVolume: this.toneVolume,
       goldenStack: this.goldenStack,
       ambient: Object.fromEntries(Object.entries(this.ambient).map(([k, v]) => [k, v.volume])),
@@ -244,6 +293,14 @@ class AudioEngine {
       this.toneGain.gain.value = 0;
       this.toneGain.connect(this.master);
 
+      // Isochronic gate sits between the oscillator(s) and toneGain. When
+      // isochronic === 0 it acts as a unity pass-through (gain = 1). When > 0
+      // a square-wave LFO drives this.gain between 0 and 1 at the pulse rate
+      // for true isochronic entrainment.
+      this.gateGain = ctx.createGain();
+      this.gateGain.gain.value = 1;
+      this.gateGain.connect(this.toneGain);
+
       this.osc = ctx.createOscillator();
       this.osc.type = this.waveform;
       this.osc.frequency.value = this.frequency;
@@ -259,15 +316,16 @@ class AudioEngine {
         this.oscR.connect(gR);
         gL.connect(merger, 0, 0);
         gR.connect(merger, 0, 1);
-        merger.connect(this.toneGain);
+        merger.connect(this.gateGain);
         this.oscR.start();
       } else {
-        this.osc.connect(this.toneGain);
+        this.osc.connect(this.gateGain);
       }
 
       this.osc.start();
       this.toneGain.gain.linearRampToValueAtTime(this.toneVolume, ctx.currentTime + 0.8);
 
+      if (this.isochronic > 0) this._spawnIsochronicLFO(this.isochronic);
       if (this.goldenStack) this._spawnPhiHarmonics();
 
       // Pause→Resume: restore the ambient mix that was active when the user
@@ -320,7 +378,7 @@ class AudioEngine {
       osc.frequency.value = f > 4000 ? f / 2 : f;
       const g = ctx.createGain();
       g.gain.value = 0;
-      osc.connect(g).connect(this.toneGain);
+      osc.connect(g).connect(this.gateGain || this.toneGain);
       osc.start();
       g.gain.linearRampToValueAtTime(amp, ctx.currentTime + 1.0);
       this.phiOscs.push({ osc, gain: g, mult });
@@ -341,6 +399,66 @@ class AudioEngine {
         try { osc.stop(); osc.disconnect(); gain.disconnect(); } catch (e) { /* noop */ }
       });
     }, (fade + 0.05) * 1000);
+  }
+
+  // Isochronic: drive gateGain.gain between 0 and 1 at `hz` via a square LFO
+  // + DC offset (so the param sees a 0..1 signal, not -1..1). Cancels the
+  // constant 1.0 baseline by setting gain.value=0 before connecting.
+  _spawnIsochronicLFO(hz) {
+    if (!this.ctx || !this.gateGain) return;
+    this._killIsochronicLFO(0); // idempotent
+    const ctx = this.ctx;
+    const lfo = ctx.createOscillator();
+    lfo.type = 'square';
+    lfo.frequency.value = Math.max(0.5, Math.min(40, hz));
+    const scale = ctx.createGain();
+    scale.gain.value = 0.5; // square is -1..1 → scaled to -0.5..0.5
+    const offset = ctx.createConstantSource();
+    offset.offset.value = 0.5; // shift to 0..1
+    // Clear the static baseline (was 1.0) so the LFO + offset are the only drivers.
+    this.gateGain.gain.cancelScheduledValues(ctx.currentTime);
+    this.gateGain.gain.setValueAtTime(0, ctx.currentTime);
+    lfo.connect(scale).connect(this.gateGain.gain);
+    offset.connect(this.gateGain.gain);
+    lfo.start();
+    offset.start();
+    this.isoLfo = lfo;
+    this.isoScale = scale;
+    this.isoOffset = offset;
+  }
+
+  _killIsochronicLFO(restoreBaseline = 1) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    [this.isoLfo, this.isoScale, this.isoOffset].forEach((n) => {
+      if (!n) return;
+      try { if (typeof n.stop === 'function') n.stop(); } catch (e) { /* noop */ }
+      try { n.disconnect(); } catch (e) { /* noop */ }
+    });
+    this.isoLfo = null;
+    this.isoScale = null;
+    this.isoOffset = null;
+    if (this.gateGain && restoreBaseline) {
+      this.gateGain.gain.cancelScheduledValues(ctx.currentTime);
+      this.gateGain.gain.setValueAtTime(restoreBaseline, ctx.currentTime);
+    }
+  }
+
+  // Public: set isochronic pulse rate in Hz. 0 disables. Hot-swaps the LFO
+  // without rebuilding the audio graph (no glitches mid-session).
+  setIsochronic(hz) {
+    const v = Math.max(0, Math.min(40, Number(hz) || 0));
+    this.isochronic = v;
+    if (this.playing && this.gateGain) {
+      if (v <= 0) {
+        this._killIsochronicLFO(1);
+      } else if (this.isoLfo) {
+        this.isoLfo.frequency.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+      } else {
+        this._spawnIsochronicLFO(v);
+      }
+    }
+    this._emit();
   }
 
   stop() {
@@ -385,8 +503,13 @@ class AudioEngine {
     this.osc = null;
     this.oscR = null;
     this._killPhiHarmonics(0.8);
+    this._killIsochronicLFO(0); // tear down LFO; gateGain disconnected via timeout below
     setTimeout(() => {
       oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
+      if (this.gateGain) {
+        try { this.gateGain.disconnect(); } catch (e) { /* noop */ }
+        this.gateGain = null;
+      }
       // Pause the background-audio sink AFTER the fade completes so we don't
       // cut off the tail. Leaving it playing forever would also work, but it
       // would keep the OS media indicator lit even when the user stopped.

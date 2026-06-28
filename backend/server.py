@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field, EmailStr
 from emergentintegrations.payments.stripe.checkout import (
     StripeCheckout, CheckoutSessionRequest
 )
+from emergentintegrations.llm.chat import LlmChat, UserMessage
+import json
+import re
 
 
 # Hard cap on every outbound Stripe call. Cloudflare's edge cuts the
@@ -322,10 +325,13 @@ class PrefsIn(BaseModel):
     duration_minutes: Optional[int] = Field(None, ge=1, le=180)
     waveform: Optional[str] = Field(None, pattern=r"^(sine|triangle|square|sawtooth)$")
     binaural: Optional[float] = Field(None, ge=0, le=40)
+    isochronic: Optional[float] = Field(None, ge=0, le=40)
     golden_stack: Optional[bool] = None
     breathwork: Optional[bool] = None
     ambient: Optional[Dict[str, float]] = None
     tone_volume: Optional[float] = Field(None, ge=0, le=1)
+    visual_mode: Optional[str] = Field(None, pattern=r"^(rings|chladni|ripples)$")
+    sleep_duration_min: Optional[int] = Field(None, ge=30, le=480)
 
 
 class ProfileUpdateIn(BaseModel):
@@ -459,7 +465,7 @@ async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user))
     # Strip Pro-only fields when the user isn't Pro.
     full = await db.users.find_one({"id": user["id"]})
     if not _is_pro(full):
-        for k in ("golden_stack", "breathwork", "binaural", "ambient"):
+        for k in ("golden_stack", "breathwork", "binaural", "isochronic", "ambient", "visual_mode", "sleep_duration_min"):
             payload.pop(k, None)
         if not payload:
             return {"ok": True}
@@ -468,6 +474,182 @@ async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user))
     update_doc["prefs.updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.users.update_one({"id": user["id"]}, {"$set": update_doc})
     return {"ok": True}
+
+
+# --- AI Frequency Recommendation (Pro) ---------------------------------------
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
+
+AI_RECO_SYSTEM = """You are a sound-healing curator for the "Healing Frequencies" app.
+The user describes how they feel or what they want to achieve. You respond with ONE
+personalized audio prescription as a JSON object — no prose, no markdown, just JSON.
+
+Hard requirements for the JSON object:
+  frequency: number in Hz, between 1 and 1200. Prefer culturally-significant healing
+             frequencies when they match the intent (Solfeggio: 174, 285, 396, 417,
+             432, 528, 639, 741, 852, 963; Brainwaves: Delta 2, Theta 6, Schumann 7.83,
+             Alpha 10, Gamma 40; Specials: 111, 222, 369, 444, 1111). Otherwise pick
+             any value 1-1200 that fits the intent.
+  name: short evocative title, 3-6 words, e.g. "Quiet Mind · Slow Tide"
+  description: ONE sentence, max 22 words, explaining why this prescription suits
+               the user's intent. No clinical claims.
+  waveform: one of "sine" | "triangle" | "square" | "sawtooth" — sine for calm,
+            triangle for warmth, square only for sharp focus, sawtooth rarely.
+  binaural: integer Hz offset 0..40 — 0 for pure tone; use brainwave targets
+            (Delta 1-4, Theta 4-8, Alpha 8-13, Beta 13-30, Gamma 30-40) when
+            entrainment fits the intent. Set to 0 if isochronic > 0.
+  isochronic: integer Hz pulse rate 0..40 — 0 for off; use brainwave targets
+              when sharp on/off pulsing fits (focus, alertness). Mutually
+              exclusive with binaural — set one OR the other, not both.
+  golden_stack: boolean — true for transcendent / heart-opening intents.
+  ambient: object whose keys are a subset of ["rain","ocean","forest","wind",
+           "crickets","bowls","brown","white"] with values 0..1. Use 0-3 layers,
+           mixed gently. Empty {} is fine for pure-tone work.
+  duration_min: integer 5..60, the recommended session length in minutes.
+
+Return ONLY the JSON object. No code fences, no prose."""
+
+
+class AIRecommendIn(BaseModel):
+    intent: str = Field(min_length=2, max_length=500)
+    mood: Optional[str] = Field(default=None, max_length=80)
+    goal: Optional[str] = Field(default=None, max_length=80)
+    duration_min: Optional[int] = Field(default=None, ge=5, le=60)
+
+
+def _extract_json(text: str) -> dict:
+    """LLMs sometimes wrap JSON in code fences or add prose. Find the first
+    {...} block via brace-matching and json.loads it."""
+    if not text:
+        raise ValueError("empty LLM response")
+    # Strip code fences first
+    cleaned = re.sub(r"```(?:json)?\s*", "", text).replace("```", "").strip()
+    # Try direct parse
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    # Brace-match scan
+    start = cleaned.find("{")
+    if start < 0:
+        raise ValueError("no JSON object found in LLM response")
+    depth = 0
+    for i in range(start, len(cleaned)):
+        c = cleaned[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(cleaned[start:i + 1])
+    raise ValueError("unterminated JSON in LLM response")
+
+
+ALLOWED_AMBIENT = {"rain", "ocean", "forest", "wind", "crickets", "bowls", "brown", "white"}
+ALLOWED_WAVEFORMS = {"sine", "triangle", "square", "sawtooth"}
+
+
+def _validate_reco(raw: dict) -> dict:
+    """Coerce / clamp every field so a hallucinated value can't break the player."""
+    freq = float(raw.get("frequency", 432))
+    freq = max(1.0, min(1200.0, freq))
+    name = str(raw.get("name", "AI Prescription"))[:80]
+    desc = str(raw.get("description", ""))[:240]
+    waveform = str(raw.get("waveform", "sine")).lower()
+    if waveform not in ALLOWED_WAVEFORMS:
+        waveform = "sine"
+    binaural = int(max(0, min(40, raw.get("binaural", 0) or 0)))
+    isochronic = int(max(0, min(40, raw.get("isochronic", 0) or 0)))
+    # Mutual exclusivity (system prompt says so, but enforce server-side too).
+    if isochronic > 0 and binaural > 0:
+        binaural = 0
+    golden = bool(raw.get("golden_stack", False))
+    duration = int(max(5, min(60, raw.get("duration_min", 15) or 15)))
+    ambient_raw = raw.get("ambient") or {}
+    ambient = {}
+    if isinstance(ambient_raw, dict):
+        for k, v in ambient_raw.items():
+            if k in ALLOWED_AMBIENT:
+                try:
+                    fv = float(v)
+                    if fv > 0:
+                        ambient[k] = max(0.0, min(1.0, fv))
+                except Exception:
+                    continue
+        # Cap to 3 simultaneous layers (keeps mix airy)
+        if len(ambient) > 3:
+            ambient = dict(sorted(ambient.items(), key=lambda kv: -kv[1])[:3])
+    return {
+        "frequency": freq,
+        "name": name,
+        "description": desc,
+        "waveform": waveform,
+        "binaural": binaural,
+        "isochronic": isochronic,
+        "golden_stack": golden,
+        "ambient": ambient,
+        "duration_min": duration,
+    }
+
+
+@api.post("/me/ai-recommend")
+async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_user)):
+    """Generate a personalized frequency prescription via Claude Sonnet 4.5.
+    Pro-only. Returns a strict-shape JSON the frontend can apply directly to
+    the audio engine.
+    """
+    full = await db.users.find_one({"id": user["id"]})
+    if not _is_pro(full):
+        raise HTTPException(status_code=403, detail="AI prescriptions are a Pro feature")
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(status_code=503, detail="LLM key not configured")
+
+    # Build the user message
+    parts = [f"Intent: {body.intent.strip()}"]
+    if body.mood:
+        parts.append(f"Current mood: {body.mood.strip()}")
+    if body.goal:
+        parts.append(f"Goal: {body.goal.strip()}")
+    if body.duration_min:
+        parts.append(f"Preferred duration: {body.duration_min} minutes")
+    user_text = "\n".join(parts)
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"ai-reco-{user['id']}-{uuid.uuid4().hex[:8]}",
+        system_message=AI_RECO_SYSTEM,
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+
+    try:
+        # Stream-collect into a single string (the playbook recommends streaming;
+        # for one-shot JSON we still consume the stream then parse).
+        collected = []
+        async for ev in chat.stream_message(UserMessage(text=user_text)):
+            cls = ev.__class__.__name__
+            if cls == "TextDelta":
+                collected.append(getattr(ev, "content", "") or "")
+            elif cls == "StreamDone":
+                break
+        text = "".join(collected).strip()
+        if not text:
+            # Some library versions return a single concatenated event; try
+            # the explicit non-streaming path as a fallback.
+            try:
+                text = await chat.send_message(UserMessage(text=user_text))  # type: ignore
+                if hasattr(text, "content"):
+                    text = text.content
+                text = str(text or "").strip()
+            except Exception:
+                pass
+        if not text:
+            raise HTTPException(status_code=502, detail="AI returned an empty response")
+        raw = _extract_json(text)
+        reco = _validate_reco(raw)
+        return reco
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("AI recommend failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"AI recommendation failed: {exc}")
 
 
 # ---------- Stripe helper ----------

@@ -98,6 +98,19 @@ export default function Dashboard({ onOpenAccount }) {
   // explicit reset (tap-toggle, swap, full stop, sleep mode, timer end).
   // Persisted through Pause/Resume so the visual indicator survives a pause.
   const [activeSoundscape, setActiveSoundscape] = useState(null);
+  // Visual mode for the cymatic visualizer: 'rings' (default) | 'chladni' | 'ripples'
+  const [visualMode, setVisualMode] = useState('rings');
+  // AI Recommend panel state
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiIntent, setAiIntent] = useState('');
+  const [aiMood, setAiMood] = useState('');
+  const [aiGoal, setAiGoal] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiErr, setAiErr] = useState('');
+  const [aiResult, setAiResult] = useState(null); // last reco for display
+  // Sleep Mode duration chooser (replaces hard-coded 30): 30 / 60 / 120 / 240 / 480 min
+  const SLEEP_DURATIONS = [30, 60, 120, 240, 480];
+  const [sleepDurationMin, setSleepDurationMin] = useState(30);
   // Track restore lifecycle: restoreStartedRef prevents re-entry of the restore
   // effect (it's set synchronously when restore begins); prefsRestoredRef gates
   // the auto-save effect (set only when restore completes, so auto-save can't
@@ -107,7 +120,6 @@ export default function Dashboard({ onOpenAccount }) {
   const prefsSaveTimerRef = React.useRef(null);
 
   const SLEEP_FADE_SECONDS = 60;
-  const SLEEP_DURATION_MIN = 30;
 
   const checkIn = async (minutes) => {
     try {
@@ -261,8 +273,15 @@ export default function Dashboard({ onOpenAccount }) {
         if (typeof data.tone_volume === 'number') audioEngine.setToneVolume(data.tone_volume);
         if (isPro) {
           if (typeof data.binaural === 'number') audioEngine.setBinaural(data.binaural);
+          if (typeof data.isochronic === 'number') audioEngine.setIsochronic(data.isochronic);
           if (typeof data.golden_stack === 'boolean') audioEngine.setGoldenStack(data.golden_stack);
           if (typeof data.breathwork === 'boolean') setBreathwork(data.breathwork);
+          if (typeof data.visual_mode === 'string' && ['rings', 'chladni', 'ripples'].includes(data.visual_mode)) {
+            setVisualMode(data.visual_mode);
+          }
+          if (typeof data.sleep_duration_min === 'number' && SLEEP_DURATIONS.includes(data.sleep_duration_min)) {
+            setSleepDurationMin(data.sleep_duration_min);
+          }
           if (data.ambient && typeof data.ambient === 'object') {
             Object.entries(data.ambient).forEach(([k, v]) => {
               if (typeof v === 'number') audioEngine.setAmbient(k, v);
@@ -297,14 +316,17 @@ export default function Dashboard({ onOpenAccount }) {
       // when they WERE Pro — so prefs survive a downgrade or trial-expiry round-trip.
       if (isPro) {
         payload.binaural = state.binaural;
+        payload.isochronic = state.isochronic || 0;
         payload.golden_stack = !!state.goldenStack;
         payload.breathwork = !!breathwork;
         payload.ambient = state.ambient && { ...state.ambient };
+        payload.visual_mode = visualMode;
+        payload.sleep_duration_min = sleepDurationMin;
       }
       api.put('/me/prefs', payload).catch((e) => console.warn('[Dashboard] prefs save failed', e));
     }, 1200);
     return () => { if (prefsSaveTimerRef.current) clearTimeout(prefsSaveTimerRef.current); };
-  }, [state.frequency, state.waveform, state.binaural, state.toneVolume, state.goldenStack, state.ambient, duration, breathwork, isPro]);
+  }, [state.frequency, state.waveform, state.binaural, state.isochronic, state.toneVolume, state.goldenStack, state.ambient, duration, breathwork, visualMode, sleepDurationMin, isPro]);
 
   const togglePlay = () => {
     if (!audioEngine.playing) {
@@ -364,8 +386,8 @@ export default function Dashboard({ onOpenAccount }) {
     audioEngine.setAmbient('brown', 0.45);
     setBreathwork(false);
     setActiveSoundscape(null);
-    setDuration(SLEEP_DURATION_MIN);
-    setRemaining(SLEEP_DURATION_MIN * 60);
+    setDuration(sleepDurationMin);
+    setRemaining(sleepDurationMin * 60);
     setSleepMode(true);
     // Start in the SAME gesture frame (no setTimeout) — required for iOS audio unlock
     audioEngine.start();
@@ -478,6 +500,56 @@ export default function Dashboard({ onOpenAccount }) {
 
   const deleteSession = async (id) => {
     try { await api.delete(`/sessions/${id}`); refreshSessions(); } catch (e) { console.warn('[Dashboard] delete session failed', e); }
+  };
+
+  // ---- AI Frequency Recommendation (Pro) -----------------------------------
+  // Calls /api/me/ai-recommend with the user's intent + optional mood/goal.
+  // Applies the returned prescription to the audio engine immediately so the
+  // user hears the result the moment they tap Play (or right now if a session
+  // is already in progress).
+  const runAiRecommend = async () => {
+    if (!isPro) {
+      setAiErr('AI prescriptions are a Pro feature.');
+      return;
+    }
+    const intent = aiIntent.trim();
+    if (intent.length < 2) {
+      setAiErr('Tell me how you want to feel.');
+      return;
+    }
+    setAiErr('');
+    setAiLoading(true);
+    try {
+      const { data } = await api.post('/me/ai-recommend', {
+        intent,
+        mood: aiMood.trim() || undefined,
+        goal: aiGoal.trim() || undefined,
+        duration_min: duration,
+      });
+      // Apply to engine — order matters: clear opposing modulation first so
+      // the new prescription isn't fighting stale state from a prior session.
+      audioEngine.setBinaural(0);
+      audioEngine.setIsochronic(0);
+      audioEngine.setFrequency(data.frequency);
+      audioEngine.setWaveform(data.waveform || 'sine');
+      if (data.binaural) audioEngine.setBinaural(data.binaural);
+      if (data.isochronic) audioEngine.setIsochronic(data.isochronic);
+      if (data.golden_stack) audioEngine.setGoldenStack(true);
+      else audioEngine.setGoldenStack(false);
+      // Reset all ambient layers to 0, then apply the recommended mix so we
+      // don't accumulate leftovers from a previous prescription.
+      ['rain', 'ocean', 'forest', 'wind', 'crickets', 'bowls', 'brown', 'white']
+        .forEach((k) => audioEngine.setAmbient(k, 0));
+      Object.entries(data.ambient || {}).forEach(([k, v]) => audioEngine.setAmbient(k, v));
+      setActiveSoundscape(null);
+      if (data.duration_min) setDuration(data.duration_min);
+      setAiResult(data);
+    } catch (e) {
+      const msg = e?.response?.data?.detail || e?.message || 'AI prescription failed';
+      setAiErr(typeof msg === 'string' ? msg : 'AI prescription failed');
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const activePreset = useMemo(
@@ -638,11 +710,39 @@ export default function Dashboard({ onOpenAccount }) {
                   Sleep Mode
                 </div>
                 <div className="text-[10px] text-[#8A9A92]">
-                  {sleepMode ? 'Drifting · fades at 60s' : '4 Hz · brown noise · 30 min fade'}
+                  {sleepMode
+                    ? `Drifting · fades at 60s · ${sleepDurationMin >= 60 ? `${(sleepDurationMin / 60).toFixed(sleepDurationMin % 60 === 0 ? 0 : 1)}h` : `${sleepDurationMin}min`}`
+                    : `4 Hz · brown noise · ${sleepDurationMin >= 60 ? `${(sleepDurationMin / 60).toFixed(sleepDurationMin % 60 === 0 ? 0 : 1)}h` : `${sleepDurationMin}min`} fade`}
                 </div>
               </div>
               {!isPro && <Lock size={12} className="text-[#C4A67A]" />}
             </button>
+
+            {/* Sleep Mode duration chooser — replaces hard-coded 30 min.
+                Disabled while Sleep Mode is active so the timer doesn't get
+                yanked mid-session. Click-toggle pattern keeps the UI dense
+                on mobile (no extra dropdown chrome). */}
+            <div className="mt-2 grid grid-cols-5 gap-1.5" data-testid="sleep-duration-chooser">
+              {SLEEP_DURATIONS.map((m) => {
+                const active = sleepDurationMin === m;
+                const label = m >= 60 ? `${m / 60}h` : `${m}m`;
+                return (
+                  <button
+                    key={m}
+                    data-testid={`sleep-duration-${m}`}
+                    disabled={sleepMode}
+                    onClick={() => setSleepDurationMin(m)}
+                    className={`py-1.5 rounded-full text-[10px] font-mono tracking-wider border transition-colors ${
+                      active
+                        ? 'border-[#72C2AC]/60 bg-[#5C9E8C]/20 text-[#72C2AC]'
+                        : 'border-[#5C9E8C]/15 text-[#8A9A92] hover:text-[#E8E3D9]'
+                    } ${sleepMode ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Brainwave & Specials — Pro only */}
@@ -822,8 +922,30 @@ export default function Dashboard({ onOpenAccount }) {
 
         {/* CENTER — Visualizer + transport */}
         <main className="flex-1 relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/30 min-h-[480px] lg:min-h-0">
-          <Visualizer playing={state.playing} frequency={state.frequency} />
+          <Visualizer playing={state.playing} frequency={state.frequency} mode={visualMode} />
           <Breathwork active={breathwork && state.playing} />
+
+          {/* Visual-mode chips (top-right) — Rings / Chladni / Ripples */}
+          <div className="absolute top-4 right-4 z-10 flex gap-1.5" data-testid="visual-mode-chips">
+            {[
+              { key: 'rings', label: 'Rings' },
+              { key: 'chladni', label: 'Chladni' },
+              { key: 'ripples', label: 'Ripples' },
+            ].map((m) => (
+              <button
+                key={m.key}
+                data-testid={`visual-mode-${m.key}`}
+                onClick={() => setVisualMode(m.key)}
+                className={`px-2.5 py-1 rounded-full text-[10px] tracking-[0.18em] uppercase font-mono border transition-colors ${
+                  visualMode === m.key
+                    ? 'border-[#C4A67A]/60 bg-[#C4A67A]/15 text-[#C4A67A]'
+                    : 'border-[#5C9E8C]/25 bg-black/30 text-[#8A9A92] hover:text-[#E8E3D9]'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
 
           {/* Frequency label (top) */}
           <div className="absolute top-6 left-1/2 -translate-x-1/2 text-center z-10">
@@ -875,6 +997,92 @@ export default function Dashboard({ onOpenAccount }) {
 
         {/* RIGHT — Custom + Ambient + Save */}
         <aside className="w-full lg:w-[360px] flex flex-col gap-4 lg:gap-6 lg:h-full lg:overflow-y-auto custom-scrollbar">
+          {/* AI Prescription (Pro). Click the header to expand; free-text
+              intent + optional mood/goal → backend Claude Sonnet 4.5 →
+              prescription applied to the engine in one shot. */}
+          <div className="glass p-5" data-testid="ai-recommend-panel">
+            <button
+              data-testid="ai-recommend-toggle"
+              onClick={() => setAiOpen((v) => !v)}
+              className="w-full flex items-center justify-between gap-2 text-left"
+            >
+              <div className="flex items-center gap-2">
+                <Sparkles size={14} className="text-[#C4A67A]" />
+                <div className="label-tiny">AI Prescription</div>
+                {!isPro && <Lock size={11} className="text-[#C4A67A]" />}
+              </div>
+              <div className="text-[10px] text-[#8A9A92] font-mono tracking-wider">
+                {aiOpen ? '−' : '+'}
+              </div>
+            </button>
+
+            {aiOpen && (
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="text-[10px] text-[#8A9A92] tracking-widest uppercase">How do you want to feel?</label>
+                  <textarea
+                    data-testid="ai-intent-input"
+                    value={aiIntent}
+                    onChange={(e) => setAiIntent(e.target.value)}
+                    placeholder="e.g. I need to focus deeply for the next hour, but I'm jittery from coffee."
+                    rows={3}
+                    disabled={!isPro || aiLoading}
+                    className="mt-1 w-full bg-black/30 border border-[#5C9E8C]/20 rounded-lg px-3 py-2 text-sm text-[#E8E3D9] placeholder-[#5A6B65] focus:outline-none focus:border-[#72C2AC]/50 resize-none"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    data-testid="ai-mood-input"
+                    type="text"
+                    value={aiMood}
+                    onChange={(e) => setAiMood(e.target.value)}
+                    placeholder="Mood (optional)"
+                    disabled={!isPro || aiLoading}
+                    className="bg-black/30 border border-[#5C9E8C]/20 rounded-lg px-3 py-2 text-xs text-[#E8E3D9] placeholder-[#5A6B65] focus:outline-none focus:border-[#72C2AC]/50"
+                  />
+                  <input
+                    data-testid="ai-goal-input"
+                    type="text"
+                    value={aiGoal}
+                    onChange={(e) => setAiGoal(e.target.value)}
+                    placeholder="Goal (optional)"
+                    disabled={!isPro || aiLoading}
+                    className="bg-black/30 border border-[#5C9E8C]/20 rounded-lg px-3 py-2 text-xs text-[#E8E3D9] placeholder-[#5A6B65] focus:outline-none focus:border-[#72C2AC]/50"
+                  />
+                </div>
+                <button
+                  data-testid="ai-generate-button"
+                  onClick={runAiRecommend}
+                  disabled={!isPro || aiLoading || aiIntent.trim().length < 2}
+                  className={`w-full py-2.5 rounded-full border text-xs tracking-[0.18em] uppercase font-mono transition-colors flex items-center justify-center gap-2 ${
+                    isPro && !aiLoading && aiIntent.trim().length >= 2
+                      ? 'border-[#C4A67A]/60 bg-[#C4A67A]/15 text-[#C4A67A] hover:bg-[#C4A67A]/25'
+                      : 'border-[#5C9E8C]/15 text-[#5A6B65] cursor-not-allowed'
+                  }`}
+                >
+                  <Sparkles size={12} />
+                  {aiLoading ? 'Tuning…' : 'Prescribe my frequency'}
+                </button>
+
+                {aiErr && (
+                  <div data-testid="ai-error" className="text-[11px] text-[#E07A5F]">{aiErr}</div>
+                )}
+                {aiResult && !aiErr && (
+                  <div data-testid="ai-result" className="mt-1 p-3 rounded-lg bg-[#0E1F18]/60 border border-[#5C9E8C]/20">
+                    <div className="text-[#C4A67A] font-mono text-xs tracking-wider">{aiResult.name}</div>
+                    <div className="text-[#E8E3D9] text-[11px] mt-1 leading-snug">{aiResult.description}</div>
+                    <div className="text-[10px] text-[#8A9A92] mt-2 font-mono">
+                      {aiResult.frequency.toFixed(1)} Hz · {aiResult.waveform}
+                      {aiResult.binaural > 0 ? ` · binaural ${aiResult.binaural}Hz` : ''}
+                      {aiResult.isochronic > 0 ? ` · iso ${aiResult.isochronic}Hz` : ''}
+                      {aiResult.golden_stack ? ' · φ' : ''}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Custom Generator */}
           <div className="glass p-6">
             <div className="label-tiny mb-4">Custom Generator</div>
@@ -946,6 +1154,41 @@ export default function Dashboard({ onOpenAccount }) {
               className="slider"
               style={{ '--v': `${(state.binaural / 40) * 100}%` }}
             />
+
+            {/* Isochronic pulse — Pro only. Mutually exclusive with binaural
+                (engine accepts both, but they fight perceptually; we soft-disable
+                one when the other is non-zero so the UI mirrors what's actually
+                audible). 0 = off; 1-40 Hz pulse the carrier on/off (true
+                isochronic entrainment, no headphones required). */}
+            <label className="text-xs text-[#8A9A92] flex justify-between mt-5 mb-1">
+              <span className="flex items-center gap-1">
+                {!isPro && <Lock size={11} className="text-[#C4A67A]" />}
+                Isochronic pulse
+              </span>
+              <span className="font-mono text-[#72C2AC]">
+                {state.isochronic > 0 ? `${state.isochronic} Hz` : 'Off'}
+              </span>
+            </label>
+            <input
+              data-testid="isochronic-slider"
+              type="range" min="0" max="40" step="0.5"
+              value={state.isochronic || 0}
+              disabled={!isPro}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                // Soft mutual exclusion with binaural — if user pulls iso up,
+                // drop binaural to 0 so the carrier isn't being modulated by
+                // two competing schemes at once.
+                if (v > 0 && state.binaural > 0) audioEngine.setBinaural(0);
+                audioEngine.setIsochronic(v);
+              }}
+              className={`slider ${!isPro ? 'opacity-50 cursor-not-allowed' : ''}`}
+              style={{ '--v': `${((state.isochronic || 0) / 40) * 100}%` }}
+            />
+            <div className="text-[10px] text-[#8A9A92] mt-1 leading-snug">
+              Square-wave gates the tone on/off at the chosen Hz for true
+              brainwave entrainment — no headphones required.
+            </div>
 
             <label className="text-xs text-[#8A9A92] flex justify-between mt-5 mb-1">
               <span><Volume2 size={12} className="inline mr-1" />Tone volume</span>
