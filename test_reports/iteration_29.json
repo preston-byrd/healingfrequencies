@@ -1,0 +1,26 @@
+{
+  "summary": "Iter-29 RETEST after main agent's one-line reorder in audioEngine.start() — moved `this.playing = true` (now line 348) BEFORE the `if (this._pendingAmbient)` restore loop (now lines 353-358). Ran the exact same Playwright flow used in iter-28 against the live preview as admin@example.com (Pro). The iter-28 regression is FIXED and no other behaviour regressed. Concretely: 31/31 sub-assertions PASS, including the previously-failing T5 (setAmbient-while-stopped → start() → rain gain ramped 0 → 0.499 in 1.6 s, with samples [0.224, 0.404, 0.463, 0.487, 0.493, 0.497, 0.499, 0.500] — well above the 0.4-by-1.5s spec) AND the new richer T3 (direct setAmbient(rain,0.45) + setAmbient(ocean,0.3) while stopped → click Play → both layers ramped to within 0.001 of target by ~1.4s → click Stop, both fell to 0 within 0.8s and were snapshotted to _pendingAmbient → click Play again, both layers restored to exactly the same values). Also re-verified: T1 (AI 'drift to sleep with rain and ocean' auto-started engine, freq=174Hz, binaural=2, rain=0.679, ocean=0.582, amp=0.10; pause icon visible; _pendingAmbient drained to null), T2 (stop button → amp=0 within 1.5s), T6 (setAmbient(forest,0.5) while playing → ramped 0 → 0.499 live), T7 (hot-swap to 'deep meditation with forest sounds' → playing stayed true across 48 consecutive 250ms samples, ended with forest=0.7 + bowls=0.3, proving the hot-swap re-prescribed without ever flipping playing=false). The _pendingAmbient mechanism is now drained correctly on every resume — verified across 4 separate start() calls in T5/T3/T1.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "None — the iter-28 critical regression is resolved by the one-line reorder. Production bug ('AI prescription ambient sounds could not be stopped/started back from player') is no longer reproducible by any vector tested (direct setAmbient, AI prescription, hot-swap, pause→resume cycle)."
+  ],
+  "critical_code_review_comments": [
+    "audioEngine.js:343-358 — Excellent fix. The new ordering (build oscillators → set this.playing=true → drain _pendingAmbient → null it) is correct. The inline comment at lines 343-347 documents the iter-28 regression accurately for future maintainers.",
+    "audioEngine.js:705-733 — setAmbient's stopped-branch is internally consistent. One MINOR (not blocking) note carried from iter-28: `a.volume = v` is set at line 715 BEFORE the playing gate, meaning ambient.volume diverges from gain.gain.value while stopped (volume=0.5 but actual gain=0). The slider UI is bound to .volume so this is intentional, but stop()'s snapshot at line 489-490 (`if (a.volume > 0.001) snap[k] = a.volume`) would currently include stopped-only mixes. This isn't a bug because stop() short-circuits at line 507 if !this.playing — but if a future change ever removes that short-circuit, it would silently merge stopped-set ambient into _pendingAmbient. Worth a one-line comment near line 715 (\"NB: .volume tracks the UI slider even while stopped — actual gain stays 0 until start() drains _pendingAmbient\") to prevent future regression.",
+    "Carry-over: /app/backend/server.py is still 1898 lines — recommend a routers/ split in a future iter (not in scope of this bug, not retested)."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "n/a (skipped per request)", "frontend": "100% (31/31 sub-assertions across T1/T2/T3/T5/T6/T7; T8 not retested per main agent confirmation that the gate code path is the same as T4 which already passed)" },
+  "test_credentials": "Admin: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (verified working).",
+  "seed_data_creation": "None — used existing admin account.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The audioEngine.js player-coherence work (iter-27 → iter-28 → iter-29) is complete and stable. Engine handles exposed as window.__audioEngine for DevTools inspection. Key fields: .playing, ._pendingAmbient, .ambient[kind].gain.gain.value, .ambient[kind].volume, .getAmplitude(), .frequency, .waveform, .binaural, .isochronic. The AI prescription PRE-BUTTON is data-testid=ai-recommend-toggle (collapse panel) → fill data-testid=ai-intent-input → click data-testid=ai-generate-button (text reads 'PRESCRIBE MY FREQUENCY'). Soundscape buttons live below the 1080 fold — scroll into view before click. AI prescriptions return within ~3-4s and auto-start the engine. Test AI rate-limit: 6 requests / 2 min before 429.",
+  "rca of the issue": "iter-28's RCA was perfectly accurate. The one-line fix (moving `this.playing = true` to BEFORE the `_pendingAmbient` restore loop in audioEngine.start()) resolves the production bug end-to-end. Mechanism verified: with playing=true set first, the restore-loop's setAmbient() calls now take the playing-branch (line 734-750 of audioEngine.js) which schedules setTargetAtTime ramps on the actual GainNodes instead of routing into _pendingAmbient. start() then sets _pendingAmbient=null cleanly after the drain. No other audio paths or UI bindings were affected."
+}

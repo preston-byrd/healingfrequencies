@@ -340,6 +340,13 @@ class AudioEngine {
       if (this.isochronic > 0) this._spawnIsochronicLFO(this.isochronic);
       if (this.goldenStack) this._spawnPhiHarmonics();
 
+      // Flip playing BEFORE the _pendingAmbient restore — setAmbient's
+      // "stopped" branch checks this.playing, so the restore loop would
+      // otherwise route every restored layer back into _pendingAmbient and
+      // start() would null it on the next line, silently dropping the mix
+      // the user paused with. (Caught by iter-28 testing agent regression.)
+      this.playing = true;
+
       // Pause→Resume: restore the ambient mix that was active when the user
       // last hit Stop / paused. Cleared after restore so subsequent stops
       // re-snapshot a fresh state.
@@ -349,8 +356,6 @@ class AudioEngine {
         });
         this._pendingAmbient = null;
       }
-
-      this.playing = true;
 
       // Background-audio sink: start the hidden <audio> element NOW (we're
       // still inside the user-gesture call stack since start() is invoked
