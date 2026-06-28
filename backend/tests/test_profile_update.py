@@ -6,7 +6,7 @@ import requests
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://frequency-healer-31.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 ADMIN_EMAIL = "admin@example.com"
-ADMIN_PW = "admin123"
+ADMIN_PW = os.environ.get("ADMIN_TEST_PASSWORD") or __import__("tests._creds", fromlist=["ADMIN_PASSWORD"]).ADMIN_PASSWORD
 
 
 @pytest.fixture(scope="module")

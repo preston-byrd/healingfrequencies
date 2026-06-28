@@ -5,6 +5,18 @@ const ARTWORK_BASE = (typeof window !== 'undefined' && window.location)
   ? window.location.origin
   : '';
 
+// Dev-only error visibility for the many catch blocks below. Most audio
+// failures are "node already stopped" / "context not yet unlocked" — they
+// can't be remediated at the call site so we deliberately swallow them. But
+// in development we still want them showing in the console so genuine bugs
+// don't hide. In production the warning becomes a no-op (zero overhead).
+const _DEV = typeof process !== 'undefined' && process.env && process.env.NODE_ENV !== 'production';
+function _warn(ctx, err) {
+  if (_DEV && err) {
+    console.warn(`[audioEngine] ${ctx}:`, err && err.message ? err.message : err);
+  }
+}
+
 class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -71,7 +83,7 @@ class AudioEngine {
       created = true;
     }
     if (this.ctx.state !== 'running') {
-      try { await this.ctx.resume(); } catch (e) { /* noop */ }
+      try { await this.ctx.resume(); } catch (e) { _warn('audio', e); }
     }
     // iOS Safari + Chrome-on-iOS need a 1-sample silent BufferSource to fully unlock
     // WebAudio. resume() alone is not always sufficient. Idempotent via this._unlocked.
@@ -84,7 +96,7 @@ class AudioEngine {
         if (typeof src.start === 'function') src.start(0);
         else if (typeof src.noteOn === 'function') src.noteOn(0);
         this._unlocked = true;
-      } catch (e) { /* noop */ }
+      } catch (e) { _warn('audio', e); }
     }
     // Build the background-playback sink ONCE per ctx. Routes the master mix
     // through an <audio> element so the OS treats the page as media playback.
@@ -108,7 +120,7 @@ class AudioEngine {
       this.master.connect(a);
       this.analyser = a;
       this._analyserData = new Uint8Array(a.frequencyBinCount);
-    } catch (e) { /* noop */ }
+    } catch (e) { _warn('audio', e); }
   }
 
   // Public: per-frame snapshot of audio amplitude (0..1) for visualizers.
@@ -195,7 +207,7 @@ class AudioEngine {
         });
       }
       navigator.mediaSession.playbackState = this.playing ? 'playing' : 'paused';
-    } catch (e) { /* noop */ }
+    } catch (e) { _warn('audio', e); }
   }
 
   // Public: let the UI tell the engine what to display on the lock-screen.
@@ -228,7 +240,7 @@ class AudioEngine {
   async releaseWakeLock() {
     this._wakeLockWanted = false;
     if (!this._wakeLock) return;
-    try { await this._wakeLock.release(); } catch (e) { /* noop */ }
+    try { await this._wakeLock.release(); } catch (e) { _warn('audio', e); }
     this._wakeLock = null;
   }
 
@@ -249,7 +261,7 @@ class AudioEngine {
   // Warm-up: call from the first user gesture on the page to unlock audio on iOS/Safari
   // BEFORE the user taps a specific frequency. Safe to call multiple times.
   async unlock() {
-    try { await this._ensureCtx(); } catch (e) { /* noop */ }
+    try { await this._ensureCtx(); } catch (e) { _warn('audio', e); }
   }
 
   // Pre-build every ambient layer at the SAME audio-context time so that all loops
@@ -347,7 +359,7 @@ class AudioEngine {
         try {
           const p = this._sinkEl.play();
           if (p && typeof p.catch === 'function') p.catch(() => { /* user-gesture missing — silent */ });
-        } catch (e) { /* noop */ }
+        } catch (e) { _warn('audio', e); }
       }
       // Bind Media Session handlers + push current metadata so lock-screen
       // controls show "Now playing: 528 Hz · Love · Solarisound".
@@ -396,7 +408,7 @@ class AudioEngine {
     });
     setTimeout(() => {
       local.forEach(({ osc, gain }) => {
-        try { osc.stop(); osc.disconnect(); gain.disconnect(); } catch (e) { /* noop */ }
+        try { osc.stop(); osc.disconnect(); gain.disconnect(); } catch (e) { _warn('audio', e); }
       });
     }, (fade + 0.05) * 1000);
   }
@@ -432,8 +444,8 @@ class AudioEngine {
     const ctx = this.ctx;
     [this.isoLfo, this.isoScale, this.isoOffset].forEach((n) => {
       if (!n) return;
-      try { if (typeof n.stop === 'function') n.stop(); } catch (e) { /* noop */ }
-      try { n.disconnect(); } catch (e) { /* noop */ }
+      try { if (typeof n.stop === 'function') n.stop(); } catch (e) { _warn('audio', e); }
+      try { n.disconnect(); } catch (e) { _warn('audio', e); }
     });
     this.isoLfo = null;
     this.isoScale = null;
@@ -505,27 +517,27 @@ class AudioEngine {
     this._killPhiHarmonics(0.8);
     this._killIsochronicLFO(0); // tear down LFO; gateGain disconnected via timeout below
     setTimeout(() => {
-      oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
+      oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { _warn('audio', e); } });
       if (this.gateGain) {
-        try { this.gateGain.disconnect(); } catch (e) { /* noop */ }
+        try { this.gateGain.disconnect(); } catch (e) { _warn('audio', e); }
         this.gateGain = null;
       }
       // Pause the background-audio sink AFTER the fade completes so we don't
       // cut off the tail. Leaving it playing forever would also work, but it
       // would keep the OS media indicator lit even when the user stopped.
       if (this._sinkEl && !this.playing) {
-        try { this._sinkEl.pause(); } catch (e) { /* noop */ }
+        try { this._sinkEl.pause(); } catch (e) { _warn('audio', e); }
       }
     }, 850);
     this.playing = false;
     // Reflect stopped state to the lock-screen / OS controls + drop wake lock.
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      try { navigator.mediaSession.playbackState = 'paused'; } catch (e) { /* noop */ }
+      try { navigator.mediaSession.playbackState = 'paused'; } catch (e) { _warn('audio', e); }
     }
     if (this._wakeLock) {
       // Release the OS sentinel but PRESERVE the user's "wanted" preference
       // so the next start() re-acquires automatically.
-      try { this._wakeLock.release(); } catch (e) { /* noop */ }
+      try { this._wakeLock.release(); } catch (e) { _warn('audio', e); }
       this._wakeLock = null;
     }
     this._emit();
@@ -720,9 +732,9 @@ class AudioEngine {
     Object.values(this.ambient).forEach((a) => {
       try {
         if (this.ctx) a.gain.gain.setValueAtTime(0, this.ctx.currentTime);
-        if (a.lfo) { try { a.lfo.stop(); a.lfo.disconnect(); } catch (e) { /* noop */ } }
+        if (a.lfo) { try { a.lfo.stop(); a.lfo.disconnect(); } catch (e) { _warn('audio', e); } }
         a.src.stop(); a.src.disconnect();
-      } catch (e) { /* noop */ }
+      } catch (e) { _warn('audio', e); }
     });
     this.ambient = {};
     this._pendingAmbient = null;
