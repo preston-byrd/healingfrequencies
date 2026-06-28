@@ -63,7 +63,97 @@ def _rate_limit(key: str, capacity: float, refill_per_sec: float) -> bool:
 
 def _rate_limit_or_429(key: str, capacity: float, refill_per_sec: float, label: str = "request"):
     if not _rate_limit(key, capacity, refill_per_sec):
+        # Bump the AI-throttle counter when an AI endpoint is the caller (we
+        # key those buckets with the "ai:" prefix); other 429s land in a
+        # generic counter. Pure observability — doesn't change behaviour.
+        bucket = "ai_throttle_hits" if key.startswith("ai:") else "throttle_hits"
+        _bump_metric(bucket)
         raise HTTPException(status_code=429, detail=f"Too many {label}s — please slow down")
+
+
+# --- Security metrics + audit log -------------------------------------------
+# Hourly rolling counters in memory. Powers GET /api/admin/security. For a
+# single-instance preview/prod this is fine; multi-replica would need Redis.
+from collections import deque as _deque
+_METRICS_LOCK = _threading.Lock()
+_METRIC_BUCKETS: dict = {  # event_name -> deque[(ts_epoch_seconds, count)]
+    "failed_logins": _deque(maxlen=240),     # ~10 days @ 1/hour
+    "successful_logins": _deque(maxlen=240),
+    "registrations": _deque(maxlen=240),
+    "ai_throttle_hits": _deque(maxlen=240),
+    "throttle_hits": _deque(maxlen=240),
+    "webhook_signature_rejections": _deque(maxlen=240),
+    "session_revocations": _deque(maxlen=240),
+}
+
+
+def _current_hour_ts() -> int:
+    now = int(_time.time())
+    return now - (now % 3600)
+
+
+def _bump_metric(name: str, n: int = 1):
+    if name not in _METRIC_BUCKETS:
+        return
+    hour = _current_hour_ts()
+    with _METRICS_LOCK:
+        b = _METRIC_BUCKETS[name]
+        if b and b[-1][0] == hour:
+            ts, count = b[-1]
+            b[-1] = (ts, count + n)
+        else:
+            b.append((hour, n))
+
+
+def _metric_summary(name: str) -> dict:
+    """Return last_hour, last_24h, last_7d totals for a counter."""
+    now = _current_hour_ts()
+    with _METRICS_LOCK:
+        buckets = list(_METRIC_BUCKETS.get(name, ()))
+    last_hour = sum(c for ts, c in buckets if ts == now)
+    last_24h = sum(c for ts, c in buckets if ts >= now - 23 * 3600)
+    last_7d = sum(c for ts, c in buckets if ts >= now - 7 * 24 * 3600)
+    return {"last_hour": last_hour, "last_24h": last_24h, "last_7d": last_7d}
+
+
+def _client_ip(request: Request) -> str:
+    # Trust the first IP from X-Forwarded-For (set by the Emergent ingress);
+    # fall back to direct client. Truncate to keep audit rows compact.
+    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if xff:
+        return xff[:64]
+    try:
+        return (request.client.host or "unknown")[:64]
+    except Exception:
+        return "unknown"
+
+
+async def _audit(
+    event: str,
+    request: Optional[Request],
+    *,
+    user_id: Optional[str] = None,
+    user_email: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> None:
+    """Append a row to the `audit_log` collection. Best-effort — never raises
+    out of the caller (the caller's flow must not depend on logging).
+    Persisted to MongoDB so events survive restarts (unlike the rolling
+    in-memory counters above).
+    """
+    try:
+        doc = {
+            "id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "ip": _client_ip(request) if request else None,
+            "user_id": user_id,
+            "user_email": user_email,
+            "metadata": metadata or {},
+        }
+        await db.audit_log.insert_one(doc)
+    except Exception as e:
+        logger.warning("[audit] insert failed for event=%s: %s", event, type(e).__name__)
 
 
 # --- Setup --------------------------------------------------------------------
@@ -187,7 +277,7 @@ class Session(SessionIn):
 
 # --- Auth routes --------------------------------------------------------------
 @api.post("/auth/register")
-async def register(body: RegisterIn, response: Response):
+async def register(body: RegisterIn, request: Request, response: Response):
     email = body.email.lower()
     existing = await db.users.find_one({"email": email})
     if existing:
@@ -200,6 +290,13 @@ async def register(body: RegisterIn, response: Response):
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(user)
+    # Audit + counter for the admin security tile.
+    _bump_metric("registrations")
+    await _audit(
+        "user.registered", request,
+        user_id=user["id"], user_email=email,
+        metadata={"name": user["name"]},
+    )
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
     return {"id": user["id"], "email": email, "name": user["name"], "token": token}
@@ -210,12 +307,23 @@ async def login(body: LoginIn, request: Request, response: Response):
     # SECURITY: brute-force throttle — 8 login attempts per IP per 5 minutes
     # (refill 1 token every ~37s). Tight enough to slow credential stuffing
     # without locking out real users who fat-finger their password.
-    ip = (request.headers.get("x-forwarded-for", "") or request.client.host or "unknown").split(",")[0].strip()
+    ip = _client_ip(request)
     _rate_limit_or_429(f"login:{ip}", capacity=8, refill_per_sec=1 / 37, label="login attempt")
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
+        _bump_metric("failed_logins")
+        await _audit(
+            "auth.login_failed", request,
+            user_email=email,
+            metadata={"reason": "bad_credentials"},
+        )
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    _bump_metric("successful_logins")
+    await _audit(
+        "auth.login_succeeded", request,
+        user_id=user["id"], user_email=email,
+    )
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
     return {"id": user["id"], "email": email, "name": user.get("name", ""), "token": token}
@@ -231,6 +339,12 @@ async def logout(response: Response, request: Request):
         await db.users.update_one(
             {"id": u["id"]},
             {"$set": {"tokens_valid_after": datetime.now(timezone.utc).isoformat()}},
+        )
+        _bump_metric("session_revocations")
+        await _audit(
+            "session.revoked", request,
+            user_id=u["id"], user_email=u.get("email"),
+            metadata={"trigger": "logout"},
         )
     except Exception:
         pass
@@ -429,7 +543,7 @@ class PlanPricesIn(BaseModel):
 
 
 @api.post("/me/password")
-async def change_password(body: PasswordChangeIn, response: Response, user: dict = Depends(get_current_user)):
+async def change_password(body: PasswordChangeIn, request: Request, response: Response, user: dict = Depends(get_current_user)):
     full = await db.users.find_one({"id": user["id"]})
     if not verify_password(body.current_password, full["password_hash"]):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
@@ -441,6 +555,11 @@ async def change_password(body: PasswordChangeIn, response: Response, user: dict
         {"id": user["id"]},
         {"$set": {"password_hash": hash_password(body.new_password),
                   "tokens_valid_after": now_iso}},
+    )
+    _bump_metric("session_revocations")
+    await _audit(
+        "auth.password_changed", request,
+        user_id=user["id"], user_email=user.get("email"),
     )
     fresh = create_access_token(user["id"], user["email"])
     set_auth_cookie(response, fresh)
@@ -1111,16 +1230,19 @@ async def stripe_webhook(request: Request):
     webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
     if not webhook_secret:
         logger.error("[webhook] STRIPE_WEBHOOK_SECRET not configured — rejecting event")
+        _bump_metric("webhook_signature_rejections")
         # 400 (not 500) so Stripe retries are spaced rather than alarming PagerDuty.
         raise HTTPException(status_code=400, detail="Webhook secret not configured")
     if not sig:
         logger.warning("[webhook] missing Stripe-Signature header")
+        _bump_metric("webhook_signature_rejections")
         raise HTTPException(status_code=400, detail="Missing signature")
     try:
         event = _stripe.Webhook.construct_event(body, sig, webhook_secret)
     except Exception as e:
         # Generic 400 — don't echo crypto error details, just log them.
         logger.warning("[webhook] signature verification failed: %s", type(e).__name__)
+        _bump_metric("webhook_signature_rejections")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     et = event.get("type") if isinstance(event, dict) else event["type"]
@@ -1321,7 +1443,7 @@ async def admin_list_users(
 
 
 @api.post("/admin/users/{user_id}/grant-pro")
-async def admin_grant_pro(user_id: str, body: GrantProIn, user: dict = Depends(get_current_user)):
+async def admin_grant_pro(user_id: str, body: GrantProIn, request: Request, user: dict = Depends(get_current_user)):
     _require_admin(user)
     target = await db.users.find_one({"id": user_id})
     if not target:
@@ -1340,6 +1462,11 @@ async def admin_grant_pro(user_id: str, body: GrantProIn, user: dict = Depends(g
         {"id": user_id},
         {"$set": {"plan": "pro", "pro_until": new_until.isoformat()}},
     )
+    await _audit(
+        "admin.grant_pro", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"target_user_id": user_id, "target_email": target["email"], "days_added": int(body.days)},
+    )
     return {
         "ok": True,
         "user_id": user_id,
@@ -1351,7 +1478,7 @@ async def admin_grant_pro(user_id: str, body: GrantProIn, user: dict = Depends(g
 
 
 @api.post("/admin/users/{user_id}/revoke-pro")
-async def admin_revoke_pro(user_id: str, user: dict = Depends(get_current_user)):
+async def admin_revoke_pro(user_id: str, request: Request, user: dict = Depends(get_current_user)):
     _require_admin(user)
     target = await db.users.find_one({"id": user_id})
     if not target:
@@ -1360,11 +1487,16 @@ async def admin_revoke_pro(user_id: str, user: dict = Depends(get_current_user))
         {"id": user_id},
         {"$set": {"plan": "basic", "pro_until": None}},
     )
+    await _audit(
+        "admin.revoke_pro", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"target_user_id": user_id, "target_email": target["email"]},
+    )
     return {"ok": True, "user_id": user_id, "plan": "basic"}
 
 
 @api.delete("/admin/users/{user_id}")
-async def admin_delete_user(user_id: str, user: dict = Depends(get_current_user)):
+async def admin_delete_user(user_id: str, request: Request, user: dict = Depends(get_current_user)):
     _require_admin(user)
     if user_id == user["id"]:
         raise HTTPException(status_code=400, detail="You cannot delete your own admin account")
@@ -1378,7 +1510,64 @@ async def admin_delete_user(user_id: str, user: dict = Depends(get_current_user)
     await db.sessions.delete_many({"user_id": user_id})
     await db.streaks.delete_many({"user_id": user_id})
     await db.payment_transactions.delete_many({"user_id": user_id})
+    await _audit(
+        "admin.delete_user", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"target_user_id": user_id, "target_email": target["email"]},
+    )
     return {"ok": True, "user_id": user_id, "email": target["email"], "deleted": True}
+
+
+# --- Admin observability ----------------------------------------------------
+@api.get("/admin/security")
+async def admin_security(user: dict = Depends(get_current_user)):
+    """Live security counters for the admin dashboard tile.
+    Each counter exposes `last_hour` / `last_24h` / `last_7d` totals plus the
+    most recent audit events. Counters are in-memory (reset on restart);
+    audit-log events are persisted in MongoDB.
+    """
+    _require_admin(user)
+    metrics = {name: _metric_summary(name) for name in _METRIC_BUCKETS.keys()}
+    # Most recent 12 events for context (lets the tile show a recent activity feed).
+    recent_cursor = db.audit_log.find({}, {"_id": 0}).sort("ts", -1).limit(12)
+    recent = await recent_cursor.to_list(12)
+    # Pending registration count for the "new user notification" badge:
+    # how many users registered in the last 24h that the admin hasn't acknowledged.
+    one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
+    new_users_24h = await db.users.count_documents({
+        "created_at": {"$gte": one_day_ago.isoformat()},
+    })
+    return {
+        "metrics": metrics,
+        "recent_events": recent,
+        "new_users_24h": new_users_24h,
+    }
+
+
+@api.get("/admin/audit-log")
+async def admin_audit_log(
+    event: Optional[str] = None,
+    user_email: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    user: dict = Depends(get_current_user),
+):
+    """Paged audit-log viewer. Filter by `event` prefix (e.g. "auth.")
+    or by `user_email` exact match. Newest first."""
+    _require_admin(user)
+    limit = max(1, min(500, limit))
+    skip = max(0, skip)
+    query: dict = {}
+    if event:
+        # Prefix match — "auth." matches login_failed, login_succeeded, etc.
+        safe = re.escape(event.strip())[:80]
+        query["event"] = {"$regex": f"^{safe}"}
+    if user_email:
+        query["user_email"] = user_email.strip().lower()[:100]
+    total = await db.audit_log.count_documents(query)
+    cursor = db.audit_log.find(query, {"_id": 0}).sort("ts", -1).skip(skip).limit(limit)
+    items = await cursor.to_list(limit)
+    return {"total": total, "items": items, "skip": skip, "limit": limit}
 
 
 # --- App setup ----------------------------------------------------------------
@@ -1429,6 +1618,11 @@ async def startup():
     await db.streaks.create_index("user_id", unique=True)
     await db.payment_transactions.create_index("session_id", unique=True)
     await db.payment_transactions.create_index([("user_id", 1), ("created_at", -1)])
+    # Audit log: paged filter index + TTL so the collection self-prunes after
+    # 180 days (the timestamp field is stored as ISO string; the TTL index
+    # works against the parallel `ts_at` Date field — added below per-insert).
+    await db.audit_log.create_index([("ts", -1)])
+    await db.audit_log.create_index([("event", 1), ("ts", -1)])
     # Seed plan_config if missing
     existing_cfg = await db.plan_config.find_one({"_id": "current"})
     if not existing_cfg:

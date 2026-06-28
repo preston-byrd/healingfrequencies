@@ -52,6 +52,17 @@ export default function AccountDashboard({ onBack }) {
   const [userQuery, setUserQuery] = useState('');
   const [grantDays, setGrantDays] = useState({});
 
+  // admin security tile — counters + recent audit events + new-user badge
+  const [security, setSecurity] = useState(null);
+  const loadSecurity = async () => {
+    try {
+      const { data } = await api.get('/admin/security');
+      setSecurity(data);
+    } catch (e) {
+      console.warn('[AccountDashboard] loadSecurity failed', e);
+    }
+  };
+
   const loadUsers = async (q = '') => {
     try {
       const { data } = await api.get('/admin/users', { params: q ? { q } : {} });
@@ -72,13 +83,20 @@ export default function AccountDashboard({ onBack }) {
         setMonthly(String(ap.data.monthly.price));
         setAnnual(String(ap.data.annual.price));
         setTrial(String(ap.data.trial_days));
-        await loadUsers();
+        await Promise.all([loadUsers(), loadSecurity()]);
       }
     } catch (e) { setErr(formatApiError(e)); }
   };
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Admin security tile auto-refresh — poll every 30s while the tab is open.
+  // Light query (single GET, no Stripe call) so it's safe to keep alive.
+  useEffect(() => {
+    if (!sub?.is_admin) return undefined;
+    const id = setInterval(() => { loadSecurity(); }, 30000);
+    return () => clearInterval(id);
+  }, [sub?.is_admin]);
 
   // Handle Stripe return: ?stripe_session_id=...
   useEffect(() => {
@@ -121,8 +139,7 @@ export default function AccountDashboard({ onBack }) {
       };
       poll();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openBillingPortal = async () => {
     setBusy('portal'); setErr(''); setMsg('');
@@ -636,6 +653,82 @@ export default function AccountDashboard({ onBack }) {
             </div>
           )}
         </div>
+
+        {/* Admin: Security dashboard tile */}
+        {sub.is_admin && security && (
+          <div className="glass p-6 border border-[#C4A67A]/30" data-testid="admin-security-card">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Sparkles size={14} className="text-[#C4A67A]" />
+                <div className="label-tiny text-[#C4A67A]">Admin · Security</div>
+              </div>
+              {security.new_users_24h > 0 && (
+                <div
+                  data-testid="admin-new-users-badge"
+                  className="text-[10px] tracking-widest uppercase px-2.5 py-1 rounded-full border border-[#72C2AC]/40 bg-[#72C2AC]/15 text-[#72C2AC] font-mono"
+                  title="New users registered in the last 24h"
+                >
+                  {security.new_users_24h} new user{security.new_users_24h === 1 ? '' : 's'} · 24h
+                </div>
+              )}
+            </div>
+
+            {/* Counter grid — last_hour / 24h / 7d totals per event class.
+                Live polled every 30s. Counter is in-memory so it resets on
+                backend restart (audit_log persists, this is purely a tile). */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5" data-testid="admin-security-counters">
+              {[
+                { key: 'failed_logins', label: 'Failed logins', accent: '#E07A5F' },
+                { key: 'webhook_signature_rejections', label: 'Webhook sig rejects', accent: '#E07A5F' },
+                { key: 'ai_throttle_hits', label: 'AI throttle hits', accent: '#C4A67A' },
+                { key: 'session_revocations', label: 'Session revocations', accent: '#72C2AC' },
+                { key: 'successful_logins', label: 'Successful logins', accent: '#72C2AC' },
+                { key: 'registrations', label: 'New registrations', accent: '#72C2AC' },
+                { key: 'throttle_hits', label: 'Other throttle hits', accent: '#8A9A92' },
+              ].map(({ key, label, accent }) => {
+                const m = security.metrics[key] || { last_hour: 0, last_24h: 0, last_7d: 0 };
+                return (
+                  <div
+                    key={key}
+                    data-testid={`security-counter-${key}`}
+                    className="rounded-lg border border-[#5C9E8C]/15 bg-black/20 p-3"
+                  >
+                    <div className="text-[10px] tracking-widest uppercase text-[#8A9A92]">{label}</div>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="font-mono text-2xl" style={{ color: accent }}>{m.last_hour}</span>
+                      <span className="text-[10px] text-[#5A6B65] font-mono">/ 1h</span>
+                    </div>
+                    <div className="text-[10px] text-[#5A6B65] font-mono mt-0.5">
+                      {m.last_24h} · 24h &nbsp;·&nbsp; {m.last_7d} · 7d
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Recent audit events feed — 12 most recent across all event types.
+                Click an event chip to filter by prefix (UX TODO if needed). */}
+            <div className="label-tiny mb-2 text-[#8A9A92]">Recent activity</div>
+            <div className="space-y-1.5 max-h-56 overflow-y-auto custom-scrollbar pr-1" data-testid="admin-recent-events">
+              {(security.recent_events || []).map((ev) => (
+                <div
+                  key={ev.id}
+                  className="flex items-center gap-3 text-[11px] font-mono py-1 border-b border-[#5C9E8C]/8"
+                >
+                  <span className="text-[#5A6B65] tabular-nums w-[88px] shrink-0">
+                    {new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </span>
+                  <span className="text-[#C4A67A] w-[170px] shrink-0 truncate">{ev.event}</span>
+                  <span className="text-[#E8E3D9] flex-1 truncate">{ev.user_email || ev.user_id || '—'}</span>
+                  <span className="text-[#5A6B65] truncate hidden md:block max-w-[120px]">{ev.ip || ''}</span>
+                </div>
+              ))}
+              {(!security.recent_events || security.recent_events.length === 0) && (
+                <div className="text-[11px] text-[#5A6B65] italic">No events yet.</div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Admin: plan prices */}
         {sub.is_admin && (
