@@ -1,0 +1,46 @@
+{
+  "summary": "Iter-27 regression: verified the refactor of admin_sound_lineage into 5 focused helpers (_init_lineage_buckets / _accumulate_lineage / _annotate_event / _lineage_totals / _day_key + table-driven _LINEAGE_COUNTERS) preserves identical JSON shape AND that the surrounding auth + admin + audit + Resend + Stripe-webhook + CORS surfaces remain intact. Authored /app/backend/tests/test_iter27_lineage_refactor.py with 20 focused regression tests — 20/20 PASSED in isolation against the live preview (https://frequency-healer-31.preview.emergentagent.com). Lineage endpoint verified for days=30 (returns 30-day series), days=7 (7-day), days=999 (clamps to 365), days=1 (clamps to 7), and 401/403 for non-admin. Shape contract verified: window_days, start, end, series[date,daily_active,signups,checkouts_started,billing_fulfilled,admin_grants], annotations[], totals{signups,checkouts_started,billing_fulfilled,admin_grants,peak_dau}. Frontend UI: dashboard play-pause / isochronic-slider / keep-awake-toggle / visualizer / visual-mode-{rings,chladni,ripples} / account-button all present; AccountDashboard renders admin-security-card with all 7 counter tiles (failed_logins / successful_logins / registrations / webhook_signature_rejections / ai_throttle_hits / session_revocations / throttle_hits) + Recent Activity feed populated with real events, and sound-lineage-card with totals row (Peak DAU=99, Sign-ups=98, Checkouts=38, Pro Convs=0, Admin Grants=0), SVG chart (lineage-svg), legend (DAU/Signups/Checkouts/Pro conversions), and 7d/30d/90d window chips — clicking lineage-window-7 successfully refetches and re-renders.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "FastAPI @app.on_event", "issue": "Pre-existing DeprecationWarning — migrate to lifespan handlers (carried from iter-25/26)."},
+      {"endpoint": "tests/test_stripe_routing.py::TestCheckoutLiveRegression", "issue": "Pre-existing PytestRemovedIn10Warning — class-scoped fixture defined as instance method (carried)."},
+      {"endpoint": "tests/test_admin_users.py & test_admin_delete_users.py & test_billing_history.py", "issue": "PRE-EXISTING test-fixture rot — these tests' _register() helper hardcodes a 6-char password ('abcdef') but the register endpoint requires >= 8 chars, so every fresh_user fixture now errors. NOT a regression from the lineage refactor; fixture predates this iter. Suggest updating to 'abcdef12' or longer."},
+      {"endpoint": "Backend tests run in parallel (-n 2)", "issue": "Login throttle (8/IP/~5min) is sometimes tripped by the existing parallel test suite hammering /auth/login as admin, surfacing as cascading 429s during full-suite runs. Not a code bug; mitigated by running test classes serially or spacing admin logins with a session cache."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "LandingPage hero", "issues": ["Carry-over from iter-26: .landing-ring pulse rings drift bottom-right of orb — decorative, non-blocking."]},
+      {"screen": "Admin · Security tile (AccountDashboard)", "issues": ["The 7th metric tile is labelled 'OTHER THROTTLE HITS' in the UI while the backend metric key is 'throttle_hits' and the review spec calls it 'throttle_hits'. Cosmetic label-vs-key drift only — value flows correctly."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter27_lineage_refactor.py",
+    "/app/test_reports/pytest/iter27_lineage.xml"
+  ],
+  "action_items": [
+    "(Optional) Update pre-existing fixtures in tests/test_admin_users.py, test_admin_delete_users.py, test_billing_history.py to use an 8+ char password ('abcdef12') so the full pytest suite passes again — these have been broken since the password-length rule was tightened, independent of this iter's refactor.",
+    "(Optional) Migrate FastAPI @app.on_event to lifespan handlers to silence the deprecation warning."
+  ],
+  "critical_code_review_comments": [
+    "admin_sound_lineage refactor is clean: the endpoint dropped from ~80 lines / cyclomatic 21 down to a 35-line orchestrator + 5 small helpers. Helpers are pure functions over (rows, buckets) which makes them trivially unit-testable. _LINEAGE_COUNTERS table-driven counter map removes chained elif and makes adding new lineage events a one-line change — exactly the right pattern.",
+    "JSON contract preserved: response top-level keys (window_days, start, end, series, annotations, totals) and series per-day keys (date, daily_active, signups, checkouts_started, billing_fulfilled, admin_grants) match the previous monolith. Totals.peak_dau still computed as max(daily_active) and DAU still tracked via per-day set of user_ids.",
+    "Defense-in-depth: rows-cursor uses projection (_id:0) to exclude Mongo ObjectId — no serialisation risk. `days = max(7, min(365, days))` clamps before any DB I/O. _require_admin called first.",
+    "Carry-over from iter-26: server.py is now 1898 lines (was 1184 in iter-26) — well past the 700-line guideline. Strong recommendation to extract routers/ + services/ (admin_routes.py, audit_helpers.py, ai_recommend.py) in a near-term refactor.",
+    "Removal of unused imports (typing.List, CheckoutSessionRequest) confirmed — no dead-code lints.",
+    "Resend soft-fail confirmed: a brand-new register call with onboarding@resend.dev sender + unverified admin@example.com recipient still returns 200 + token despite the Resend API rejecting delivery — the registration flow correctly catches and logs the email failure without poisoning the response."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter27_lineage_refactor.py (new)"
+  ],
+  "success_rate": {"backend": "100% (20/20 on the new iter-27 regression suite)", "frontend": "100% (all admin-security + sound-lineage + dashboard selectors verified)"},
+  "test_credentials": "Admin: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (loaded from /app/backend/.env via _creds.py).",
+  "seed_data_creation": "Tests create a handful of TEST_<uuid>@example.com users via /auth/register (for logout + Resend soft-fail verification). No long-lived seed data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter-27 verified the admin_sound_lineage refactor preserves identical JSON contract. Key regression file: /app/backend/tests/test_iter27_lineage_refactor.py (20 tests covering auth + login throttle + register/logout + admin security + audit-log event filter + sound-lineage shape across 4 days values + AI recommend strict shape + AI throttle + Stripe webhook 400 + CORS allowed/denied origins). Run it standalone with `cd /app/backend && python -m pytest tests/test_iter27_lineage_refactor.py -v`. Pre-existing failures in test_admin_users / test_admin_delete_users / test_billing_history are due to a 6-char password fixture predating the >=8 chars rule and are NOT regressions. The AI recommend endpoint contract is POST {intent: <string len 2..500>} → returns {frequency,name,description,waveform,binaural,isochronic,golden_stack,ambient,duration_min}. Login throttle is 8/IP/~5min; AI throttle is 6/user/~2min. When running full suite via xdist, admin logins are easily throttled — prefer module-isolated runs or session-cached tokens.",
+  "rca of the issue": "N/A — no production bug found. The refactor preserves behaviour. The only failing items in a full-suite pytest run are pre-existing fixture password-length issues unrelated to this iter."
+}

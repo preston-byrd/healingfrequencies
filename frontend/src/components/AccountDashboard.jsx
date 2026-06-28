@@ -4,6 +4,7 @@ import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { ThankYouCelebration } from '@/components/ThankYouCelebration';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
+import SoundLineage from '@/components/SoundLineage';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
 
 function fmtDate(iso) {
@@ -729,6 +730,9 @@ export default function AccountDashboard({ onBack }) {
             </div>
           </div>
         )}
+
+        {/* Admin: Sound Lineage timeline */}
+        {sub.is_admin && <SoundLineage />}
 
         {/* Admin: plan prices */}
         {sub.is_admin && (

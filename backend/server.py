@@ -11,18 +11,22 @@ import uuid
 import bcrypt
 import jwt
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
 from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout, CheckoutSessionRequest
+    StripeCheckout,
 )
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import json
 import re
+try:
+    import resend as _resend  # transactional email — optional, gracefully no-op if key missing
+except Exception:  # pragma: no cover
+    _resend = None
 
 
 # Hard cap on every outbound Stripe call. Cloudflare's edge cuts the
@@ -154,6 +158,68 @@ async def _audit(
         await db.audit_log.insert_one(doc)
     except Exception as e:
         logger.warning("[audit] insert failed for event=%s: %s", event, type(e).__name__)
+
+
+# --- Resend transactional email --------------------------------------------
+# Used for admin notifications (new user registered, etc.). Sync SDK; wrapped
+# in asyncio.to_thread so it doesn't block the FastAPI event loop. All callers
+# are best-effort — if the SDK is missing or the API key is unset we silently
+# skip rather than failing the user's request.
+_RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+_RESEND_SENDER = os.environ.get("RESEND_SENDER_EMAIL", "onboarding@resend.dev").strip()
+_RESEND_ADMIN_RECIPIENT = os.environ.get("RESEND_ADMIN_RECIPIENT", "").strip()
+if _resend is not None and _RESEND_API_KEY:
+    _resend.api_key = _RESEND_API_KEY
+
+
+def _send_email_sync(to: str, subject: str, html: str) -> Optional[str]:
+    if not _resend or not _RESEND_API_KEY:
+        return None
+    try:
+        result = _resend.Emails.send({
+            "from": _RESEND_SENDER,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+        })
+        return result.get("id") if isinstance(result, dict) else None
+    except Exception as e:
+        logger.warning("[resend] send failed to=%s: %s", to, type(e).__name__)
+        return None
+
+
+async def _notify_admin_new_user(user_email: str, user_name: str, ip: str) -> None:
+    """Fire-and-forget admin alert when someone signs up. Skipped entirely
+    when RESEND_API_KEY / RESEND_ADMIN_RECIPIENT are not configured."""
+    if not _resend or not _RESEND_API_KEY or not _RESEND_ADMIN_RECIPIENT:
+        return
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    safe_name = (user_name or "").strip()[:120].replace("<", "&lt;").replace(">", "&gt;")
+    safe_email = user_email.strip()[:200].replace("<", "&lt;").replace(">", "&gt;")
+    safe_ip = (ip or "unknown")[:64]
+    html = f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · new sign-up</td></tr>
+      <tr><td style="padding-top: 12px; font-size: 22px; font-weight: 500; color: #E8E3D9;">{safe_name or safe_email}</td></tr>
+      <tr><td style="padding-top: 8px; font-size: 13px; color: #8A9A92;">{safe_email}</td></tr>
+      <tr><td style="padding-top: 16px; font-family: ui-monospace, monospace; font-size: 11px; color: #5A6B65;">
+        IP {safe_ip}<br/>
+        {when}
+      </td></tr>
+      <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">
+        — From your Healing Frequencies admin alerts
+      </td></tr>
+    </table>
+    """
+    try:
+        await asyncio.to_thread(
+            _send_email_sync,
+            _RESEND_ADMIN_RECIPIENT,
+            f"New sign-up: {safe_email}",
+            html,
+        )
+    except Exception as e:
+        logger.warning("[resend] admin notify failed: %s", type(e).__name__)
 
 
 # --- Setup --------------------------------------------------------------------
@@ -296,6 +362,11 @@ async def register(body: RegisterIn, request: Request, response: Response):
         "user.registered", request,
         user_id=user["id"], user_email=email,
         metadata={"name": user["name"]},
+    )
+    # Fire-and-forget admin email alert (Resend). Wrapped in create_task so a
+    # slow/failed email never blocks the user's registration response.
+    asyncio.create_task(
+        _notify_admin_new_user(email, user["name"], _client_ip(request))
     )
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
@@ -1084,6 +1155,20 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
         "created_at": datetime.now(timezone.utc).isoformat(),
         "fulfilled": False,
     })
+    # Audit: "user initiated upgrade" — feeds the Sound Lineage timeline as a
+    # checkout intent (vs. billing.fulfilled which is the conversion point).
+    await _audit(
+        "billing.checkout_started", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={
+            "session_id": session.id,
+            "plan": body.plan,
+            "amount": amount,
+            "currency": currency,
+            "includes_trial": include_trial,
+            "payment_method_preference": body.payment_method_preference,
+        },
+    )
     return {"url": session.url, "session_id": session.id}
 
 
@@ -1129,6 +1214,22 @@ async def _fulfill_payment(tx: dict):
     await db.payment_transactions.update_one(
         {"session_id": tx["session_id"]},
         {"$set": {"fulfilled": True, "fulfilled_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    # Audit: canonical "user just became Pro / activated trial" event for the
+    # Sound Lineage timeline. Skipped if request context is unavailable (this
+    # is also called from the webhook handler — no Request object there).
+    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0, "email": 1})
+    await _audit(
+        "billing.fulfilled", None,
+        user_id=user_id,
+        user_email=user_doc.get("email") if user_doc else None,
+        metadata={
+            "session_id": tx["session_id"],
+            "plan": tx.get("plan"),
+            "mode": tx.get("mode") or ("subscription" if is_sub else "payment"),
+            "amount": tx.get("amount"),
+            "currency": tx.get("currency"),
+        },
     )
 
 
@@ -1568,6 +1669,133 @@ async def admin_audit_log(
     cursor = db.audit_log.find(query, {"_id": 0}).sort("ts", -1).skip(skip).limit(limit)
     items = await cursor.to_list(limit)
     return {"total": total, "items": items, "skip": skip, "limit": limit}
+
+
+# --- Sound Lineage — product growth timeline -------------------------------
+def _day_key(iso: str) -> str:
+    """Normalize an ISO timestamp to a `YYYY-MM-DD` UTC day-bucket key."""
+    try:
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d")
+    except Exception:
+        return iso[:10]
+
+
+def _init_lineage_buckets(start: datetime, days: int) -> Dict[str, dict]:
+    """Pre-seed empty per-day buckets so the chart x-axis has no gaps."""
+    return {
+        (start + timedelta(days=i)).strftime("%Y-%m-%d"): {
+            "date": (start + timedelta(days=i)).strftime("%Y-%m-%d"),
+            "daily_active": 0,
+            "signups": 0,
+            "checkouts_started": 0,
+            "billing_fulfilled": 0,
+            "admin_grants": 0,
+        }
+        for i in range(days)
+    }
+
+
+# Maps event name → bucket counter field. Keeps the hot loop's branch logic
+# table-driven (no chained elif), which both lowers cyclomatic complexity and
+# makes adding new lineage events a one-line change.
+_LINEAGE_COUNTERS = {
+    "user.registered": "signups",
+    "billing.checkout_started": "checkouts_started",
+    "billing.fulfilled": "billing_fulfilled",
+    "admin.grant_pro": "admin_grants",
+}
+
+
+def _annotate_event(row: dict) -> Optional[dict]:
+    """Return a dashboard-friendly annotation dict for events worth surfacing
+    on the timeline (Pro conversions + admin grants), or None for events that
+    are counted but not annotated (signups, checkouts)."""
+    ev = row.get("event", "")
+    md = row.get("metadata") or {}
+    if ev == "billing.fulfilled":
+        return {
+            "ts": row["ts"], "event": ev,
+            "user_email": row.get("user_email"),
+            "label": f"Pro: {row.get('user_email') or '—'}",
+            "plan": md.get("plan"),
+        }
+    if ev == "admin.grant_pro":
+        return {
+            "ts": row["ts"], "event": ev,
+            "user_email": md.get("target_email"),
+            "label": f"Grant: {md.get('target_email') or '—'} (+{md.get('days_added', 0)}d)",
+            "days_added": md.get("days_added"),
+        }
+    return None
+
+
+def _accumulate_lineage(rows: list, buckets: dict) -> tuple:
+    """Single pass over audit rows: bump bucket counters, track DAU sets, and
+    collect annotations. Returns (annotations, dau_sets_by_day)."""
+    seen_per_day: Dict[str, set] = {d: set() for d in buckets.keys()}
+    annotations: list = []
+    for r in rows:
+        d = _day_key(r["ts"])
+        if d not in buckets:
+            continue
+        uid = r.get("user_id")
+        if uid:
+            seen_per_day[d].add(uid)
+        counter = _LINEAGE_COUNTERS.get(r.get("event", ""))
+        if counter:
+            buckets[d][counter] += 1
+        ann = _annotate_event(r)
+        if ann is not None:
+            annotations.append(ann)
+    return annotations, seen_per_day
+
+
+def _lineage_totals(buckets: dict) -> dict:
+    return {
+        "signups": sum(b["signups"] for b in buckets.values()),
+        "checkouts_started": sum(b["checkouts_started"] for b in buckets.values()),
+        "billing_fulfilled": sum(b["billing_fulfilled"] for b in buckets.values()),
+        "admin_grants": sum(b["admin_grants"] for b in buckets.values()),
+        "peak_dau": max((b["daily_active"] for b in buckets.values()), default=0),
+    }
+
+
+@api.get("/admin/sound-lineage")
+async def admin_sound_lineage(
+    days: int = 30,
+    user: dict = Depends(get_current_user),
+):
+    """Sound Lineage timeline data for the admin dashboard chart.
+
+    Returns per-day buckets (DAU + signups + checkouts + Pro conversions +
+    admin grants) plus the most recent 50 annotated events and window totals.
+    Heavy lifting is delegated to small focused helpers (`_init_lineage_buckets`,
+    `_accumulate_lineage`, `_annotate_event`, `_lineage_totals`) so this
+    endpoint stays a thin orchestrator.
+    """
+    _require_admin(user)
+    days = max(7, min(365, days))
+    now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = now - timedelta(days=days - 1)
+    rows_cursor = db.audit_log.find(
+        {"ts": {"$gte": start.isoformat()}},
+        {"_id": 0, "ts": 1, "event": 1, "user_id": 1, "user_email": 1, "metadata": 1},
+    ).sort("ts", 1)
+    rows = await rows_cursor.to_list(20000)
+
+    buckets = _init_lineage_buckets(start, days)
+    annotations, seen_per_day = _accumulate_lineage(rows, buckets)
+    for d, s in seen_per_day.items():
+        buckets[d]["daily_active"] = len(s)
+
+    return {
+        "window_days": days,
+        "start": start.strftime("%Y-%m-%d"),
+        "end": now.strftime("%Y-%m-%d"),
+        "series": list(buckets.values()),
+        "annotations": sorted(annotations, key=lambda a: a["ts"], reverse=True)[:50],
+        "totals": _lineage_totals(buckets),
+    }
 
 
 # --- App setup ----------------------------------------------------------------
