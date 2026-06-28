@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe } from 'lucide-react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -167,10 +167,35 @@ export default function Dashboard({ onOpenAccount }) {
       if (!document.hidden && audioEngine.ctx && audioEngine.ctx.state !== 'running') {
         audioEngine.ctx.resume().catch(() => { /* noop */ });
       }
+      // Wake Lock auto-releases when the tab is hidden; re-acquire on return
+      // if the user opted in (and is currently playing).
+      if (!document.hidden && audioEngine.playing) {
+        audioEngine.reacquireWakeLockIfWanted();
+      }
     };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
+
+  // ---- Background playback: keep screen awake (opt-in) ---------------------
+  const [keepAwake, setKeepAwake] = useState(false);
+  const keepAwakeSupported = useMemo(
+    () => typeof navigator !== 'undefined' && 'wakeLock' in navigator,
+    []
+  );
+  const toggleKeepAwake = useCallback(async () => {
+    if (!keepAwakeSupported) return;
+    if (keepAwake) {
+      await audioEngine.releaseWakeLock();
+      setKeepAwake(false);
+    } else {
+      // Acquire immediately if currently playing; otherwise just remember the
+      // preference and start() will acquire on next play.
+      audioEngine._wakeLockWanted = true;
+      if (audioEngine.playing) await audioEngine.requestWakeLock();
+      setKeepAwake(true);
+    }
+  }, [keepAwake, keepAwakeSupported]);
 
   // Sleep Mode: fade everything out over SLEEP_FADE_SECONDS at the end
   useEffect(() => {
@@ -459,6 +484,23 @@ export default function Dashboard({ onOpenAccount }) {
     () => SOLFEGGIO.find((p) => p.hz === Math.round(state.frequency)),
     [state.frequency]
   );
+
+  // Push live "now playing" metadata to the Media Session so the device's
+  // lock-screen / notification controls show what the user is tuning to.
+  useEffect(() => {
+    const special = SPECIALS.find((p) => Math.abs(p.hz - state.frequency) < 0.05);
+    const scape = activeSoundscape
+      ? SOUNDSCAPES.find((s) => s.key === activeSoundscape)
+      : null;
+    const label = scape
+      ? scape.name
+      : (activePreset?.name || special?.name || `${state.frequency.toFixed(1)} Hz`);
+    const subtitle = scape ? `${scape.name}` : `${state.frequency.toFixed(1)} Hz · ${label}`;
+    audioEngine.setMediaInfo({
+      title: 'Healing Frequencies',
+      subtitle,
+    });
+  }, [state.frequency, activePreset, activeSoundscape]);
 
   return (
     <div className="relative min-h-screen w-full overflow-x-hidden">
@@ -807,6 +849,27 @@ export default function Dashboard({ onOpenAccount }) {
             >
               {state.playing ? <Pause size={28} className="text-[#E8E3D9]" /> : <Play size={28} className="text-[#E8E3D9] ml-1" />}
             </button>
+            {/* Keep-screen-awake toggle — opt-in. Hidden on browsers without the
+                Wake Lock API (older Safari < 16.4). On supported browsers this
+                prevents the screen from auto-locking during a session. Background
+                audio continues regardless via the MediaStream sink + Media Session
+                bound in audioEngine.start(). */}
+            {keepAwakeSupported && (
+              <button
+                data-testid="keep-awake-toggle"
+                onClick={toggleKeepAwake}
+                aria-pressed={keepAwake}
+                title={keepAwake ? 'Screen will stay awake during playback' : 'Allow screen to lock during playback'}
+                className={`group inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-[10px] tracking-[0.18em] uppercase transition-colors ${
+                  keepAwake
+                    ? 'border-[#C4A67A]/60 bg-[#C4A67A]/15 text-[#C4A67A]'
+                    : 'border-[#5C9E8C]/30 bg-black/20 text-[#8A9A92] hover:text-[#E8E3D9]'
+                }`}
+              >
+                <Sun size={12} className={keepAwake ? 'text-[#C4A67A]' : 'text-[#8A9A92]'} />
+                <span>{keepAwake ? 'Screen on' : 'Keep screen on'}</span>
+              </button>
+            )}
           </div>
         </main>
 

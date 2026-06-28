@@ -1,6 +1,10 @@
 // Web Audio engine for healing frequencies + ambient layers
 // Singleton-ish so multiple components share state cleanly.
 
+const ARTWORK_BASE = (typeof window !== 'undefined' && window.location)
+  ? window.location.origin
+  : '';
+
 class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -19,6 +23,23 @@ class AudioEngine {
 
     // Ambient layers: { rain, ocean, forest } -> { node, gain }
     this.ambient = {};
+
+    // Background-playback plumbing:
+    //  _streamDest = MediaStreamAudioDestinationNode — re-routes the master mix
+    //                into a MediaStream that an <audio> element can consume.
+    //  _sinkEl     = hidden HTMLAudioElement playing that stream. Because the
+    //                browser sees it as "media playback", iOS Safari + Android
+    //                Chrome keep the audio thread alive when the screen locks
+    //                or the tab is backgrounded. Without this, procedural
+    //                Web Audio is suspended on screen-lock and the user has to
+    //                tap play again on resume.
+    this._streamDest = null;
+    this._sinkEl = null;
+    this._wakeLock = null;        // Screen Wake Lock sentinel (opt-in only)
+    this._wakeLockWanted = false; // user's "keep screen awake" preference
+    this._mediaTitle = 'Healing Frequencies';
+    this._mediaSubtitle = '';
+    this._mediaSessionBound = false;
 
     this.playing = false;
     this.listeners = new Set();
@@ -49,9 +70,133 @@ class AudioEngine {
         this._unlocked = true;
       } catch (e) { /* noop */ }
     }
-    if (created) this._prebuildAllAmbient();
+    // Build the background-playback sink ONCE per ctx. Routes the master mix
+    // through an <audio> element so the OS treats the page as media playback.
+    // Critical for lock-screen / backgrounded continuation on iOS + Android.
+    if (created) {
+      this._buildBackgroundSink();
+      this._prebuildAllAmbient();
+    }
     return this.ctx;
   }
+
+  // Pipe master gain into a MediaStream → <audio> element. Some browsers
+  // (notably older iOS) don't support MediaStreamAudioDestinationNode; in that
+  // case we silently fall back to ctx.destination only.
+  _buildBackgroundSink() {
+    if (this._streamDest || !this.ctx) return;
+    try {
+      if (typeof this.ctx.createMediaStreamDestination !== 'function') return;
+      const dest = this.ctx.createMediaStreamDestination();
+      this.master.connect(dest);
+      const el = document.createElement('audio');
+      el.setAttribute('data-role', 'audio-engine-sink');
+      el.setAttribute('playsinline', '');
+      el.setAttribute('x-webkit-playsinline', '');
+      el.setAttribute('webkit-playsinline', '');
+      el.preload = 'auto';
+      el.crossOrigin = 'anonymous';
+      el.muted = false;
+      el.autoplay = false;
+      // Keep it visually hidden but DON'T use display:none — some browsers
+      // optimise display:none media elements out of the background-audio
+      // scheduler. A 1×1 transparent off-screen element is the safe choice.
+      el.style.position = 'fixed';
+      el.style.left = '-9999px';
+      el.style.top = '0';
+      el.style.width = '1px';
+      el.style.height = '1px';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      el.srcObject = dest.stream;
+      document.body.appendChild(el);
+      this._streamDest = dest;
+      this._sinkEl = el;
+    } catch (e) { /* unsupported — fall back to ctx.destination */ }
+  }
+
+  // ---- Media Session (lock-screen metadata + transport controls) ------------
+  _bindMediaSession() {
+    if (this._mediaSessionBound) return;
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.setActionHandler('play', () => { this.start(); });
+      navigator.mediaSession.setActionHandler('pause', () => { this.stop(); });
+      navigator.mediaSession.setActionHandler('stop', () => { this.stop(); });
+      // 'previoustrack' / 'nexttrack' intentionally not bound — single-stream app.
+      this._mediaSessionBound = true;
+    } catch (e) { /* some action handlers may be unsupported */ }
+  }
+
+  _updateMediaSession() {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    try {
+      const title = this._mediaSubtitle
+        ? `${this._mediaTitle} · ${this._mediaSubtitle}`
+        : this._mediaTitle;
+      const MM = window.MediaMetadata;
+      if (MM) {
+        navigator.mediaSession.metadata = new MM({
+          title,
+          artist: 'Solarisound',
+          album: 'Healing Frequencies',
+          artwork: [
+            { src: `${ARTWORK_BASE}/icon-192.png`, sizes: '192x192', type: 'image/png' },
+            { src: `${ARTWORK_BASE}/icon-512.png`, sizes: '512x512', type: 'image/png' },
+          ],
+        });
+      }
+      navigator.mediaSession.playbackState = this.playing ? 'playing' : 'paused';
+    } catch (e) { /* noop */ }
+  }
+
+  // Public: let the UI tell the engine what to display on the lock-screen.
+  // `subtitle` is the human-friendly preset name (e.g. "528 Hz · Love").
+  setMediaInfo({ title, subtitle } = {}) {
+    if (typeof title === 'string') this._mediaTitle = title;
+    if (typeof subtitle === 'string') this._mediaSubtitle = subtitle;
+    if (this.playing) this._updateMediaSession();
+  }
+
+  // ---- Wake Lock (opt-in: keeps the screen on while playing) ----------------
+  async requestWakeLock() {
+    this._wakeLockWanted = true;
+    if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return false;
+    if (this._wakeLock) return true;
+    try {
+      const sentinel = await navigator.wakeLock.request('screen');
+      this._wakeLock = sentinel;
+      sentinel.addEventListener('release', () => {
+        // OS released it (tab hidden, low battery, etc.). Clear ref so we can
+        // re-acquire on next visibility change if the user still wants it.
+        if (this._wakeLock === sentinel) this._wakeLock = null;
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async releaseWakeLock() {
+    this._wakeLockWanted = false;
+    if (!this._wakeLock) return;
+    try { await this._wakeLock.release(); } catch (e) { /* noop */ }
+    this._wakeLock = null;
+  }
+
+  // Called by Dashboard on visibilitychange so the lock can be re-acquired
+  // after the OS auto-released it on tab switch / lock screen.
+  async reacquireWakeLockIfWanted() {
+    if (!this._wakeLockWanted || this._wakeLock) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    await this.requestWakeLock();
+  }
+
+  wakeLockSupported() {
+    return typeof navigator !== 'undefined' && 'wakeLock' in navigator;
+  }
+  wakeLockActive() { return !!this._wakeLock; }
+  wakeLockWanted() { return this._wakeLockWanted; }
 
   // Warm-up: call from the first user gesture on the page to unlock audio on iOS/Safari
   // BEFORE the user taps a specific frequency. Safe to call multiple times.
@@ -136,6 +281,23 @@ class AudioEngine {
       }
 
       this.playing = true;
+
+      // Background-audio sink: start the hidden <audio> element NOW (we're
+      // still inside the user-gesture call stack since start() is invoked
+      // from a tap). This is what keeps audio alive when the screen locks.
+      if (this._sinkEl) {
+        try {
+          const p = this._sinkEl.play();
+          if (p && typeof p.catch === 'function') p.catch(() => { /* user-gesture missing — silent */ });
+        } catch (e) { /* noop */ }
+      }
+      // Bind Media Session handlers + push current metadata so lock-screen
+      // controls show "Now playing: 528 Hz · Love · Solarisound".
+      this._bindMediaSession();
+      this._updateMediaSession();
+      // Re-acquire wake lock if user previously opted-in (e.g., after stop→start).
+      if (this._wakeLockWanted) this.requestWakeLock();
+
       this._emit();
     } finally {
       this._starting = false;
@@ -225,8 +387,24 @@ class AudioEngine {
     this._killPhiHarmonics(0.8);
     setTimeout(() => {
       oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { /* noop */ } });
+      // Pause the background-audio sink AFTER the fade completes so we don't
+      // cut off the tail. Leaving it playing forever would also work, but it
+      // would keep the OS media indicator lit even when the user stopped.
+      if (this._sinkEl && !this.playing) {
+        try { this._sinkEl.pause(); } catch (e) { /* noop */ }
+      }
     }, 850);
     this.playing = false;
+    // Reflect stopped state to the lock-screen / OS controls + drop wake lock.
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try { navigator.mediaSession.playbackState = 'paused'; } catch (e) { /* noop */ }
+    }
+    if (this._wakeLock) {
+      // Release the OS sentinel but PRESERVE the user's "wanted" preference
+      // so the next start() re-acquires automatically.
+      try { this._wakeLock.release(); } catch (e) { /* noop */ }
+      this._wakeLock = null;
+    }
     this._emit();
   }
 
