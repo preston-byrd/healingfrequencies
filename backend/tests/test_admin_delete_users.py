@@ -43,8 +43,8 @@ def admin_id(admin_token):
 def fresh_user():
     tag = uuid.uuid4().hex[:8]
     email = f"TEST_del_{tag}@example.com"
-    info = _register(email, "abcdef", name=f"Del {tag}")
-    return {**info, "email": email, "password": "abcdef"}
+    info = _register(email, "abcdef12", name=f"Del {tag}")
+    return {**info, "email": email, "password": "abcdef12"}
 
 
 # ---------- DELETE /api/admin/users/{id} ----------
@@ -122,8 +122,8 @@ class TestRegression:
         # Register a fresh non-pro user
         tag = uuid.uuid4().hex[:8]
         email = f"TEST_cap_{tag}@example.com"
-        info = _register(email, "abcdef")
-        token = _login(email, "abcdef")
+        info = _register(email, "abcdef12")
+        token = _login(email, "abcdef12")
         # Create 3 sessions (allowed)
         for i in range(3):
             r = requests.post(

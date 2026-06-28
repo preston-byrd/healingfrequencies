@@ -40,8 +40,8 @@ def admin_token() -> str:
 def fresh_user():
     tag = uuid.uuid4().hex[:8]
     email = f"TEST_{tag}@example.com"
-    info = _register(email, "abcdef", name=f"User {tag}")
-    return {**info, "email": email, "password": "abcdef"}
+    info = _register(email, "abcdef12", name=f"User {tag}")
+    return {**info, "email": email, "password": "abcdef12"}
 
 
 # ---------- tests ----------
