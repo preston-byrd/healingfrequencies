@@ -32,6 +32,40 @@ import re
 STRIPE_CALL_TIMEOUT = 25
 
 
+# --- In-memory rate limiter --------------------------------------------------
+# Lightweight per-key token bucket. Good enough for single-instance deployments
+# to stop accidental hammering + obvious abuse without bringing in Redis. For
+# multi-replica deployments this should move to a shared store.
+from collections import defaultdict
+import time as _time
+import threading as _threading
+
+_rl_buckets: dict = defaultdict(lambda: {"tokens": 0.0, "ts": 0.0})
+_rl_lock = _threading.Lock()
+
+
+def _rate_limit(key: str, capacity: float, refill_per_sec: float) -> bool:
+    """Return True if the request is allowed, False if it should be rejected.
+    Burst up to `capacity`; refill at `refill_per_sec`. Per-key state."""
+    now = _time.monotonic()
+    with _rl_lock:
+        b = _rl_buckets[key]
+        elapsed = now - b["ts"] if b["ts"] else 0
+        b["tokens"] = min(capacity, b["tokens"] + elapsed * refill_per_sec)
+        if b["ts"] == 0:
+            b["tokens"] = capacity  # first hit — full bucket
+        b["ts"] = now
+        if b["tokens"] >= 1.0:
+            b["tokens"] -= 1.0
+            return True
+        return False
+
+
+def _rate_limit_or_429(key: str, capacity: float, refill_per_sec: float, label: str = "request"):
+    if not _rate_limit(key, capacity, refill_per_sec):
+        raise HTTPException(status_code=429, detail=f"Too many {label}s — please slow down")
+
+
 # --- Setup --------------------------------------------------------------------
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -65,9 +99,16 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def create_access_token(user_id: str, email: str) -> str:
+    # SECURITY: reduced from 7d → 1d. `iat` is checked against the user's
+    # `tokens_valid_after` watermark on every request so logout / password
+    # change can invalidate every outstanding token across all devices.
+    # iat carries microsecond precision (float) to avoid same-second races
+    # between rapid login → logout → re-login sequences.
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id, "email": email, "type": "access",
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        "iat": now.timestamp(),
+        "exp": now + timedelta(days=1),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
@@ -75,7 +116,7 @@ def create_access_token(user_id: str, email: str) -> str:
 def set_auth_cookie(response: Response, token: str):
     response.set_cookie(
         key="access_token", value=token, httponly=True,
-        secure=True, samesite="none", max_age=7 * 24 * 3600, path="/",
+        secure=True, samesite="none", max_age=24 * 3600, path="/",
     )
 
 
@@ -92,6 +133,21 @@ async def get_current_user(request: Request) -> dict:
         user = await db.users.find_one({"id": payload["sub"]})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        # SECURITY: enforce server-side revocation watermark. Tokens issued
+        # before `tokens_valid_after` are rejected — set on logout, password
+        # change, or admin "force-signout".
+        tva = user.get("tokens_valid_after")
+        if tva:
+            try:
+                tva_ts = datetime.fromisoformat(tva).timestamp()
+                # Strict less-than: tokens issued AT OR AFTER the watermark
+                # are valid; tokens issued strictly before are revoked.
+                if float(payload.get("iat", 0)) < tva_ts:
+                    raise HTTPException(status_code=401, detail="Session revoked")
+            except HTTPException:
+                raise
+            except Exception:
+                pass  # malformed watermark — fail open (still bounded by exp)
         user.pop("password_hash", None)
         user.pop("_id", None)
         return user
@@ -104,7 +160,7 @@ async def get_current_user(request: Request) -> dict:
 # --- Models -------------------------------------------------------------------
 class RegisterIn(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=8, max_length=128)
     name: Optional[str] = None
 
 
@@ -150,7 +206,12 @@ async def register(body: RegisterIn, response: Response):
 
 
 @api.post("/auth/login")
-async def login(body: LoginIn, response: Response):
+async def login(body: LoginIn, request: Request, response: Response):
+    # SECURITY: brute-force throttle — 8 login attempts per IP per 5 minutes
+    # (refill 1 token every ~37s). Tight enough to slow credential stuffing
+    # without locking out real users who fat-finger their password.
+    ip = (request.headers.get("x-forwarded-for", "") or request.client.host or "unknown").split(",")[0].strip()
+    _rate_limit_or_429(f"login:{ip}", capacity=8, refill_per_sec=1 / 37, label="login attempt")
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
@@ -161,7 +222,18 @@ async def login(body: LoginIn, response: Response):
 
 
 @api.post("/auth/logout")
-async def logout(response: Response):
+async def logout(response: Response, request: Request):
+    # SECURITY: clear the cookie AND bump the per-user revocation watermark
+    # so any token (cookie OR bearer in localStorage) is rejected on next use.
+    # Best-effort — if the user isn't authenticated we still clear the cookie.
+    try:
+        u = await get_current_user(request)
+        await db.users.update_one(
+            {"id": u["id"]},
+            {"$set": {"tokens_valid_after": datetime.now(timezone.utc).isoformat()}},
+        )
+    except Exception:
+        pass
     response.delete_cookie("access_token", path="/")
     return {"ok": True}
 
@@ -315,7 +387,7 @@ def _require_admin(user: dict):
 
 class PasswordChangeIn(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class PrefsIn(BaseModel):
@@ -357,15 +429,22 @@ class PlanPricesIn(BaseModel):
 
 
 @api.post("/me/password")
-async def change_password(body: PasswordChangeIn, user: dict = Depends(get_current_user)):
+async def change_password(body: PasswordChangeIn, response: Response, user: dict = Depends(get_current_user)):
     full = await db.users.find_one({"id": user["id"]})
     if not verify_password(body.current_password, full["password_hash"]):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
+    # SECURITY: bump revocation watermark so every existing token (other
+    # devices, leaked copies) is invalidated. Issue a fresh token for the
+    # caller so they don't get kicked out of their own session.
+    now_iso = datetime.now(timezone.utc).isoformat()
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"password_hash": hash_password(body.new_password)}},
+        {"$set": {"password_hash": hash_password(body.new_password),
+                  "tokens_valid_after": now_iso}},
     )
-    return {"ok": True}
+    fresh = create_access_token(user["id"], user["email"])
+    set_auth_cookie(response, fresh)
+    return {"ok": True, "token": fresh}
 
 
 @api.put("/me/profile")
@@ -602,6 +681,9 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
         raise HTTPException(status_code=403, detail="AI prescriptions are a Pro feature")
     if not EMERGENT_LLM_KEY:
         raise HTTPException(status_code=503, detail="LLM key not configured")
+    # SECURITY: rate-limit per user. Burst of 6 with refill 1/20s = ~3/min sustained.
+    # Stops a compromised account from burning the EMERGENT_LLM_KEY budget.
+    _rate_limit_or_429(f"ai:{user['id']}", capacity=6, refill_per_sec=1 / 20, label="AI request")
 
     # Build the user message
     parts = [f"Intent: {body.intent.strip()}"]
@@ -828,9 +910,8 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
         customer_id = await _get_or_create_stripe_customer(user)
 
         logger.info(
-            "[checkout] user=%s plan=%s method=%s key_prefix=%s api_base=%s trial=%s customer=%s",
-            user.get("email"), body.plan, body.payment_method_preference,
-            (STRIPE_API_KEY[:12] + "…") if STRIPE_API_KEY else "(none)",
+            "[checkout] user=%s plan=%s method=%s api_base=%s trial=%s customer=%s",
+            user.get("id"), body.plan, body.payment_method_preference,
             _stripe.api_base, include_trial, customer_id,
         )
 
@@ -973,13 +1054,13 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
 
 
 @api.get("/health/stripe")
-async def health_stripe():
+async def health_stripe(user: dict = Depends(get_current_user)):
     """Diagnostic endpoint — checks (a) STRIPE_API_KEY is set, (b) we can reach
     the configured Stripe api_base with a minimal account-balance read, all
-    inside the 25s timeout budget. Returns 200 + diagnostic JSON on success,
-    502 + structured error on any failure. Safe to expose: only reads, never
-    writes; doesn't echo the key.
+    inside the 25s timeout budget. ADMIN-ONLY: previously this endpoint was
+    public and leaked the Stripe key prefix; now it requires an admin session.
     """
+    _require_admin(user)
     if not STRIPE_API_KEY:
         return {"ok": False, "error": "STRIPE_API_KEY not set", "stage": "config"}
     import stripe as _stripe
@@ -990,7 +1071,6 @@ async def health_stripe():
         return {
             "ok": True,
             "api_base": _stripe.api_base,
-            "key_prefix": (STRIPE_API_KEY[:12] + "…"),
             "timeout_seconds": STRIPE_CALL_TIMEOUT,
         }
     except HTTPException as he:
@@ -999,7 +1079,6 @@ async def health_stripe():
             "error": he.detail,
             "stage": "stripe_call",
             "api_base": _stripe.api_base,
-            "key_prefix": (STRIPE_API_KEY[:12] + "…"),
         }
     except Exception as e:
         return {
@@ -1007,7 +1086,6 @@ async def health_stripe():
             "error": f"{type(e).__name__}: {str(e)[:200]}",
             "stage": "stripe_call",
             "api_base": _stripe.api_base,
-            "key_prefix": (STRIPE_API_KEY[:12] + "…"),
         }
 
 
@@ -1025,19 +1103,25 @@ async def stripe_webhook(request: Request):
     import stripe as _stripe
     _normalise_stripe_api_base()
 
-    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-    event = None
+    # SECURITY: webhook signature verification is MANDATORY. Without it any
+    # attacker who knows a target's stripe_customer_id can forge a subscription
+    # event and grant themselves Pro for free. We refuse to fulfil unsigned
+    # events even in dev — set STRIPE_WEBHOOK_SECRET (whsec_…) from your Stripe
+    # Dashboard → Developers → Webhooks → Signing secret.
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not webhook_secret:
+        logger.error("[webhook] STRIPE_WEBHOOK_SECRET not configured — rejecting event")
+        # 400 (not 500) so Stripe retries are spaced rather than alarming PagerDuty.
+        raise HTTPException(status_code=400, detail="Webhook secret not configured")
+    if not sig:
+        logger.warning("[webhook] missing Stripe-Signature header")
+        raise HTTPException(status_code=400, detail="Missing signature")
     try:
-        if webhook_secret and sig:
-            event = _stripe.Webhook.construct_event(body, sig, webhook_secret)
-        else:
-            # Without a webhook secret we trust the polling path (/payments/status)
-            # for fulfilment. Still parse the body so subscription state stays fresh.
-            import json
-            event = json.loads(body.decode("utf-8"))
+        event = _stripe.Webhook.construct_event(body, sig, webhook_secret)
     except Exception as e:
-        logger.warning("[webhook] could not parse: %s", e)
-        return {"received": True}
+        # Generic 400 — don't echo crypto error details, just log them.
+        logger.warning("[webhook] signature verification failed: %s", type(e).__name__)
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     et = event.get("type") if isinstance(event, dict) else event["type"]
     data_obj = (event.get("data") or {}).get("object") if isinstance(event, dict) else event["data"]["object"]
@@ -1209,7 +1293,12 @@ async def admin_list_users(
     _require_admin(user)
     query = {}
     if q:
-        query = {"email": {"$regex": q.strip(), "$options": "i"}}
+        # SECURITY: escape regex metacharacters from user input to prevent
+        # ReDoS / regex injection. Admin-only but defense in depth.
+        safe_q = re.escape(q.strip())
+        if len(safe_q) > 100:
+            safe_q = safe_q[:100]
+        query = {"email": {"$regex": safe_q, "$options": "i"}}
     cursor = db.users.find(query, {"_id": 0, "password_hash": 0}).sort("created_at", -1).limit(200)
     items = await cursor.to_list(200)
     now = datetime.now(timezone.utc)
@@ -1300,25 +1389,28 @@ async def root():
 
 app.include_router(api)
 
-origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
-if origins == ["*"]:
-    # When wildcard is desired, use a regex so we can still send credentials
-    # (browsers reject allow_origin="*" combined with allow_credentials=True).
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=".*",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+# SECURITY: never combine wildcard origin with credentials. CORS_ORIGINS MUST
+# be an explicit comma-separated allowlist of full origins (scheme + host +
+# optional port). A misconfigured wildcard would let any website read a
+# logged-in user's cookies via the browser.
+_raw_origins = os.environ.get("CORS_ORIGINS", "").strip()
+origins = [o.strip() for o in _raw_origins.split(",") if o.strip() and o.strip() != "*"]
+if not origins:
+    # Fail-closed: refuse to start with no origins configured rather than
+    # silently allowing everything.
+    raise RuntimeError(
+        "CORS_ORIGINS not configured. Set an explicit comma-separated list "
+        "of allowed origins (e.g. https://solarisound.com,http://localhost:3000). "
+        "Wildcard '*' is not permitted because credentials are enabled."
     )
-else:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    max_age=600,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1335,9 +1427,19 @@ async def startup():
     existing_cfg = await db.plan_config.find_one({"_id": "current"})
     if not existing_cfg:
         await db.plan_config.insert_one({"_id": "current", **DEFAULT_PLAN_CONFIG})
-    # seed admin
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    # seed admin — strong password required; never auto-reset an existing
+    # admin's password unless ADMIN_BOOTSTRAP_RESET="true" is explicitly set.
+    # This closes the "self-healing default password" footgun where rotating
+    # the admin password via the API would be silently undone on next restart.
+    admin_email = os.environ.get("ADMIN_EMAIL", "").lower().strip()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+    if not admin_email or not admin_password:
+        logger.warning("[seed] ADMIN_EMAIL / ADMIN_PASSWORD not set — skipping admin seed")
+        return
+    if len(admin_password) < 12:
+        logger.error("[seed] ADMIN_PASSWORD too short (<12 chars) — refusing to seed admin")
+        return
+    bootstrap_reset = os.environ.get("ADMIN_BOOTSTRAP_RESET", "false").lower() == "true"
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
         await db.users.insert_one({
@@ -1348,16 +1450,19 @@ async def startup():
             "role": "admin",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
-        logger.info(f"Seeded admin: {admin_email}")
+        logger.info("[seed] admin created")
     else:
         updates = {}
         if existing.get("role") != "admin":
             updates["role"] = "admin"
-        if not verify_password(admin_password, existing["password_hash"]):
+        # Only re-hash password on explicit opt-in. Default behaviour is to
+        # leave whatever the admin has (rotated via /api/me/password).
+        if bootstrap_reset and not verify_password(admin_password, existing["password_hash"]):
             updates["password_hash"] = hash_password(admin_password)
+            updates["tokens_valid_after"] = datetime.now(timezone.utc).isoformat()
         if updates:
             await db.users.update_one({"email": admin_email}, {"$set": updates})
-            logger.info(f"Updated admin fields: {list(updates.keys())}")
+            logger.info("[seed] admin fields updated: %s", list(updates.keys()))
 
 
 @app.on_event("shutdown")
