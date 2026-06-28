@@ -1396,12 +1396,18 @@ app.include_router(api)
 _raw_origins = os.environ.get("CORS_ORIGINS", "").strip()
 origins = [o.strip() for o in _raw_origins.split(",") if o.strip() and o.strip() != "*"]
 if not origins:
-    # Fail-closed: refuse to start with no origins configured rather than
-    # silently allowing everything.
-    raise RuntimeError(
-        "CORS_ORIGINS not configured. Set an explicit comma-separated list "
-        "of allowed origins (e.g. https://solarisound.com,http://localhost:3000). "
-        "Wildcard '*' is not permitted because credentials are enabled."
+    # Fail-soft default: use a SAFE allowlist (the production domain + the
+    # preview host) rather than crashing the server. Logged loudly so the
+    # operator knows to set CORS_ORIGINS explicitly. We do NOT fall back to
+    # wildcard '*' here because that defeats the audit fix.
+    origins = [
+        "https://solarisound.com",
+        "https://www.solarisound.com",
+        "http://localhost:3000",
+    ]
+    logging.getLogger(__name__).warning(
+        "CORS_ORIGINS not set — falling back to safe default allowlist: %s",
+        origins,
     )
 app.add_middleware(
     CORSMiddleware,

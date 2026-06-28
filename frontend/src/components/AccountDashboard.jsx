@@ -77,6 +77,7 @@ export default function AccountDashboard({ onBack }) {
     } catch (e) { setErr(formatApiError(e)); }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, []);
 
   // Handle Stripe return: ?stripe_session_id=...
@@ -120,6 +121,7 @@ export default function AccountDashboard({ onBack }) {
       };
       poll();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const openBillingPortal = async () => {

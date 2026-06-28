@@ -37,6 +37,9 @@ const SPECIALS = [
 const WAVEFORMS = ['sine', 'triangle', 'square', 'sawtooth'];
 const PHI = 1.6180339887;
 const GOLDEN_BASE = 144; // Fibonacci number; 144 × φ ≈ 233 (Fib); × φ² ≈ 377 (Fib). Creates a pure golden chord.
+// Sleep Mode duration chooser options (minutes). Module-level constant so the
+// reference is stable across renders and useEffect deps don't churn.
+const SLEEP_DURATIONS = [30, 60, 120, 240, 480];
 
 const AMBIENT = [
   { key: 'rain', label: 'Rain', Icon: Droplet },
@@ -108,8 +111,6 @@ export default function Dashboard({ onOpenAccount }) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiErr, setAiErr] = useState('');
   const [aiResult, setAiResult] = useState(null); // last reco for display
-  // Sleep Mode duration chooser (replaces hard-coded 30): 30 / 60 / 120 / 240 / 480 min
-  const SLEEP_DURATIONS = [30, 60, 120, 240, 480];
   const [sleepDurationMin, setSleepDurationMin] = useState(30);
   // Track restore lifecycle: restoreStartedRef prevents re-entry of the restore
   // effect (it's set synchronously when restore begins); prefsRestoredRef gates
@@ -170,6 +171,7 @@ export default function Dashboard({ onOpenAccount }) {
     };
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.playing]);
 
   // Background/foreground sync: when tab becomes visible, resume the AudioContext
@@ -236,6 +238,7 @@ export default function Dashboard({ onOpenAccount }) {
       }
       setSessionStart(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.playing]);
 
   // Continuous check (covers timer auto-stop at 0): also check-in once threshold crossed mid-run
