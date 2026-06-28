@@ -547,6 +547,14 @@ export default function Dashboard({ onOpenAccount }) {
       setActiveSoundscape(null);
       if (data.duration_min) setDuration(data.duration_min);
       setAiResult(data);
+      // PLAYER CONTRACT: hand control over to the player so the UI shows the
+      // correct Pause icon and a single tap can stop everything. If the user
+      // is already mid-session, start() is a no-op — the new prescription was
+      // hot-swapped into the running engine by the setFrequency / setBinaural
+      // / setIsochronic / setAmbient calls above.
+      if (!audioEngine.playing) {
+        try { await audioEngine.start(); } catch (e) { console.warn('[Dashboard] AI start failed', e); }
+      }
     } catch (e) {
       const msg = e?.response?.data?.detail || e?.message || 'AI prescription failed';
       setAiErr(typeof msg === 'string' ? msg : 'AI prescription failed');

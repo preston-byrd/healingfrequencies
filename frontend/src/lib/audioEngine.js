@@ -708,6 +708,24 @@ class AudioEngine {
     const a = this.ambient[kind];
     const v = Math.max(0, Math.min(1, Number(volume) || 0));
     a.volume = v;
+    // PLAYER CONTRACT: ambient layers only become audible while the player is
+    // actively playing. When the player is stopped, we record the desired mix
+    // into `_pendingAmbient` so it's applied on the next start() (same channel
+    // the pause→resume restore uses). Without this gate, AI prescriptions and
+    // soundscape clicks could start audio while the play/pause UI says "Play",
+    // and the user couldn't toggle it off from the player.
+    if (!this.playing) {
+      this._pendingAmbient = this._pendingAmbient || {};
+      if (v > 0) this._pendingAmbient[kind] = v;
+      else delete this._pendingAmbient[kind];
+      // Hold the actual gain at 0 — the noise source is still running, just silent.
+      try {
+        a.gain.gain.cancelScheduledValues(this.ctx.currentTime);
+        a.gain.gain.setValueAtTime(0, this.ctx.currentTime);
+      } catch (e) { _warn('audio.setAmbient.idle', e); }
+      this._emit();
+      return;
+    }
     const ctx = this.ctx;
     if (v === 0) {
       // Smooth fade-to-silent instead of instant cutoff — used both for slider
