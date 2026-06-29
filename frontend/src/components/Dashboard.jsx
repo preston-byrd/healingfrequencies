@@ -937,7 +937,17 @@ export default function Dashboard({ onOpenAccount }) {
           <Breathwork active={breathwork && state.playing} />
 
           {/* Visual-mode chips (top-right) — Rings / Chladni / Ripples */}
-          <div className="absolute top-4 right-4 z-10 flex gap-1.5" data-testid="visual-mode-chips">
+          {/* Visual-mode chips — Rings / Chladni / Ripples.
+              Desktop (sm+): top-right of the visualizer (out of the way).
+              Mobile (<sm): the centered "Now Tuning" header sits on the
+              same top row as these chips on narrow viewports (~390px) and
+              the two collide visibly (see iter-30 user-reported bug). On
+              mobile we drop the chips to BOTTOM-LEFT — clear of the header
+              AND the centered play/timer transport. */}
+          <div
+            className="absolute z-10 flex gap-1.5 bottom-4 left-3 sm:bottom-auto sm:left-auto sm:top-4 sm:right-4"
+            data-testid="visual-mode-chips"
+          >
             {[
               { key: 'rings', label: 'Rings' },
               { key: 'chladni', label: 'Chladni' },
