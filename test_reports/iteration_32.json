@@ -1,0 +1,36 @@
+{
+  "summary": "End-to-end testing of AI Agent Check-in wiring in Dashboard.jsx + mobile chip overlap fix. Backend (4 tests in test_agent_chat.py): /api/me/agent/chat returns 200 with valid {message, suggestions[]} shape including preset/soundscape/sleep/ai_prescription kinds, supports multi-turn with history, returns 401 unauthenticated, and enforces 429 rate limit after the 8-burst bucket. Frontend (admin Pro login on https://frequency-healer-31.preview.emergentagent.com): AIAgentSheet auto-opens on first session with personalised greeting 'Hello Admin, how are you feeling right now?'; does NOT re-open after sessionStorage 'sf_agent_seen_v1' is set; multi-turn user→assistant chat renders suggestions; preset suggestion updates [data-testid=current-frequency] (528→741 Hz) and starts audioEngine playback; ai_prescription suggestion closes the sheet and pre-fills the [data-testid=ai-recommend-panel] textarea (observed value: 'anxious and tense, need deep calm'); the sf:agent:sleep CustomEvent dispatches startSleepMode (sleep-mode-preset gains border-[#72C2AC]/60 active class and timer-display reads 29:59). Mobile 390x844: bounding-rect intersection assertions confirm visual-mode-chips (rect x=29 y=2358 w=76 h=87, vertical stack) does NOT intersect keep-awake-toggle (y=2687) or current-frequency (y=2305).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_agent_chat.py",
+    "/app/test_reports/pytest/iter32_agent_chat.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dashboard.jsx sf:agent:sleep listener uses a sleepHandoffRef pattern with setTimeout(...,0) to defer the call so React commits the new sleep duration before startSleepMode reads it — correct and matches the rest of the file's deferred-effect style. Verified live: dispatch → 29:59 timer on a 30 min suggestion.",
+    "AIAgentSheet.applySuggestion safely zeros all eight ambient kinds before applying a new preset/soundscape, preventing stale layered audio leaks across suggestion taps. Good.",
+    "Backend _validate_agent_reply (server.py ~L1043) clamps frequency to [1,20000] and tags pro_only per is_pro — the 4 backend tests verified the shape and clamps held across two distinct LLM completions.",
+    "Suggested polish (not blocking): AIAgentSheet uses sessionStorage 'sf_agent_seen_v1' to gate the first-open. If a user toggles tabs/relogs in the same tab the sheet won't re-open — acceptable per spec but worth documenting in PRD."
+  ],
+  "updated_files": ["/app/backend/tests/test_agent_chat.py"],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "100% (T1..T6 + mobile overlap)"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (Pro)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Auth uses data-testid=auth-email-input / auth-password-input / auth-submit-button (NOT login-email/login-password as the review brief suggested). Landing CTA selector is [data-testid=landing-start-button] (NOT landing-cta). To suppress the agent sheet auto-open before login (so you can interact freely with the dashboard) set sessionStorage 'sf_agent_seen_v1'='1' BEFORE clicking submit. The kinds returned by the LLM vary by prompt — to deterministically obtain an ai_prescription suggestion in tests, ask 'I feel anxious and tense — anything calming?'; to obtain a preset, ask for 'a solfeggio frequency for focus'. The sf:agent:sleep event can be dispatched directly via window.dispatchEvent for routing tests without needing the LLM to emit a sleep suggestion. window.__audioEngine is exposed for state introspection (playing, master.gain.value, etc).",
+  "test_results_detail": {
+    "BE_unauthenticated_401": "PASS",
+    "BE_chat_shape_and_suggestions": "PASS — kinds in {preset,soundscape,sleep,ai_prescription}, frequencies clamped",
+    "BE_multi_turn_with_history": "PASS",
+    "BE_rate_limit_429_after_burst": "PASS — 429 observed within 15 sequential requests",
+    "FE_T1_sheet_opens_with_greeting": "PASS — 'Hello Admin, how are you feeling right now?'",
+    "FE_T2_multi_turn_suggestions": "PASS — 4 suggestions rendered (preset/soundscape/preset/ai_prescription), 2nd user msg → 3rd assistant",
+    "FE_T3_no_auto_reopen": "PASS — sheet absent after reload with sf_agent_seen_v1 set",
+    "FE_T4_preset_applied": "PASS — current-frequency 528→741 Hz, engine.playing=true, sheet closed",
+    "FE_T5_ai_prescription_handoff": "PASS — sheet closed, ai-recommend-panel present, textarea pre-filled 'anxious and tense, need deep calm'",
+    "FE_T6_sleep_event_routes_to_startSleepMode": "PASS — sleep-mode-preset has border-[#72C2AC]/60 active class, timer-display='29:59' for 30-min duration",
+    "FE_mobile_chip_overlap": "PASS — chips rect (29,2358,76,87) vs keep-awake (118,2687,153,29) vs current-freq (141,2305,108,40): NO intersection; chips stack vertically top-left as designed"
+  }
+}

@@ -7,6 +7,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
 import StreakPanel from '@/components/StreakPanel';
+import AIAgentSheet from '@/components/AIAgentSheet';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -279,6 +280,40 @@ export default function Dashboard({ onOpenAccount }) {
 
   // Fetch saved sessions
   useEffect(() => { refreshSessions(); }, []);
+
+  // ---- AI Agent Sheet → Sleep Mode bridge -----------------------------------
+  // The AIAgentSheet dispatches a window event when the user taps a "sleep"
+  // suggestion. We re-route it here so the agent can leverage the existing
+  // startSleepMode logic (Pro gating, fade orchestration, prefs persistence).
+  // Using a ref keeps the listener stable while always invoking the freshest
+  // closure of startSleepMode + setSleepDurationMin.
+  const sleepHandoffRef = React.useRef(null);
+  useEffect(() => {
+    const onAgentSleep = (e) => {
+      const d = e?.detail?.duration_min;
+      if (typeof d === 'number' && SLEEP_DURATIONS.includes(d)) {
+        setSleepDurationMin(d);
+      }
+      // Defer one tick so React commits the duration before we read it inside startSleepMode
+      setTimeout(() => { sleepHandoffRef.current && sleepHandoffRef.current(); }, 0);
+    };
+    window.addEventListener('sf:agent:sleep', onAgentSleep);
+    return () => window.removeEventListener('sf:agent:sleep', onAgentSleep);
+  }, []);
+  // AI Prescription pre-fill handoff: AIAgentSheet calls this to open the
+  // AI panel with the user's intent already typed in.
+  const triggerAIPrescription = useCallback((intent) => {
+    setAiOpen(true);
+    if (typeof intent === 'string' && intent.trim()) {
+      setAiIntent(intent.trim());
+    }
+    // Scroll the right column so the user sees the pre-filled panel.
+    setTimeout(() => {
+      const el = document.querySelector('[data-testid="ai-recommend-panel"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+  }, []);
+
   const refreshSessions = async () => {
     try { const { data } = await api.get('/sessions'); setSessions(data); } catch (e) { console.warn('[Dashboard] sessions fetch failed', e); }
   };
@@ -430,6 +465,11 @@ export default function Dashboard({ onOpenAccount }) {
     Object.keys(audioEngine.ambient || {}).forEach((k) => audioEngine.setAmbient(k, 0));
     setActiveSoundscape(null);
   };
+
+  // Keep the agent-sleep handoff ref pointing at the latest startSleepMode.
+  // Reassigned every render so the listener always invokes the freshest closure
+  // (which captures the current sleepDurationMin / isPro).
+  sleepHandoffRef.current = startSleepMode;
 
   const selectSoundscape = (s) => {
     if (!isPro) { onOpenAccount(); return; }
@@ -965,13 +1005,14 @@ export default function Dashboard({ onOpenAccount }) {
           {/* Visual-mode chips (top-right) — Rings / Chladni / Ripples */}
           {/* Visual-mode chips — Rings / Chladni / Ripples.
               Desktop (sm+): top-right of the visualizer (out of the way).
-              Mobile (<sm): the centered "Now Tuning" header sits on the
-              same top row as these chips on narrow viewports (~390px) and
-              the two collide visibly (see iter-30 user-reported bug). On
-              mobile we drop the chips to BOTTOM-LEFT — clear of the header
-              AND the centered play/timer transport. */}
+              Mobile (<sm): the centered "Now Tuning" header sits on the top
+              row and the centered transport (timer + play + "Keep screen on")
+              sits at the bottom — both would collide with a horizontal chip
+              strip. On mobile we stack the chips VERTICALLY in the left rail
+              just below the header (top-24 left-3) so they clear both the
+              centered header AND the bottom transport. */}
           <div
-            className="absolute z-10 flex gap-1.5 bottom-4 left-3 sm:bottom-auto sm:left-auto sm:top-4 sm:right-4"
+            className="absolute z-10 flex gap-1.5 flex-col top-24 left-3 sm:flex-row sm:top-4 sm:right-4 sm:left-auto"
             data-testid="visual-mode-chips"
           >
             {[
@@ -1382,6 +1423,18 @@ export default function Dashboard({ onOpenAccount }) {
           </div>
         </aside>
       </div>
+
+      {/* Conversational check-in agent — opens once per browser session on
+          the first dashboard mount per the AIAgentSheet's internal flag.
+          Suggestions are applied to the existing audio engine, and the
+          AI prescription handoff opens the right-column panel pre-filled. */}
+      <AIAgentSheet
+        user={user}
+        isPro={isPro}
+        onClose={() => { /* sheet closes itself; nothing to clean up here */ }}
+        onOpenAccount={onOpenAccount}
+        onTriggerAIPrescription={triggerAIPrescription}
+      />
     </div>
   );
 }
