@@ -120,7 +120,13 @@ export default function Dashboard({ onOpenAccount }) {
   const prefsRestoredRef = React.useRef(false);
   const prefsSaveTimerRef = React.useRef(null);
 
-  const SLEEP_FADE_SECONDS = 60;
+  // Smart Fade Timer: any timer-based session smoothly tapers the master gain
+  // to silence over the last SMART_FADE_SECONDS so sessions land softly. Fade
+  // runs on this.master in audioEngine.js, which preserves the user's layered
+  // mix balance automatically. Old Sleep-Mode-specific 60s fade is replaced
+  // by this unified 300s path.
+  const SMART_FADE_SECONDS = 300; // 5 minutes
+  const fadeArmedRef = React.useRef(false);
 
   const checkIn = async (minutes) => {
     try {
@@ -165,13 +171,36 @@ export default function Dashboard({ onOpenAccount }) {
         audioEngine.stop();
         setRemaining(0);
         setActiveSoundscape(null);
+        fadeArmedRef.current = false;
       } else {
+        // Smart Fade — arm the master-bus taper once secsLeft crosses below
+        // the 5-min threshold. The fade is scheduled with the EXACT remaining
+        // time so it lands at 0 right when the timer hits zero. Idempotent
+        // via the ref guard; the engine itself is also idempotent (a second
+        // beginSessionFade call is a no-op while one is already active).
+        if (!fadeArmedRef.current && secsLeft <= SMART_FADE_SECONDS) {
+          audioEngine.beginSessionFade(secsLeft);
+          fadeArmedRef.current = true;
+        }
         setRemaining(secsLeft);
       }
     };
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.playing]);
+
+  // Reset the fade-arm flag whenever playback stops or a fresh session starts.
+  // Without this, a session shorter than 5min would never re-arm because the
+  // ref would still be true from the previous session's fade.
+  useEffect(() => {
+    if (!state.playing) {
+      fadeArmedRef.current = false;
+      // If we entered "stopped" mid-fade (user tapped stop / changed preset /
+      // hit reset), cancel the master-bus ramp so the next session doesn't
+      // inherit a tapered state. Safe to call when no fade is active.
+      audioEngine.cancelSessionFade(true);
+    }
   }, [state.playing]);
 
   // Background/foreground sync: when tab becomes visible, resume the AudioContext
@@ -211,12 +240,9 @@ export default function Dashboard({ onOpenAccount }) {
     }
   }, [keepAwake, keepAwakeSupported]);
 
-  // Sleep Mode: fade everything out over SLEEP_FADE_SECONDS at the end
-  useEffect(() => {
-    if (sleepMode && state.playing && remaining === SLEEP_FADE_SECONDS) {
-      audioEngine.fadeOutAll(SLEEP_FADE_SECONDS);
-    }
-  }, [remaining, sleepMode, state.playing]);
+  // Sleep Mode's previous bespoke 60-second per-source fade is now handled by
+  // the unified Smart Fade Timer (master-bus, 5 min) above. Keep the auto-
+  // clear effect so the Sleep Mode UI pill resets correctly on session end.
 
   // Auto-clear sleepMode only when the session has actually completed
   // (NOT when audio is briefly idle during startSleepMode's setTimeout window).
@@ -722,8 +748,8 @@ export default function Dashboard({ onOpenAccount }) {
                 </div>
                 <div className="text-[10px] text-[#8A9A92]">
                   {sleepMode
-                    ? `Drifting · fades at 60s · ${sleepDurationMin >= 60 ? `${(sleepDurationMin / 60).toFixed(sleepDurationMin % 60 === 0 ? 0 : 1)}h` : `${sleepDurationMin}min`}`
-                    : `4 Hz · brown noise · ${sleepDurationMin >= 60 ? `${(sleepDurationMin / 60).toFixed(sleepDurationMin % 60 === 0 ? 0 : 1)}h` : `${sleepDurationMin}min`} fade`}
+                    ? `Drifting · smooth fade · ${sleepDurationMin >= 60 ? `${(sleepDurationMin / 60).toFixed(sleepDurationMin % 60 === 0 ? 0 : 1)}h` : `${sleepDurationMin}min`}`
+                    : `4 Hz · brown noise · ${sleepDurationMin >= 60 ? `${(sleepDurationMin / 60).toFixed(sleepDurationMin % 60 === 0 ? 0 : 1)}h` : `${sleepDurationMin}min`} · 5min fade`}
                 </div>
               </div>
               {!isPro && <Lock size={12} className="text-[#C4A67A]" />}
@@ -981,8 +1007,20 @@ export default function Dashboard({ onOpenAccount }) {
 
           {/* Transport (bottom) */}
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-4 z-10">
-            <div data-testid="timer-display" className="font-mono text-2xl text-[#E8E3D9] tracking-widest">
-              {formatTime(state.playing ? remaining : duration * 60)}
+            <div className="flex items-center gap-2">
+              <div data-testid="timer-display" className="font-mono text-2xl text-[#E8E3D9] tracking-widest">
+                {formatTime(state.playing ? remaining : duration * 60)}
+              </div>
+              {state.playing && state.sessionFadeActive && (
+                <div
+                  data-testid="smart-fade-pill"
+                  className="text-[9px] tracking-[0.18em] uppercase font-mono px-2 py-0.5 rounded-full border border-[#C4A67A]/40 bg-[#C4A67A]/10 text-[#C4A67A]"
+                  title="Smoothly fading to silence over the last 5 minutes"
+                  style={{ animation: 'landing-cta-breath-anim 3.5s ease-in-out infinite' }}
+                >
+                  Fading
+                </div>
+              )}
             </div>
             <button
               data-testid="play-pause-button"

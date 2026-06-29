@@ -289,6 +289,7 @@ class AudioEngine {
       toneVolume: this.toneVolume,
       goldenStack: this.goldenStack,
       ambient: Object.fromEntries(Object.entries(this.ambient).map(([k, v]) => [k, v.volume])),
+      sessionFadeActive: !!this._sessionFadeActive,
     };
   }
 
@@ -304,6 +305,15 @@ class AudioEngine {
       this.toneGain = ctx.createGain();
       this.toneGain.gain.value = 0;
       this.toneGain.connect(this.master);
+
+      // Reset master bus from any prior Smart-Fade taper. Without this, a
+      // session that ended via Smart Fade leaves master.gain at 0 and the
+      // next session would be silent. Set instantly inside the user-gesture
+      // call stack — no ramp needed since toneGain itself fades in below.
+      this.master.gain.cancelScheduledValues(ctx.currentTime);
+      this.master.gain.setValueAtTime(1, ctx.currentTime);
+      this._sessionFadeActive = false;
+      this._sessionFadeEndsAt = 0;
 
       // Isochronic gate sits between the oscillator(s) and toneGain. When
       // isochronic === 0 it acts as a unity pass-through (gain = 1). When > 0
@@ -513,6 +523,11 @@ class AudioEngine {
       this.toneGain.gain.cancelScheduledValues(ctx.currentTime);
       this.toneGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
     }
+    // Clear any in-flight Smart Fade — master gain may be mid-taper. We don't
+    // restore it here because the next start() will reset master to 1, and
+    // anything between now and then should stay silent.
+    this._sessionFadeActive = false;
+    this._sessionFadeEndsAt = 0;
     // Capture the CURRENT oscillators locally and null the instance refs immediately
     // so that a subsequent start() (within the cleanup window) doesn't get its
     // brand-new oscillator clobbered when the cleanup timeout fires.
@@ -593,7 +608,10 @@ class AudioEngine {
   }
 
   // Gracefully ramp tone + all ambient gains down to 0 over `seconds`.
-  // Used by Sleep Mode for a gentle fade-to-silence at the end of a session.
+  // Legacy per-source fade. Retained for any caller that wants source-level
+  // fading; the preferred path for session-end smart fade is
+  // beginSessionFade() below, which operates on the master bus so the
+  // user's layered mix balance is automatically preserved.
   fadeOutAll(seconds = 60) {
     if (!this.ctx) return;
     const ctx = this.ctx;
@@ -607,6 +625,51 @@ class AudioEngine {
     if (this.toneGain) ramp(this.toneGain.gain);
     Object.values(this.ambient).forEach((a) => { if (a.gain) ramp(a.gain.gain); });
   }
+
+  // ---- Smart Session Fade ----------------------------------------------------
+  // Master-bus fade for the last N seconds of a timed session. By scheduling
+  // a single linearRampToValueAtTime on this.master.gain we automatically
+  // preserve the relative balance of every downstream source (tone, golden
+  // harmonics, isochronic gate, all ambient layers). Idempotent: a second
+  // call is a no-op so the timer's per-second tick can safely poll-fire it.
+
+  beginSessionFade(seconds) {
+    if (!this.ctx || !this.master) return;
+    if (this._sessionFadeActive) return;
+    const dur = Math.max(0.5, Number(seconds) || 0);
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const cur = this.master.gain.value;
+    this.master.gain.cancelScheduledValues(t);
+    this.master.gain.setValueAtTime(cur, t);
+    this.master.gain.linearRampToValueAtTime(0, t + dur);
+    this._sessionFadeActive = true;
+    this._sessionFadeEndsAt = t + dur;
+    this._emit();
+  }
+
+  // Abort an in-flight smart fade. `restoreInstantly=true` snaps the master
+  // back to 1.0 immediately (used by stop() during cleanup where audio is
+  // already being killed). The default 0.4s ramp-back is the smooth path used
+  // when the user changes settings mid-fade and we want to undo the taper.
+  cancelSessionFade(restoreInstantly = false) {
+    if (!this.ctx || !this.master) return;
+    if (!this._sessionFadeActive) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    this.master.gain.cancelScheduledValues(t);
+    if (restoreInstantly) {
+      this.master.gain.setValueAtTime(1, t);
+    } else {
+      this.master.gain.setValueAtTime(this.master.gain.value, t);
+      this.master.gain.linearRampToValueAtTime(1, t + 0.4);
+    }
+    this._sessionFadeActive = false;
+    this._sessionFadeEndsAt = 0;
+    this._emit();
+  }
+
+  isFading() { return !!this._sessionFadeActive; }
 
   setGoldenStack(on) {
     this.goldenStack = !!on;
