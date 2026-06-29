@@ -924,6 +924,185 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
         raise HTTPException(status_code=502, detail=f"AI recommendation failed: {exc}")
 
 
+# --- Conversational AI Agent (check-in companion) ---------------------------
+AGENT_SYSTEM = """You are the Healing Frequencies companion — a warm, brief
+sound-curation guide. The user just logged in. Greet them by name when given,
+ask how they feel, and recommend sounds. Use plain, supportive language.
+
+NEVER make medical or therapeutic claims. NEVER diagnose. Speak as a thoughtful
+friend who knows the catalog. Keep messages short (1–3 sentences max).
+
+Your reply MUST be valid JSON only — no prose outside the JSON, no code fences:
+
+{
+  "message": "string (your reply, 1-3 sentences)",
+  "suggestions": [ /* 0..4 items the user can tap. Empty array if mid-conversation
+                    and you just want to ask a follow-up. */
+    {
+      "kind": "preset",       // tone preset
+      "label": "528 Hz · Heart Coherence",
+      "frequency": 528,        // required for preset (1-1200)
+      "waveform": "sine"       // optional, defaults to sine
+    },
+    {
+      "kind": "soundscape",   // single ambient layer
+      "label": "Slow rain",
+      "soundscape": "rain",    // one of: rain, ocean, forest, wind, crickets, bowls, brown, white
+      "volume": 0.55           // 0..1
+    },
+    {
+      "kind": "sleep",        // Sleep Mode (Pro)
+      "label": "Sleep Mode · 1h",
+      "duration_min": 60       // one of: 30, 60, 120, 240, 480
+    },
+    {
+      "kind": "ai_prescription", // launches the full AI Prescription with this intent
+      "label": "Custom prescription for slowing down",
+      "intent": "anxious, need to slow my nervous system down"
+    }
+  ]
+}
+
+Rules:
+- 2-4 suggestions on the FIRST recommendation. 0 suggestions if asking a follow-up.
+- If the user declines or asks for different options, offer a NEW set.
+- If user says "no", "not those", "something else": ask once if they'd like another set, then provide it.
+- Match or gently shift their state — calm for anxious, focus for restless, warmth for low-energy.
+- Sleep Mode is Pro — only include it if the user explicitly mentions sleep/night/rest.
+- AI Prescription is Pro — include it when their need is complex/specific.
+- Solfeggio frequencies: 174 (grounding), 285 (regen), 396 (release fear), 417 (change), 432 (calm), 528 (heart), 639 (connection), 741 (clarity), 852 (intuition), 963 (unity).
+- Brainwaves: 2 (Delta/sleep), 6 (Theta/meditation), 7.83 (Schumann), 10 (Alpha/relaxed), 40 (Gamma/focus).
+"""
+
+
+class AgentChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=600)
+    history: Optional[list] = Field(default=None)  # [{role: 'user'|'assistant', text: str}]
+    session_id: Optional[str] = Field(default=None, max_length=80)
+
+
+_AGENT_KINDS = {"preset", "soundscape", "sleep", "ai_prescription"}
+
+
+def _validate_agent_reply(raw: dict, is_pro: bool) -> dict:
+    """Coerce the LLM's reply into the strict shape the frontend renders.
+    Drops/filters hallucinated fields; clamps numeric values; tags Pro gating."""
+    msg = str(raw.get("message") or "").strip()[:600]
+    if not msg:
+        msg = "I'm here. How are you feeling?"
+    raw_suggestions = raw.get("suggestions") or []
+    out: list = []
+    if isinstance(raw_suggestions, list):
+        for item in raw_suggestions[:4]:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").lower()
+            if kind not in _AGENT_KINDS:
+                continue
+            label = str(item.get("label") or "").strip()[:80] or "Suggestion"
+            entry: dict = {"kind": kind, "label": label}
+            if kind == "preset":
+                try:
+                    freq = float(item.get("frequency") or 0)
+                except Exception:
+                    continue
+                if not (1 <= freq <= 1200):
+                    continue
+                entry["frequency"] = freq
+                wf = str(item.get("waveform") or "sine").lower()
+                entry["waveform"] = wf if wf in ALLOWED_WAVEFORMS else "sine"
+                entry["pro_only"] = False
+            elif kind == "soundscape":
+                sc = str(item.get("soundscape") or "").lower()
+                if sc not in ALLOWED_AMBIENT:
+                    continue
+                vol = item.get("volume", 0.5)
+                try:
+                    vol = float(vol)
+                except Exception:
+                    vol = 0.5
+                entry["soundscape"] = sc
+                entry["volume"] = max(0.0, min(1.0, vol))
+                entry["pro_only"] = False
+            elif kind == "sleep":
+                try:
+                    dm = int(item.get("duration_min") or 30)
+                except Exception:
+                    dm = 30
+                if dm not in (30, 60, 120, 240, 480):
+                    dm = 30
+                entry["duration_min"] = dm
+                entry["pro_only"] = not is_pro
+            elif kind == "ai_prescription":
+                intent = str(item.get("intent") or "").strip()[:300]
+                if not intent:
+                    continue
+                entry["intent"] = intent
+                entry["pro_only"] = not is_pro
+            out.append(entry)
+    return {"message": msg, "suggestions": out}
+
+
+@api.post("/me/agent/chat")
+async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(get_current_user)):
+    """Conversational check-in agent. Multi-turn — pass `history` from the
+    client on each call (we don't persist server-side). Returns a strict
+    `{message, suggestions}` shape the frontend can render as a chat bubble
+    plus a row of tappable suggestion cards.
+    """
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(status_code=503, detail="LLM key not configured")
+    # Cheaper per-user throttle than the AI Prescription endpoint — this is
+    # quick conversational turns. Burst 8 with refill 1/8s = ~7/min sustained.
+    _rate_limit_or_429(f"agent:{user['id']}", capacity=8, refill_per_sec=1 / 8, label="chat message")
+    full = await db.users.find_one({"id": user["id"]})
+    is_pro = _is_pro(full)
+    # Build a single concatenated prompt: prior history + the new message.
+    # This stays inside one stream_message call (no chat memory needed server-side).
+    parts: list = []
+    name = (full.get("name") or "").strip()
+    if name:
+        parts.append(f"USER_NAME: {name}")
+    parts.append(f"USER_IS_PRO: {bool(is_pro)}")
+    history = body.history or []
+    for turn in history[-10:]:  # cap context window
+        if not isinstance(turn, dict):
+            continue
+        role = "USER" if turn.get("role") == "user" else "AGENT"
+        text = str(turn.get("text") or "").strip()[:600]
+        if text:
+            parts.append(f"{role}: {text}")
+    parts.append(f"USER: {body.message.strip()}")
+    parts.append("Reply now with the JSON object only.")
+    user_text = "\n".join(parts)
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=body.session_id or f"agent-{user['id']}-{uuid.uuid4().hex[:6]}",
+        system_message=AGENT_SYSTEM,
+    ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+
+    try:
+        collected: list = []
+        async for ev in chat.stream_message(UserMessage(text=user_text)):
+            cls = ev.__class__.__name__
+            if cls == "TextDelta":
+                collected.append(getattr(ev, "content", "") or "")
+            elif cls == "StreamDone":
+                break
+        text = "".join(collected).strip()
+        if not text:
+            raise HTTPException(status_code=502, detail="AI returned empty response")
+        raw = _extract_json(text)
+        reply = _validate_agent_reply(raw, is_pro)
+        return reply
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("agent_chat failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Agent chat failed: {exc}")
+
+
 # ---------- Stripe helper ----------
 def _normalise_stripe_api_base():
     """Defense against the upstream library's sticky module-level mutation —
