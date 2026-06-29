@@ -4,28 +4,26 @@ import api from '@/lib/api';
 import audioEngine from '@/lib/audioEngine';
 
 /**
- * Conversational check-in agent. Renders as a centered modal sheet that
- * appears on first dashboard mount per browser session.
+ * Conversational check-in / companion sheet. Now a CONTROLLED component:
+ * the host (Dashboard) owns the `open` flag and the opening `greeting` so
+ * it can drive both the once-per-session auto-open AND the manual
+ * "AI Companion" button (greeting: "How can I help you?").
  *
- * Flow:
- *   - Opens with a personalised greeting using the user's saved name (or a
- *     generic prompt when missing).
- *   - User types how they feel; we POST /api/me/agent/chat with the running
- *     conversation history. Backend returns {message, suggestions[]}.
- *   - Each suggestion is a tappable card (preset / soundscape / sleep /
- *     ai_prescription). Tapping applies it to the existing audio engine and
- *     starts playback, then closes the sheet.
- *   - User can keep chatting after the first set (decline → "want others?" →
- *     new options). All multi-turn state lives in this component.
- *
- * Pro gating: backend already tags `pro_only` per suggestion. We render a
- * lock badge and route taps to the Account upgrade flow instead of starting
- * playback when the user is non-Pro.
+ * Suggestion taps:
+ *   - apply the choice to the existing audio engine (preset/soundscape) OR
+ *     dispatch a window event (sleep) OR call onTriggerAIPrescription
+ *     (ai_prescription).
+ *   - persist the (mood → chosen suggestion) pair to MongoDB via
+ *     POST /me/agent/checkin so future check-ins can reference it.
  */
-const SESSION_KEY = 'sf_agent_seen_v1';
-
-export default function AIAgentSheet({ user, isPro, onClose, onOpenAccount, onTriggerAIPrescription }) {
-  const [open, setOpen] = useState(false);
+export default function AIAgentSheet({
+  open,
+  greeting,
+  isPro,
+  onClose,
+  onOpenAccount,
+  onTriggerAIPrescription,
+}) {
   const [messages, setMessages] = useState([]); // [{role:'user'|'assistant', text, suggestions?}]
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -33,18 +31,16 @@ export default function AIAgentSheet({ user, isPro, onClose, onOpenAccount, onTr
   const scrollRef = useRef(null);
   const sessionIdRef = useRef(`agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 
-  // Open ONCE per browser session. Shown after login lands on the dashboard.
+  // (Re)seed the conversation whenever the sheet transitions from closed → open
+  // with a new greeting. We keep messages cleared between sessions so the
+  // companion always starts fresh — old turns aren't reloaded on reopen.
   useEffect(() => {
-    if (!user) return;
-    if (sessionStorage.getItem(SESSION_KEY) === '1') return;
-    const name = (user.name || '').trim();
-    const greeting = name
-      ? `Hello ${name}, how are you feeling right now?`
-      : 'Hello, how are you feeling right now?';
-    setMessages([{ role: 'assistant', text: greeting, suggestions: [] }]);
-    setOpen(true);
-    sessionStorage.setItem(SESSION_KEY, '1');
-  }, [user]);
+    if (!open) return;
+    setMessages([{ role: 'assistant', text: greeting || 'How can I help you?', suggestions: [] }]);
+    setInput('');
+    setErr('');
+    sessionIdRef.current = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }, [open, greeting]);
 
   // Autoscroll to the latest message.
   useEffect(() => {
@@ -52,6 +48,15 @@ export default function AIAgentSheet({ user, isPro, onClose, onOpenAccount, onTr
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages, loading]);
+
+  // Helper: pull the most recent user-typed message out of the conversation.
+  // Used as the "mood" field when persisting a check-in.
+  const lastUserMessage = () => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'user') return messages[i].text;
+    }
+    return '';
+  };
 
   const send = async () => {
     const text = input.trim();
@@ -96,6 +101,17 @@ export default function AIAgentSheet({ user, isPro, onClose, onOpenAccount, onTr
       close();
       return;
     }
+    // Persist the (mood → choice) pair BEFORE we leave the sheet so the
+    // next /me/agent/chat call can reference it as PRIOR_INSIGHT. Fire-and-
+    // forget — never block UX on the persistence call.
+    const mood = lastUserMessage();
+    if (mood) {
+      api.post('/me/agent/checkin', {
+        message: mood,
+        suggestion: s,
+        session_id: sessionIdRef.current,
+      }).catch((e) => console.warn('[AIAgentSheet] checkin persist failed', e));
+    }
     try {
       if (s.kind === 'preset') {
         audioEngine.setBinaural(0);
@@ -125,7 +141,6 @@ export default function AIAgentSheet({ user, isPro, onClose, onOpenAccount, onTr
   };
 
   const close = () => {
-    setOpen(false);
     onClose && onClose();
   };
 
@@ -144,7 +159,7 @@ export default function AIAgentSheet({ user, isPro, onClose, onOpenAccount, onTr
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#5C9E8C]/15">
           <div className="flex items-center gap-2">
             <Sparkles size={14} className="text-[#C4A67A]" />
-            <div className="label-tiny text-[#C4A67A]">Healing Companion</div>
+            <div className="label-tiny text-[#C4A67A]">AI Companion</div>
           </div>
           <button
             data-testid="ai-agent-close"

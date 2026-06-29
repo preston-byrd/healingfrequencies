@@ -281,6 +281,33 @@ export default function Dashboard({ onOpenAccount }) {
   // Fetch saved sessions
   useEffect(() => { refreshSessions(); }, []);
 
+  // ---- AI Companion sheet (controlled by Dashboard) ------------------------
+  // Greeting on first session per browser is personalised ("Hello [Name],
+  // how are you feeling right now?"). Manual open via the "AI Companion"
+  // header button uses a neutral "How can I help you?" greeting.
+  const SESSION_KEY = 'sf_agent_seen_v1';
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [agentGreeting, setAgentGreeting] = useState('');
+  useEffect(() => {
+    if (!user) return;
+    if (typeof window === 'undefined') return;
+    try {
+      if (sessionStorage.getItem(SESSION_KEY) === '1') return;
+      const name = (user.name || '').trim();
+      setAgentGreeting(
+        name ? `Hello ${name}, how are you feeling right now?` : 'Hello, how are you feeling right now?'
+      );
+      setAgentOpen(true);
+      sessionStorage.setItem(SESSION_KEY, '1');
+    } catch (e) {
+      console.warn('[Dashboard] agent auto-open gating failed', e);
+    }
+  }, [user]);
+  const openCompanion = useCallback(() => {
+    setAgentGreeting('How can I help you?');
+    setAgentOpen(true);
+  }, []);
+
   // ---- AI Agent Sheet → Sleep Mode bridge -----------------------------------
   // The AIAgentSheet dispatches a window event when the user taps a "sleep"
   // suggestion. We re-route it here so the agent can leverage the existing
@@ -692,6 +719,15 @@ export default function Dashboard({ onOpenAccount }) {
             <div className="flex items-center justify-between mb-1">
               <div className="label-tiny">Healing Frequencies</div>
               <div className="flex items-center gap-3">
+                <button
+                  data-testid="ai-companion-button"
+                  onClick={openCompanion}
+                  className="text-[#C4A67A] hover:text-[#E8B872] transition-colors"
+                  title="AI Companion"
+                  aria-label="Open AI Companion"
+                >
+                  <Sparkles size={16} />
+                </button>
                 <button
                   data-testid="account-button"
                   onClick={onOpenAccount}
@@ -1424,14 +1460,14 @@ export default function Dashboard({ onOpenAccount }) {
         </aside>
       </div>
 
-      {/* Conversational check-in agent — opens once per browser session on
-          the first dashboard mount per the AIAgentSheet's internal flag.
-          Suggestions are applied to the existing audio engine, and the
-          AI prescription handoff opens the right-column panel pre-filled. */}
+      {/* Conversational check-in agent. Controlled by Dashboard so both
+          the once-per-session auto-open AND the manual "AI Companion"
+          header button can use the same sheet with different greetings. */}
       <AIAgentSheet
-        user={user}
+        open={agentOpen}
+        greeting={agentGreeting}
         isPro={isPro}
-        onClose={() => { /* sheet closes itself; nothing to clean up here */ }}
+        onClose={() => setAgentOpen(false)}
         onOpenAccount={onOpenAccount}
         onTriggerAIPrescription={triggerAIPrescription}
       />

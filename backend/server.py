@@ -981,6 +981,34 @@ class AgentChatIn(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=80)
 
 
+class AgentCheckinIn(BaseModel):
+    """One persisted (mood → chosen suggestion) pair. Logged when the user taps
+    a suggestion in the AI Companion sheet. Used to enrich the LLM prompt on
+    subsequent visits ("Last week you said you were anxious and 396 Hz helped —
+    want to start there again?"). All fields are user-supplied / agent-supplied;
+    we never persist anything that wasn't already in the user's chat window."""
+    message: str = Field(min_length=1, max_length=600)
+    suggestion: dict
+    session_id: Optional[str] = Field(default=None, max_length=80)
+
+
+def _summarise_suggestion(s: dict) -> str:
+    """Compact one-line summary of a suggestion for embedding in the LLM
+    prompt. Keeps the prior-insights block short and token-friendly."""
+    kind = str(s.get("kind") or "")
+    label = str(s.get("label") or "")[:60]
+    if kind == "preset":
+        hz = s.get("frequency")
+        return f"preset {hz} Hz ({label})" if hz else f"preset ({label})"
+    if kind == "soundscape":
+        return f"soundscape {s.get('soundscape') or ''} ({label})".strip()
+    if kind == "sleep":
+        return f"sleep mode {s.get('duration_min') or '?'}min ({label})"
+    if kind == "ai_prescription":
+        return f"AI prescription ({label})"
+    return label or kind
+
+
 _AGENT_KINDS = {"preset", "soundscape", "sleep", "ai_prescription"}
 
 
@@ -1064,6 +1092,30 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     if name:
         parts.append(f"USER_NAME: {name}")
     parts.append(f"USER_IS_PRO: {bool(is_pro)}")
+
+    # Prior insights — last 3 successful (mood → suggestion) check-ins from
+    # MongoDB. Lets the LLM acknowledge what worked before. Cheap query;
+    # capped at 3 rows + 60-char labels to keep the prompt token-budget small.
+    try:
+        prior_cursor = db.agent_checkins.find(
+            {"user_id": user["id"]}
+        ).sort("created_at", -1).limit(3)
+        prior_rows = await prior_cursor.to_list(length=3)
+        if prior_rows:
+            parts.append("PRIOR_INSIGHTS (most recent first — earlier moments where the user picked a suggestion):")
+            for row in prior_rows:
+                mood = str(row.get("message") or "").strip()[:120]
+                picked = _summarise_suggestion(row.get("suggestion") or {})
+                if mood and picked:
+                    parts.append(f"- felt \"{mood}\" → chose {picked}")
+            parts.append(
+                "If their current state echoes one of these prior moments, you MAY gently reference it "
+                "(e.g. \"Last time you mentioned X, the 396 Hz preset seemed to help — want to start there?\"). "
+                "Do NOT force a callback if it doesn't fit."
+            )
+    except Exception as exc:  # noqa: BLE001 — defensive: never let history lookup break chat
+        logger.warning("[agent_chat] prior_insights lookup failed: %s", exc)
+
     history = body.history or []
     for turn in history[-10:]:  # cap context window
         if not isinstance(turn, dict):
@@ -1101,6 +1153,66 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     except Exception as exc:
         logger.exception("agent_chat failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Agent chat failed: {exc}")
+
+
+@api.post("/me/agent/checkin")
+async def agent_checkin(body: AgentCheckinIn, user: dict = Depends(get_current_user)):
+    """Persist a (mood → chosen suggestion) pair from the AI Companion sheet.
+    Called by the frontend when the user actually taps a suggestion, so we
+    only log moments the user committed to (not idle browsing). Read back
+    on the next visit by /me/agent/chat as PRIOR_INSIGHTS.
+    """
+    # Light validation — kind must be one we recognise; everything else is
+    # bounded-length strings/floats we re-serialize verbatim.
+    sug = body.suggestion or {}
+    kind = str(sug.get("kind") or "").lower()
+    if kind not in _AGENT_KINDS:
+        raise HTTPException(status_code=400, detail="Unknown suggestion kind")
+    # Re-shape into a stable subset (mirrors _validate_agent_reply output).
+    record_sug: dict = {"kind": kind, "label": str(sug.get("label") or "")[:80]}
+    if kind == "preset":
+        try:
+            hz = float(sug.get("frequency"))
+            record_sug["frequency"] = max(1.0, min(20000.0, hz))
+        except Exception:
+            pass
+        record_sug["waveform"] = str(sug.get("waveform") or "sine")[:12]
+    elif kind == "soundscape":
+        record_sug["soundscape"] = str(sug.get("soundscape") or "")[:16]
+        try:
+            record_sug["volume"] = max(0.0, min(1.0, float(sug.get("volume") or 0.5)))
+        except Exception:
+            record_sug["volume"] = 0.5
+    elif kind == "sleep":
+        try:
+            dm = int(sug.get("duration_min") or 30)
+        except Exception:
+            dm = 30
+        record_sug["duration_min"] = dm if dm in (30, 60, 120, 240, 480) else 30
+    elif kind == "ai_prescription":
+        record_sug["intent"] = str(sug.get("intent") or "")[:300]
+
+    doc = {
+        "id": uuid.uuid4().hex,
+        "user_id": user["id"],
+        "message": body.message.strip()[:600],
+        "suggestion": record_sug,
+        "session_id": body.session_id or None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.agent_checkins.insert_one(doc)
+    # Keep the per-user history bounded — only the most recent 50 rows are
+    # ever read. Trim older rows so the collection doesn't grow unbounded.
+    try:
+        cursor = db.agent_checkins.find(
+            {"user_id": user["id"]}, {"id": 1, "created_at": 1}
+        ).sort("created_at", -1).skip(50)
+        stale = [r["id"] async for r in cursor]
+        if stale:
+            await db.agent_checkins.delete_many({"id": {"$in": stale}})
+    except Exception as exc:  # noqa: BLE001 — defensive housekeeping; never fail the request
+        logger.warning("[agent_checkin] history trim failed: %s", exc)
+    return {"ok": True, "id": doc["id"]}
 
 
 # ---------- Stripe helper ----------
