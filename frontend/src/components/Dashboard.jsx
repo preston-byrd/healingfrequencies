@@ -282,26 +282,34 @@ export default function Dashboard({ onOpenAccount }) {
   useEffect(() => { refreshSessions(); }, []);
 
   // ---- AI Companion sheet (controlled by Dashboard) ------------------------
-  // Greeting on first session per browser is personalised ("Hello [Name],
-  // how are you feeling right now?"). Manual open via the "AI Companion"
-  // header button uses a neutral "How can I help you?" greeting.
-  const SESSION_KEY = 'sf_agent_seen_v1';
+  // Greeting on each login is personalised ("Hello [Name], how are you feeling
+  // right now?"). PRIOR_INSIGHTS (last 3 mood→suggestion check-ins) are
+  // injected into the LLM prompt on the BACKEND, so a returning user who said
+  // they were anxious last time may hear the agent reference 396 Hz again
+  // naturally.
+  //
+  // Trigger model: opens exactly ONCE per React mount of the dashboard for an
+  // authenticated user. Because the dashboard remounts on every login (and on
+  // every page reload of an already-authed user), the user gets greeted again
+  // on every fresh session start — which matches a wellness-companion UX
+  // better than a one-time browser-session gate. A `greetedRef` prevents the
+  // effect from re-opening the sheet if the `user` object reference changes
+  // mid-mount (e.g. profile name edit).
+  //
+  // Manual open via the "AI Companion" header button uses a neutral
+  // "How can I help you?" greeting instead.
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentGreeting, setAgentGreeting] = useState('');
+  const greetedRef = React.useRef(false);
   useEffect(() => {
     if (!user) return;
-    if (typeof window === 'undefined') return;
-    try {
-      if (sessionStorage.getItem(SESSION_KEY) === '1') return;
-      const name = (user.name || '').trim();
-      setAgentGreeting(
-        name ? `Hello ${name}, how are you feeling right now?` : 'Hello, how are you feeling right now?'
-      );
-      setAgentOpen(true);
-      sessionStorage.setItem(SESSION_KEY, '1');
-    } catch (e) {
-      console.warn('[Dashboard] agent auto-open gating failed', e);
-    }
+    if (greetedRef.current) return;
+    greetedRef.current = true;
+    const name = (user.name || '').trim();
+    setAgentGreeting(
+      name ? `Hello ${name}, how are you feeling right now?` : 'Hello, how are you feeling right now?'
+    );
+    setAgentOpen(true);
   }, [user]);
   const openCompanion = useCallback(() => {
     setAgentGreeting('How can I help you?');
