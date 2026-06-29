@@ -1038,17 +1038,15 @@ export default function Dashboard({ onOpenAccount }) {
           <Visualizer playing={state.playing} frequency={state.frequency} mode={visualMode} />
           <Breathwork active={breathwork && state.playing} />
 
-          {/* Visual-mode chips (top-right) — Rings / Chladni / Ripples */}
           {/* Visual-mode chips — Rings / Chladni / Ripples.
-              Desktop (sm+): top-right of the visualizer (out of the way).
-              Mobile (<sm): the centered "Now Tuning" header sits on the top
-              row and the centered transport (timer + play + "Keep screen on")
-              sits at the bottom — both would collide with a horizontal chip
-              strip. On mobile we stack the chips VERTICALLY in the left rail
-              just below the header (top-24 left-3) so they clear both the
-              centered header AND the bottom transport. */}
+              Desktop (sm+): top-right horizontal row of the visualizer.
+              Mobile (<sm): stacked VERTICALLY in the top-right corner so
+              they clear the centered "Now Tuning" header AND don't sit on
+              top of the breathing-orb / ripple visual feature, and they
+              don't collide with the bottom-centered "Keep screen on"
+              transport. */}
           <div
-            className="absolute z-10 flex gap-1.5 flex-col top-24 left-3 sm:flex-row sm:top-4 sm:right-4 sm:left-auto"
+            className="absolute z-10 flex gap-1.5 flex-col top-4 right-3 sm:flex-row sm:top-4 sm:right-4"
             data-testid="visual-mode-chips"
           >
             {[
