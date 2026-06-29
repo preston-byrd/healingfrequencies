@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -8,6 +8,8 @@ import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
 import StreakPanel from '@/components/StreakPanel';
 import AIAgentSheet from '@/components/AIAgentSheet';
+import InstallAppModal from '@/components/InstallAppModal';
+import usePWAInstall from '@/lib/usePWAInstall';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -315,6 +317,18 @@ export default function Dashboard({ onOpenAccount }) {
     setAgentGreeting('How can I help you?');
     setAgentOpen(true);
   }, []);
+
+  // ---- PWA install -------------------------------------------------------
+  // The hook exposes three signals: canPrompt (Android/Chromium ready to
+  // install via beforeinstallprompt), isIOS (Safari → manual instructions),
+  // and isInstalled (already running standalone). When isInstalled is true
+  // the install affordance disappears entirely.
+  const { canPrompt, isIOS: isInstallIOS, isInstalled, promptInstall } = usePWAInstall();
+  const [installOpen, setInstallOpen] = useState(false);
+  // Show the install affordance whenever the app is not already running
+  // standalone. The modal itself routes to the platform-appropriate path
+  // (native prompt / iOS share-sheet instructions / desktop fallback).
+  const showInstall = !isInstalled;
 
   // ---- AI Agent Sheet → Sleep Mode bridge -----------------------------------
   // The AIAgentSheet dispatches a window event when the user taps a "sleep"
@@ -736,6 +750,17 @@ export default function Dashboard({ onOpenAccount }) {
                 >
                   <Sparkles size={16} />
                 </button>
+                {showInstall && (
+                  <button
+                    data-testid="install-app-button"
+                    onClick={() => setInstallOpen(true)}
+                    className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+                    title="Install app"
+                    aria-label="Install app"
+                  >
+                    <Smartphone size={16} />
+                  </button>
+                )}
                 <button
                   data-testid="account-button"
                   onClick={onOpenAccount}
@@ -1476,6 +1501,17 @@ export default function Dashboard({ onOpenAccount }) {
         onClose={() => setAgentOpen(false)}
         onOpenAccount={onOpenAccount}
         onTriggerAIPrescription={triggerAIPrescription}
+      />
+
+      {/* PWA install affordance — native prompt on Android/Chromium, share-
+          sheet instructions on iOS Safari, generic browser-bar hint on
+          desktop fallback. Hidden entirely when already installed. */}
+      <InstallAppModal
+        open={installOpen}
+        onClose={() => setInstallOpen(false)}
+        canPrompt={canPrompt}
+        isIOS={isInstallIOS}
+        promptInstall={promptInstall}
       />
     </div>
   );
