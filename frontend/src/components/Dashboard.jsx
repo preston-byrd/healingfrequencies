@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -10,6 +10,8 @@ import StreakPanel from '@/components/StreakPanel';
 import AIAgentSheet from '@/components/AIAgentSheet';
 import InstallAppModal from '@/components/InstallAppModal';
 import usePWAInstall from '@/lib/usePWAInstall';
+import HapticsModal from '@/components/HapticsModal';
+import haptic from '@/lib/hapticEngine';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -329,6 +331,19 @@ export default function Dashboard({ onOpenAccount }) {
   // standalone. The modal itself routes to the platform-appropriate path
   // (native prompt / iOS share-sheet instructions / desktop fallback).
   const showInstall = !isInstalled;
+
+  // ---- Pulsing Haptics --------------------------------------------------
+  // Single subscription to the audio engine — hapticEngine then auto-starts
+  // on play and stops on pause/sleep-end. Stays a no-op on unsupported
+  // devices (iOS Safari / iOS standalone) so audio is never blocked.
+  const [hapticsOpen, setHapticsOpen] = useState(false);
+  useEffect(() => {
+    haptic.attachToAudio();
+    return () => { haptic.stop(); };
+  }, []);
+  // Sleep-mode hint into the haptic engine so the heartbeat pattern can
+  // slow to 50 bpm when the user is winding down for the night.
+  useEffect(() => { haptic.setSleepHint(sleepMode); }, [sleepMode]);
 
   // ---- AI Agent Sheet → Sleep Mode bridge -----------------------------------
   // The AIAgentSheet dispatches a window event when the user taps a "sleep"
@@ -761,6 +776,15 @@ export default function Dashboard({ onOpenAccount }) {
                     <Smartphone size={16} />
                   </button>
                 )}
+                <button
+                  data-testid="haptics-button"
+                  onClick={() => setHapticsOpen(true)}
+                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+                  title="Pulsing Haptics"
+                  aria-label="Pulsing Haptics"
+                >
+                  <HeartPulse size={16} />
+                </button>
                 <button
                   data-testid="account-button"
                   onClick={onOpenAccount}
@@ -1513,6 +1537,10 @@ export default function Dashboard({ onOpenAccount }) {
         isIOS={isInstallIOS}
         promptInstall={promptInstall}
       />
+
+      {/* Pulsing Haptics — optional vibration sync. Engine auto-attaches to
+          audio playback on mount; this modal is just the toggle / pattern UI. */}
+      <HapticsModal open={hapticsOpen} onClose={() => setHapticsOpen(false)} />
     </div>
   );
 }
