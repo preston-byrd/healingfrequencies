@@ -169,6 +169,19 @@
   - `App.js` detects `window.location.pathname === '/play'` BEFORE the auth gate and renders the deep-link UI. The "Open full Solarisound app" button strips `/play` via `history.replaceState` so the user lands on the normal route without losing the running audio (engine is a singleton).
   - Testing iteration 37 — **13/13 frontend cases** all PASS. Verified: button presence, modal tab switching, all 6 preset cards copyable, clipboard write correct, /play with preset / custom freq / alias / BOGUS / no-params, public access without auth, "Open full app" fallback strips URL, regression on all 6 header buttons.
 
+- **Equalizer Calibration / personal hearing profile (iter 38)** (Feb 2026): 30-second onboarding hearing test that builds a per-user EQ profile so Solfeggio tones and binaural beats land evenly across the user's ears + hardware.
+  - **Backend** — three new endpoints on the user document:
+    - `GET /api/me/hearing-profile` returns the saved profile object (with `bands`, `test_level_db`, `calibrated_at`, `skipped`) or `null`.
+    - `POST /api/me/hearing-profile` accepts `{bands:[{freq,heard},…]}` for a real calibration OR `{skipped:true}` for a "do it later" stub. Server clamps freq to the canonical `_CAL_BANDS=(60,125,250,500,1000,2000,4000,8000,12000)` and computes per-band `gain_db` server-side (heard→0 dB, unheard→+6 dB, clamped ±9). Empty body → 400. Out-of-range freqs silently dropped + default to heard=true. Missing band defaults to heard=true.
+    - `DELETE /api/me/hearing-profile` clears the profile (used by "Recalibrate").
+  - **Frontend audio engine** — new methods on `audioEngine`:
+    - `setHearingProfile(profile|null)` — inserts a chain of peaking `BiquadFilterNode`s (Q=1.4) between `master` and `ctx.destination`/`streamDest`. Flat-only bands are skipped to save CPU. Idempotent — re-calibration tears down the prior chain. Analyser stays tapped on raw master (so the visualizer measures the unbiased mix). Deferred via `_pendingProfile` if called before `_ensureCtx()`.
+    - `playCalibrationTone(freq, durationMs, gainDb)` — direct-to-destination one-shot sine with fade-in/out, bypassing the EQ chain (so the test measures the user's bare hearing, not a self-amplified loop).
+  - **Frontend modal** — `CalibrationModal.jsx` runs a 4-step flow: **welcome** (with headphone tip + skip) → **volume reference** (1 kHz @ −16 dB for level-setting) → **test** (9 bands @ −30 dB with "I hear it" / "Not really" / "Play again" / "Skip the rest" buttons) → **results** (saved profile + tiny SVG audiogram chart + "Done"/"Redo"). Auto-opens on dashboard mount once when no profile exists; manually accessible from a new `[data-testid=calibration-button]` (Ear icon) in the header.
+  - **Onboarding integration** — Dashboard fetches the profile on mount, applies it to the engine if real, and auto-opens the modal after 1.2 s if `null`. Skip stub prevents repeat auto-prompts.
+  - Live curl-verified: heard:true → 0 dB, heard:false → +6 dB, clamp ±9, skip stub, DELETE, 400 on empty, 401 unauth. Frontend smoke-verified: modal walk through all 4 steps, SVG chart renders with 9 bars, results text contains *"4 kHz — boosted by 6.0 dB"* lines.
+  - Testing iteration 38 — **10/10 backend + 13/13 frontend** all PASS. Backend covers GET null, POST real bands w/ gain_db, POST skip stub, POST 400, 401 unauth, DELETE 200, out-of-range freq drop. Frontend covers auto-open on null profile, 4-step walk, band sequence, SVG chart, results text shows +6 dB lines, redo resets to 60 Hz, skip persists + prevents auto-reopen, manual header open, regression on all 7 header buttons.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
