@@ -35,9 +35,17 @@ export default function AIAgentSheet({
   // (Re)seed the conversation whenever the sheet transitions from closed → open
   // with a new greeting. We keep messages cleared between sessions so the
   // companion always starts fresh — old turns aren't reloaded on reopen.
+  // Stable id generator for messages — keeps React keys deterministic so
+  // appending new turns never re-mounts existing bubbles (which would
+  // disrupt the autoscroll + animation), and protects against any future
+  // splice / filter use of the messages array.
+  const nextIdRef = useRef(0);
+  const mkId = () => { nextIdRef.current += 1; return `m-${nextIdRef.current}`; };
+
   useEffect(() => {
     if (!open) return;
-    setMessages([{ role: 'assistant', text: greeting || 'How can I help you?', suggestions: [] }]);
+    nextIdRef.current = 0;
+    setMessages([{ id: mkId(), role: 'assistant', text: greeting || 'How can I help you?', suggestions: [] }]);
     setInput('');
     setErr('');
     sessionIdRef.current = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -64,7 +72,7 @@ export default function AIAgentSheet({
     if (!text || loading) return;
     setErr('');
     setInput('');
-    const nextMessages = [...messages, { role: 'user', text }];
+    const nextMessages = [...messages, { id: mkId(), role: 'user', text }];
     setMessages(nextMessages);
     setLoading(true);
     try {
@@ -76,7 +84,7 @@ export default function AIAgentSheet({
       });
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', text: data.message, suggestions: data.suggestions || [] },
+        { id: mkId(), role: 'assistant', text: data.message, suggestions: data.suggestions || [] },
       ]);
     } catch (e) {
       const msg = e?.response?.data?.detail || e?.message || 'Could not reach the agent';
@@ -221,7 +229,7 @@ export default function AIAgentSheet({
           className="flex-1 overflow-y-auto px-5 py-4 space-y-4 custom-scrollbar"
         >
           {messages.map((m, i) => (
-            <div key={i} className={m.role === 'user' ? 'flex justify-end' : ''}>
+            <div key={m.id} className={m.role === 'user' ? 'flex justify-end' : ''}>
               <div
                 className={
                   m.role === 'user'

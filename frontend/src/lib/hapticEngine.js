@@ -1,4 +1,3 @@
-/* eslint-disable no-empty */
 /**
  * hapticEngine — singleton that drives the device's vibration motor in
  * patterns synchronised with the audio session. Designed to be paired with
@@ -70,13 +69,19 @@ class HapticEngine {
 
   // ---- Subscribers (React) -------------------------------------------------
   on(fn) { this._listeners.add(fn); return () => this._listeners.delete(fn); }
-  _emit() { this._listeners.forEach((f) => { try { f(this.snapshot()); } catch {} }); }
+  _emit() {
+    this._listeners.forEach((f) => {
+      try { f(this.snapshot()); }
+      catch (e) { console.warn('[hapticEngine] listener threw', e); }
+    });
+  }
   snapshot() { return { supported: this.supported, enabled: this.enabled, pattern: this.pattern, running: this.running }; }
 
   // ---- Prefs ---------------------------------------------------------------
   _savePrefs() {
     if (typeof localStorage === 'undefined') return;
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ enabled: this.enabled, pattern: this.pattern })); } catch {}
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ enabled: this.enabled, pattern: this.pattern })); }
+    catch (e) { console.warn('[hapticEngine] prefs write failed', e); }
   }
 
   setEnabled(v) {
@@ -141,12 +146,14 @@ class HapticEngine {
   stop() {
     if (!this.running && !this._timer) {
       // Still cancel any in-flight pattern from a one-shot test.
-      try { if (this.supported) navigator.vibrate(0); } catch {}
+      try { if (this.supported) navigator.vibrate(0); }
+      catch (e) { console.warn('[hapticEngine] vibrate(0) failed', e); }
       return;
     }
     this.running = false;
     this._cancelLoop();
-    try { if (this.supported) navigator.vibrate(0); } catch {}
+    try { if (this.supported) navigator.vibrate(0); }
+    catch (e) { console.warn('[hapticEngine] vibrate(0) failed', e); }
     this._emit();
   }
 
@@ -155,7 +162,8 @@ class HapticEngine {
   // committing to leaving the toggle on.
   test() {
     if (!this.supported) return false;
-    try { return navigator.vibrate([90, 60, 90]); } catch { return false; }
+    try { return navigator.vibrate([90, 60, 90]); }
+    catch (e) { console.warn('[hapticEngine] test vibrate failed', e); return false; }
   }
 
   _cancelLoop() {
@@ -179,7 +187,8 @@ class HapticEngine {
       if (fadeFactor !== 1) {
         pattern = pattern.map((v, i) => (i % 2 === 0 ? Math.max(8, Math.round(v * fadeFactor)) : v));
       }
-      try { navigator.vibrate(pattern); } catch {}
+      try { navigator.vibrate(pattern); }
+      catch (e) { console.warn('[hapticEngine] vibrate(pattern) failed', e); }
     }
     this._timer = setTimeout(() => this._tick(), cycle.intervalMs);
   }
