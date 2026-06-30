@@ -166,8 +166,10 @@ export default function Dashboard({ onOpenAccount }) {
 
   // Drift-resistant timer: derive remaining from wall-clock end timestamp instead of
   // Pre-built timer effect: wall-clock-based to survive background-tab throttling.
-  // Runs once per playback session; the deps capture only state.playing because
-  // decrementing — survives background-tab throttling and JS interval jitter.
+  // Re-runs when playback starts OR when the countdown is freshly armed
+  // (remaining transitions 0 → positive). Using `remaining > 0` as a
+  // boolean dep keeps every per-second tick from restarting the interval
+  // (Object.is(true, true) === true so the effect doesn't re-fire).
   useEffect(() => {
     if (!state.playing || remaining <= 0) return;
     const endAt = Date.now() + remaining * 1000;
@@ -197,7 +199,7 @@ export default function Dashboard({ onOpenAccount }) {
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.playing]);
+  }, [state.playing, remaining > 0]);
 
   // Reset the fade-arm flag whenever playback stops or a fresh session starts.
   // Without this, a session shorter than 5min would never re-arm because the
@@ -405,8 +407,29 @@ export default function Dashboard({ onOpenAccount }) {
   // than nagging.
   const transitionTimerRef = React.useRef(null);
   useEffect(() => {
-    const onSuggestion = () => {
-      // Reset any prior pending timer (e.g. user picked twice in a session).
+    const onSuggestion = (e) => {
+      // Arm the player's countdown for a default 5-minute session when the
+      // user accepts a playback-style suggestion. This is the auto-timer
+      // the user asked for — it doesn't interfere with Sleep Mode (which
+      // already has its own longer duration) or AI Prescription (which
+      // just opens a panel rather than starting playback).
+      const kind = e?.detail?.kind;
+      const detail = e?.detail || {};
+      const armsTimer = (
+        kind === 'preset' ||
+        kind === 'soundscape' ||
+        kind === 'frequency' ||
+        // haptic_combo only arms the 5-min timer when the LLM didn't supply a
+        // duration_min that matches a known Sleep-Mode duration (those routes
+        // through startSleepMode, which sets its own remaining).
+        (kind === 'haptic_combo' && ![30, 60, 120, 240, 480].includes(detail.duration_min))
+      );
+      if (armsTimer) {
+        const DEFAULT_MIN = 5;
+        setDuration(DEFAULT_MIN);
+        setRemaining(DEFAULT_MIN * 60);
+      }
+      // Reset any prior pending transition timer (e.g. user picked twice in a session).
       if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
       transitionTimerRef.current = setTimeout(async () => {
         try {
@@ -415,10 +438,10 @@ export default function Dashboard({ onOpenAccount }) {
           setOtcHeadphones(!!hp);
           // Soft uncalibrated 432 Hz baseline. Volume kept low so it sits
           // gently under the user's chosen session.
-          try { audioEngine.setBaseline(432, 0.05); } catch (e) { /* graceful */ }
+          try { audioEngine.setBaseline(432, 0.05); } catch (err) { /* graceful */ }
           setOtcOpen(true);
-        } catch (e) {
-          console.warn('[Dashboard] onboarding transition failed', e);
+        } catch (err) {
+          console.warn('[Dashboard] onboarding transition failed', err);
         }
       }, 30000);
     };
