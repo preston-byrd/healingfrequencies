@@ -60,7 +60,7 @@ export default function OnboardingTransitionCard({
   return (
     <div
       data-testid="onboarding-transition-card"
-      className="fixed left-0 right-0 bottom-0 z-[60] flex justify-center px-3 sm:px-4 pb-3 sm:pb-4 pointer-events-none"
+      className="fixed left-0 right-0 bottom-0 z-[60] flex justify-center px-3 sm:px-4 pb-16 sm:pb-6 pointer-events-none"
       role="dialog"
       aria-modal="false"
     >

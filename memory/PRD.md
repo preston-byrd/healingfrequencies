@@ -182,6 +182,17 @@
   - Live curl-verified: heard:true → 0 dB, heard:false → +6 dB, clamp ±9, skip stub, DELETE, 400 on empty, 401 unauth. Frontend smoke-verified: modal walk through all 4 steps, SVG chart renders with 9 bars, results text contains *"4 kHz — boosted by 6.0 dB"* lines.
   - Testing iteration 38 — **10/10 backend + 13/13 frontend** all PASS. Backend covers GET null, POST real bands w/ gain_db, POST skip stub, POST 400, 401 unauth, DELETE 200, out-of-range freq drop. Frontend covers auto-open on null profile, 4-step walk, band sequence, SVG chart, results text shows +6 dB lines, redo resets to 60 Hz, skip persists + prevents auto-reopen, manual header open, regression on all 7 header buttons.
 
+- **Onboarding Transition Strategy (iter 39)** (Feb 2026): replaces the cold "auto-open calibration on first login" with a guided, calm-state transition that runs 30 s after the user accepts an AI Companion suggestion.
+  - **AIAgentSheet** dispatches a `sf:agent:suggestion-taken` window event whenever the user taps any suggestion card. Includes the chosen `{kind, label}` detail.
+  - **Dashboard** listens for that event and starts a 30-second timer. At T+30s:
+    1. Runs `detectHeadphones()` — best-effort `navigator.mediaDevices.enumerateDevices()` heuristic (heard outputs count > 1 OR label matches `headphone|airpod|earpod|earbud|head-set|bluetooth|bt-audio|beats|sony-wh|jbl-tune|powerbeats`).
+    2. Layers a soft uncalibrated **432 Hz baseline tone** via the new `audioEngine.setBaseline(hz, volume)` method (independent parallel oscillator, slow 1.5 s swell, safety-capped to 0.25 volume).
+    3. Slides up `OnboardingTransitionCard` with conditional copy — guidance ("Let's slow things down" with/without "Pop in your headphones") + pivot ("To unlock the full therapeutic power…") + `[Start 30-Sec Calibration]` / `[Skip for Now]`.
+  - **Copy adapts** when the user is already calibrated → pivot reads *"Want to fine-tune your hearing profile?"* + button text becomes *"Recalibrate (30 s)"* / *"Not now"*. Card still appears on every login (per user spec) so the calibration ritual is always one tap away.
+  - **Tapping Start** opens the existing 4-step `CalibrationModal`; baseline tone continues underneath the calibration test tones (test tones bypass the chain so the measurement remains accurate). **Skip/X** dismisses the card and fades the baseline to 0.
+  - **Removed** the auto-open of CalibrationModal on first dashboard mount. The Ear-icon header button remains for on-demand access at any time.
+  - Testing iteration 39 — **~95% pass (12/13 verified, 1 design tweak)**. Verified end-to-end on the not-yet-calibrated / no-headphones branch: timing, exact copy match for guidance & pivot & button labels, Skip dismissal, login re-trigger, no auto-open regression, all 7 header buttons intact, no JS console errors during baseline-tone teardown. Bottom padding bumped from `pb-3 sm:pb-4` → `pb-16 sm:pb-6` to clear the Made-with-Emergent badge on shorter viewports.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
