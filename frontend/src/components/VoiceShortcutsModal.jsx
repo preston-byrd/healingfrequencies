@@ -79,21 +79,29 @@ export default function VoiceShortcutsModal({ open, onClose }) {
                 Wire up one Shortcut per preset. After that, just say <span className="text-[#C4A67A]">&ldquo;Hey Siri, play my sleep frequency&rdquo;</span> with the phone face-down on the nightstand.
               </p>
               <ol className="text-sm space-y-2.5 text-[#E8E3D9]/85">
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">1</span>
-                  Open the <strong className="text-[#C4A67A]">Shortcuts</strong> app on iPhone &rarr; tap <strong>+</strong> to create a new shortcut.
+                  <div className="flex-1 leading-relaxed">
+                    Open the <strong className="text-[#C4A67A]">Shortcuts</strong> app on iPhone &rarr; tap <strong>+</strong> to create a new shortcut.
+                  </div>
                 </li>
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">2</span>
-                  Search for <strong>&ldquo;Open URL&rdquo;</strong> and add that action. Paste one of the preset URLs below into the URL field.
+                  <div className="flex-1 leading-relaxed">
+                    Search for <strong>&ldquo;Open URL&rdquo;</strong> and add that action. Paste one of the preset URLs below into the URL field.
+                  </div>
                 </li>
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">3</span>
-                  Tap <strong className="text-[#C4A67A]">Add to Siri</strong> (or the &ldquo;Settings&rdquo; icon &rarr; Add to Siri), then record your trigger phrase (e.g. <em>&ldquo;play my sleep frequency&rdquo;</em>).
+                  <div className="flex-1 leading-relaxed">
+                    Tap <strong className="text-[#C4A67A]">Add to Siri</strong> (or the &ldquo;Settings&rdquo; icon &rarr; Add to Siri), then record your trigger phrase (e.g. <em>&ldquo;play my sleep frequency&rdquo;</em>).
+                  </div>
                 </li>
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">4</span>
-                  Done. Saying the phrase will open Solarisound and the session will start. Tip: install the app to your Home Screen first for the smoothest experience.
+                  <div className="flex-1 leading-relaxed">
+                    Done. Saying the phrase will open Solarisound and the session will start. Tip: install the app to your Home Screen first for the smoothest experience.
+                  </div>
                 </li>
               </ol>
             </div>
@@ -105,21 +113,29 @@ export default function VoiceShortcutsModal({ open, onClose }) {
                 Wire up one Routine per preset in Google Assistant. After that, just say <span className="text-[#C4A67A]">&ldquo;Hey Google, play my sleep frequency&rdquo;</span>.
               </p>
               <ol className="text-sm space-y-2.5 text-[#E8E3D9]/85">
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">1</span>
-                  Open the <strong className="text-[#C4A67A]">Google Home</strong> app &rarr; tap <strong>Routines</strong> &rarr; <strong>+ New</strong>.
+                  <div className="flex-1 leading-relaxed">
+                    Open the <strong className="text-[#C4A67A]">Google Home</strong> app &rarr; tap <strong>Routines</strong> &rarr; <strong>+ New</strong>.
+                  </div>
                 </li>
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">2</span>
-                  Under <strong>Starter</strong>, add <strong>&ldquo;When I say something&rdquo;</strong> and enter your phrase (e.g. <em>&ldquo;play my sleep frequency&rdquo;</em>).
+                  <div className="flex-1 leading-relaxed">
+                    Under <strong>Starter</strong>, add <strong>&ldquo;When I say something&rdquo;</strong> and enter your phrase (e.g. <em>&ldquo;play my sleep frequency&rdquo;</em>).
+                  </div>
                 </li>
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">3</span>
-                  Under <strong>Actions</strong>, choose <strong>&ldquo;Try adding your own&rdquo;</strong> and enter <code className="text-[11px] bg-black/40 px-1 py-0.5 rounded">Open</code> followed by one of the URLs below.
+                  <div className="flex-1 leading-relaxed">
+                    Under <strong>Actions</strong>, choose <strong>&ldquo;Try adding your own&rdquo;</strong> and enter <code className="text-[11px] bg-black/40 px-1 py-0.5 rounded">Open</code> followed by one of the URLs below.
+                  </div>
                 </li>
-                <li className="flex items-start gap-2">
+                <li className="flex items-start gap-2.5">
                   <span className="shrink-0 w-5 h-5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC] text-[11px] font-mono flex items-center justify-center mt-0.5">4</span>
-                  Save. Saying the phrase will open Solarisound in your browser and the session will start automatically.
+                  <div className="flex-1 leading-relaxed">
+                    Save. Saying the phrase will open Solarisound in your browser and the session will start automatically.
+                  </div>
                 </li>
               </ol>
             </div>
