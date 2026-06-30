@@ -1,0 +1,31 @@
+{
+  "summary": "iter38 Equalizer Calibration / hearing-profile feature fully verified. Backend: 10/10 pytest cases pass (GET null, POST with bands incl. gain_db computation, POST skip stub, POST empty body 400, no-auth 401, DELETE 200+null, out-of-range freq silently dropped with canonical fallback, agent chat+checkin regression). Frontend: full UI flow verified end-to-end — auto-open on null profile, 4-step modal walk (welcome→volume→test→results), correct band sequence (60/125/250/500/1k/2k/4k/8k/12k), 9-bar SVG chart, results text shows '+6.0 dB' boosts for unheard bands, redo resets to 60 Hz, skip persists stub and prevents auto-reopen on reload, manual header Ear-icon open works, all 7 header buttons regression-clean.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_hearing_profile.py",
+    "/app/test_reports/pytest/iter38_hearing_profile.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "CalibrationModal cal-heard / cal-not-heard buttons are disabled while playing (`disabled={playing}`) — UX is fine, but Playwright/E2E tests must wait for the disabled attribute to drop before clicking (my first run failed clicking too fast). Worth noting in the testing-context file for future agents.",
+    "server.py /me/hearing-profile POST silently drops out-of-range bands (freq>20kHz or <20Hz). Behavior is by-design and documented in the request, but consider logging at warn level so we can detect bad clients in production.",
+    "CalibrationModal.jsx: handleSkip() persists via /me/hearing-profile but does not handle a backend failure beyond a console.warn — modal still closes. Low risk because the modal can be reopened from the header, but a toast would help users know the skip didn't save.",
+    "Dashboard.jsx auto-open delay is hard-coded 1.2s (then 2.5s observed including fetch). Acceptable but could be debounced to suppress if user is mid-action.",
+    "Pre-existing: Dashboard.jsx > 1500 lines — header should be split. (Reported in iter36/37 as well.)"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_hearing_profile.py (new)"
+  ],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (all 13 requested cases)"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 — login OK",
+  "seed_data_creation": "DELETE /api/me/hearing-profile invoked before each fresh-flow scenario to clear the admin's prior skip stub.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter38 calibration feature is fully verified. Two gotchas for future agents: (1) Backend tests in test_hearing_profile.py MUST be run with -n 0 (serial) because pytest-xdist parallel workers all use the same admin account and the fresh_profile fixture would race. The pytest.ini default parallelism caused 2/10 to fail spuriously on first run; serial run was clean. (2) Frontend: cal-heard / cal-not-heard are disabled during ~2.5s tone playback; tests must poll for the disabled attribute to drop before clicking each band, otherwise the React onClick is suppressed by the native disabled attr. The results step contains lines like '· 60 Hz — boosted by 6.0 dB' which is a great assertion target for verifying the EQ payload reached the server and was returned with gain_db=6.0 for unheard bands. audioEngine is NOT exposed on window — verify EQ via the results text instead.",
+  "rca of the issue": "N/A — no bugs found."
+}

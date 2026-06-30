@@ -745,6 +745,109 @@ async def update_my_prefs(body: PrefsIn, user: dict = Depends(get_current_user))
     return {"ok": True}
 
 
+# --- Hearing profile (equalizer calibration) ---------------------------------
+# Audiogram-style threshold curve captured during a 30s onboarding test. The
+# frontend audio engine reads it back and inserts a chain of peaking biquad
+# filters between the master gain and ctx.destination so the user's Solfeggio
+# tones / binaural beats are equalised for their ears + their hardware.
+#
+# Storage: stored on the user document under `hearing_profile`. Single object,
+# never an array; replaced wholesale on each calibration submission.
+#
+# Schema:
+#   {
+#     bands: [{freq: int, heard: bool, gain_db: float}, ...],
+#     test_level_db: float,     # the test gain used during calibration
+#     calibrated_at: iso8601 str,
+#     skipped: bool             # true if the user chose to skip onboarding
+#   }
+_CAL_BANDS = (60, 125, 250, 500, 1000, 2000, 4000, 8000, 12000)
+_CAL_TEST_LEVEL_DB = -30.0  # how soft each test tone played
+_CAL_BOOST_DB = 6.0          # gain applied to bands the user couldn't hear
+_CAL_MAX_DB = 9.0            # clamp for safety / clipping prevention
+
+
+class HearingProfileIn(BaseModel):
+    # bands is a list of {freq:int, heard:bool} dicts. We validate per-row in
+    # the endpoint so a single malformed row doesn't 422 the whole submission.
+    bands: Optional[list] = Field(default=None)
+    skipped: Optional[bool] = Field(default=None)
+
+
+def _compute_band_gain_db(heard: bool) -> float:
+    """Map heard/unheard at the standard test level into a peaking-filter gain.
+    Heard bands stay flat (0 dB) — we never dampen the frequencies the user
+    can hear so playback never gets quieter than baseline. Unheard bands get
+    a fixed +6 dB boost, clamped to ±9 dB. Future versions can refine with
+    multiple test levels per band for a finer audiogram."""
+    g = 0.0 if heard else _CAL_BOOST_DB
+    return max(-_CAL_MAX_DB, min(_CAL_MAX_DB, g))
+
+
+@api.get("/me/hearing-profile")
+async def get_hearing_profile(user: dict = Depends(get_current_user)):
+    """Return the user's calibration profile or null. The frontend uses this
+    to decide whether to run the first-time calibration flow on dashboard
+    mount and to apply the EQ chain to the audio engine."""
+    full = await db.users.find_one({"id": user["id"]}, {"_id": 0, "hearing_profile": 1}) or {}
+    return full.get("hearing_profile") or None
+
+
+@api.post("/me/hearing-profile")
+async def save_hearing_profile(body: HearingProfileIn, user: dict = Depends(get_current_user)):
+    """Persist the user's calibration. Two valid shapes:
+      1) {bands: [...]}    — save a real calibration. We compute gain_db
+                              server-side so a malicious client can't ask for
+                              +60 dB boosts.
+      2) {skipped: true}   — user dismissed onboarding. We store a stub so
+                              the frontend doesn't re-prompt every session.
+    """
+    if body.skipped:
+        # Minimal skip stub — no bands, just a flag + timestamp.
+        stub = {
+            "bands": [],
+            "test_level_db": _CAL_TEST_LEVEL_DB,
+            "calibrated_at": datetime.now(timezone.utc).isoformat(),
+            "skipped": True,
+        }
+        await db.users.update_one({"id": user["id"]}, {"$set": {"hearing_profile": stub}})
+        return stub
+
+    if not body.bands:
+        raise HTTPException(status_code=400, detail="bands required")
+    # Restrict to the canonical _CAL_BANDS list so the EQ chain is always the
+    # same shape, regardless of what the client submitted.
+    by_freq: dict = {}
+    for b in body.bands:
+        try:
+            f = int(b.get("freq") if isinstance(b, dict) else getattr(b, "freq"))
+            heard = bool(b.get("heard") if isinstance(b, dict) else getattr(b, "heard"))
+            if 20 <= f <= 20000:
+                by_freq[f] = heard
+        except Exception:
+            continue
+    record_bands: list = []
+    for f in _CAL_BANDS:
+        heard = bool(by_freq.get(f, True))  # default to "heard" if missing
+        record_bands.append({"freq": f, "heard": heard, "gain_db": _compute_band_gain_db(heard)})
+    profile = {
+        "bands": record_bands,
+        "test_level_db": _CAL_TEST_LEVEL_DB,
+        "calibrated_at": datetime.now(timezone.utc).isoformat(),
+        "skipped": False,
+    }
+    await db.users.update_one({"id": user["id"]}, {"$set": {"hearing_profile": profile}})
+    return profile
+
+
+@api.delete("/me/hearing-profile")
+async def delete_hearing_profile(user: dict = Depends(get_current_user)):
+    """Reset the user's calibration. Used by the 'Recalibrate' button in
+    Account → Hearing profile."""
+    await db.users.update_one({"id": user["id"]}, {"$unset": {"hearing_profile": ""}})
+    return {"ok": True}
+
+
 # --- AI Frequency Recommendation (Pro) ---------------------------------------
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
 

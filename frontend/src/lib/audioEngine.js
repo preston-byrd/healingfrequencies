@@ -105,8 +105,129 @@ class AudioEngine {
       this._buildBackgroundSink();
       this._buildAnalyser();
       this._prebuildAllAmbient();
+      // Re-apply any persisted hearing profile from prior session AFTER the
+      // background sink + analyser are wired, so the EQ insertion knows about
+      // every downstream destination it needs to detour through the chain.
+      if (this._pendingProfile) {
+        const p = this._pendingProfile;
+        this._pendingProfile = null;
+        this._applyEqChain(p);
+      }
     }
     return this.ctx;
+  }
+
+  // ---- Hearing-profile EQ chain ------------------------------------------
+  // Inserts a series of peaking BiquadFilterNodes between the master gain
+  // and ctx.destination (+ streamDest + analyser). The chain compensates
+  // for a user's audiogram: bands they couldn't hear during onboarding get
+  // a +6 dB peaking boost; bands they heard stay flat. Q is moderate (1.4)
+  // so neighbouring bands blend smoothly into a continuous response curve.
+  //
+  // setHearingProfile(profile|null) is idempotent — calling with null tears
+  // the chain down and reconnects master directly to all destinations.
+  // Safe to call before _ensureCtx (deferred via _pendingProfile).
+  setHearingProfile(profile) {
+    if (!this.ctx) {
+      // ctx not built yet — defer until first start(). _ensureCtx will pick
+      // this up after wiring sinks. Avoids creating an unused AudioContext.
+      this._pendingProfile = profile;
+      this._lastProfile = profile;
+      return;
+    }
+    this._lastProfile = profile;
+    this._applyEqChain(profile);
+  }
+
+  _applyEqChain(profile) {
+    // Tear down any existing chain first so re-calibration doesn't stack
+    // multiple EQs on top of each other.
+    this._clearEqChain();
+    if (!profile || !Array.isArray(profile.bands) || profile.bands.length === 0) return;
+
+    const ctx = this.ctx;
+    try {
+      const filters = [];
+      profile.bands.forEach((b) => {
+        const gainDb = Number(b.gain_db) || 0;
+        // Skip flat bands — saves CPU on a typical "heard everything" profile.
+        if (Math.abs(gainDb) < 0.05) return;
+        const f = ctx.createBiquadFilter();
+        f.type = 'peaking';
+        f.frequency.value = b.freq;
+        f.Q.value = 1.4;
+        f.gain.value = Math.max(-9, Math.min(9, gainDb));
+        filters.push(f);
+      });
+      if (filters.length === 0) return; // entirely-flat profile = no-op
+
+      // Disconnect master from every downstream destination, route through
+      // the filter chain, then reconnect to each destination.
+      try { this.master.disconnect(); } catch (e) { /* not connected yet */ }
+      this.master.connect(filters[0]);
+      for (let i = 0; i < filters.length - 1; i++) {
+        filters[i].connect(filters[i + 1]);
+      }
+      const tail = filters[filters.length - 1];
+      tail.connect(ctx.destination);
+      if (this._streamDest) {
+        try { tail.connect(this._streamDest); } catch (e) { _warn('audio', e); }
+      }
+      if (this.analyser) {
+        // Re-attach the analyser to the master so the visualizer measures the
+        // raw mix (without the personal EQ boost biasing the amplitude).
+        try { this.master.connect(this.analyser); } catch (e) { _warn('audio', e); }
+      }
+      this._eqFilters = filters;
+    } catch (e) {
+      _warn('audio', e);
+    }
+  }
+
+  _clearEqChain() {
+    if (!this._eqFilters || this._eqFilters.length === 0) return;
+    try { this.master.disconnect(); } catch (e) { /* */ }
+    this._eqFilters.forEach((f) => { try { f.disconnect(); } catch (e) { /* */ } });
+    this._eqFilters = [];
+    // Restore the canonical direct routing.
+    try { this.master.connect(this.ctx.destination); } catch (e) { _warn('audio', e); }
+    if (this._streamDest) {
+      try { this.master.connect(this._streamDest); } catch (e) { _warn('audio', e); }
+    }
+    if (this.analyser) {
+      try { this.master.connect(this.analyser); } catch (e) { _warn('audio', e); }
+    }
+  }
+
+  // One-shot calibration tone. Plays `freq` for `durationMs` at `gainDb`
+  // relative to unity (so -30 means 0.0316 amplitude). Returns a promise
+  // that resolves when the tone has finished. Used by the calibration
+  // modal to test each audiogram band. Bypasses the EQ chain so the test
+  // measures the user's bare hearing, not a self-amplified loop.
+  async playCalibrationTone(freq, durationMs = 2000, gainDb = -30) {
+    await this._ensureCtx();
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = Math.max(20, Math.min(20000, Number(freq) || 1000));
+    const g = ctx.createGain();
+    g.gain.value = 0;
+    osc.connect(g).connect(ctx.destination); // direct → bypass EQ + master
+    const targetLinear = Math.pow(10, gainDb / 20);
+    const fadeMs = 80;
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(targetLinear, now + fadeMs / 1000);
+    g.gain.setValueAtTime(targetLinear, now + (durationMs - fadeMs) / 1000);
+    g.gain.linearRampToValueAtTime(0, now + durationMs / 1000);
+    osc.start(now);
+    osc.stop(now + (durationMs / 1000) + 0.05);
+    return new Promise((resolve) => {
+      osc.onended = () => {
+        try { osc.disconnect(); g.disconnect(); } catch (e) { /* */ }
+        resolve();
+      };
+    });
   }
 
   // Real-time AnalyserNode tapped off master gain. Drives the cymatics

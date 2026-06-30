@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -13,6 +13,7 @@ import usePWAInstall from '@/lib/usePWAInstall';
 import HapticsModal from '@/components/HapticsModal';
 import haptic from '@/lib/hapticEngine';
 import VoiceShortcutsModal from '@/components/VoiceShortcutsModal';
+import CalibrationModal from '@/components/CalibrationModal';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -339,6 +340,32 @@ export default function Dashboard({ onOpenAccount }) {
   // devices (iOS Safari / iOS standalone) so audio is never blocked.
   const [hapticsOpen, setHapticsOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  // ---- Hearing-profile calibration --------------------------------------
+  // On mount we fetch the user's saved profile (if any) and immediately
+  // apply it to the audio engine so every subsequent tone goes through the
+  // personal EQ chain. If no profile exists AND the user hasn't skipped,
+  // we open the calibration modal as a one-time onboarding step.
+  const [calibrationOpen, setCalibrationOpen] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get('/me/hearing-profile');
+        if (cancelled) return;
+        if (data && data.bands && !data.skipped) {
+          audioEngine.setHearingProfile(data);
+        } else if (!data) {
+          // Brand-new user, never calibrated, never skipped — auto-prompt.
+          // Delay a beat so it doesn't fight the AI Companion auto-open.
+          setTimeout(() => { if (!cancelled) setCalibrationOpen(true); }, 1200);
+        }
+      } catch (e) {
+        // 404 / network — don't auto-prompt; user can launch from header.
+        console.warn('[Dashboard] hearing-profile fetch failed', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => {
     haptic.attachToAudio();
     return () => { haptic.stop(); };
@@ -795,6 +822,15 @@ export default function Dashboard({ onOpenAccount }) {
                   aria-label="Voice Shortcuts"
                 >
                   <Mic size={16} />
+                </button>
+                <button
+                  data-testid="calibration-button"
+                  onClick={() => setCalibrationOpen(true)}
+                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+                  title="Equalizer Calibration"
+                  aria-label="Equalizer Calibration"
+                >
+                  <Ear size={16} />
                 </button>
                 <button
                   data-testid="account-button"
@@ -1556,6 +1592,16 @@ export default function Dashboard({ onOpenAccount }) {
       {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus
           copyable deep-link URLs (/play?preset=…) for hands-free playback. */}
       <VoiceShortcutsModal open={voiceOpen} onClose={() => setVoiceOpen(false)} />
+
+      {/* Equalizer Calibration — 30s onboarding hearing test that builds a
+          per-user EQ profile (peaking biquads applied between master gain
+          and ctx.destination). Auto-opens once on first login; manually
+          accessible from the header Ear icon at any time. */}
+      <CalibrationModal
+        open={calibrationOpen}
+        onClose={() => setCalibrationOpen(false)}
+        onComplete={() => { /* engine already applied profile inside the modal */ }}
+      />
     </div>
   );
 }
