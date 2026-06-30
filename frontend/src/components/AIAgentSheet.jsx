@@ -152,7 +152,12 @@ export default function AIAgentSheet({
           audioEngine.setWaveform('sine');
         }
         if (s.soundscape) {
-          audioEngine.setAmbient(s.soundscape, 0.5);
+          // Honour an LLM-supplied volume on the haptic_combo layer when
+          // provided (same range as the regular soundscape kind: 0..1);
+          // default 0.5 keeps the carrier audible without overpowering the
+          // tone or the haptic.
+          const vol = typeof s.volume === 'number' ? Math.max(0, Math.min(1, s.volume)) : 0.5;
+          audioEngine.setAmbient(s.soundscape, vol);
         }
         // Sleep durations we know about (30/60/120/240/480 min) route through
         // Sleep Mode so the timer + fade + Pro gating apply. Shorter durations

@@ -1120,6 +1120,12 @@ def _validate_agent_reply(raw: dict, is_pro: bool) -> dict:
                     sc_s = str(sc).lower()
                     if sc_s in ALLOWED_AMBIENT:
                         entry["soundscape"] = sc_s
+                        # Optional volume for the soundscape layer (0..1).
+                        try:
+                            v = float(item.get("volume", 0.5))
+                            entry["volume"] = max(0.0, min(1.0, v))
+                        except Exception:
+                            entry["volume"] = 0.5
                 # Optional session length (minutes).
                 dm = item.get("duration_min")
                 if dm is not None:
@@ -1270,6 +1276,11 @@ async def agent_checkin(body: AgentCheckinIn, user: dict = Depends(get_current_u
             sc_s = str(sc).lower()
             if sc_s in ALLOWED_AMBIENT:
                 record_sug["soundscape"] = sc_s
+                try:
+                    v = float(sug.get("volume", 0.5))
+                    record_sug["volume"] = max(0.0, min(1.0, v))
+                except Exception:
+                    record_sug["volume"] = 0.5
         dm = sug.get("duration_min")
         if dm is not None:
             try:
