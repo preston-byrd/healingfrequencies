@@ -863,7 +863,12 @@ export default function Dashboard({ onOpenAccount }) {
 
         {/* LEFT — Solfeggio + Saved */}
         <aside className="w-full lg:w-80 flex flex-col gap-4 lg:gap-6 lg:h-full lg:overflow-y-auto custom-scrollbar">
-          <div className="glass p-6">
+          {/* Header card uses `z-30` so the Account dropdown menu (rendered
+              inside this card with z-50) escapes the stacking context of
+              the sibling Solfeggio Presets card below — otherwise the
+              dropdown renders BEHIND that card because the `glass` blur on
+              each sibling creates its own stacking context. */}
+          <div className="glass p-6 relative z-30">
             <div className="flex items-center justify-between mb-1">
               <div className="label-tiny">Healing Frequencies</div>
               <div className="flex items-center gap-3">
@@ -891,7 +896,7 @@ export default function Dashboard({ onOpenAccount }) {
                     <div
                       data-testid="account-menu"
                       role="menu"
-                      className="absolute right-0 mt-2 w-56 z-50 bg-[#0E1F18]/97 backdrop-blur-md border border-[#5C9E8C]/25 rounded-xl shadow-2xl py-1.5 overflow-hidden"
+                      className="absolute right-0 mt-2 w-56 z-50 bg-[#0A1612] border border-[#5C9E8C]/40 rounded-xl shadow-[0_18px_40px_-8px_rgba(0,0,0,0.85)] py-1.5 overflow-hidden"
                     >
                       <button
                         data-testid="account-menu-account"
