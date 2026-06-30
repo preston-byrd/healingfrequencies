@@ -959,6 +959,17 @@ Your reply MUST be valid JSON only — no prose outside the JSON, no code fences
       "kind": "ai_prescription", // launches the full AI Prescription with this intent
       "label": "Custom prescription for slowing down",
       "intent": "anxious, need to slow my nervous system down"
+    },
+    {
+      "kind": "haptic_combo",   // one-tap card that bundles a haptic pattern
+                                 // with an optional carrier sound + duration.
+                                 // Pair with sleep/anxiety/focus prompts when
+                                 // the user might benefit from FEELING the pacing.
+      "label": "Heartbeat haptic + 396 Hz · 30min",
+      "pattern": "heartbeat",    // one of: auto, heartbeat, breath478, frequency
+      "frequency": 396,          // optional Hz carrier (1-1200)
+      "soundscape": "rain",      // optional ambient layer (see soundscape kind above)
+      "duration_min": 30         // optional session length: 5, 10, 15, 20, 30, 45, 60, 90
     }
   ]
 }
@@ -970,6 +981,9 @@ Rules:
 - Match or gently shift their state — calm for anxious, focus for restless, warmth for low-energy.
 - Sleep Mode is Pro — only include it if the user explicitly mentions sleep/night/rest.
 - AI Prescription is Pro — include it when their need is complex/specific.
+- Haptic combos pair well with sleep ("can't sleep" → heartbeat + 396 Hz or breath478 + 432 Hz),
+  anxiety ("racing thoughts" → breath478 + 528 Hz), and focus ("scattered" → frequency at 10 Hz alpha).
+  Use sparingly — at most ONE haptic_combo per suggestion set, and never the only option.
 - Solfeggio frequencies: 174 (grounding), 285 (regen), 396 (release fear), 417 (change), 432 (calm), 528 (heart), 639 (connection), 741 (clarity), 852 (intuition), 963 (unity).
 - Brainwaves: 2 (Delta/sleep), 6 (Theta/meditation), 7.83 (Schumann), 10 (Alpha/relaxed), 40 (Gamma/focus).
 """
@@ -1006,10 +1020,24 @@ def _summarise_suggestion(s: dict) -> str:
         return f"sleep mode {s.get('duration_min') or '?'}min ({label})"
     if kind == "ai_prescription":
         return f"AI prescription ({label})"
+    if kind == "haptic_combo":
+        bits: list = []
+        if s.get("pattern"):
+            bits.append(str(s.get("pattern")))
+        if s.get("frequency"):
+            bits.append(f"{s.get('frequency')} Hz")
+        if s.get("soundscape"):
+            bits.append(str(s.get("soundscape")))
+        if s.get("duration_min"):
+            bits.append(f"{s.get('duration_min')}min")
+        body = " + ".join(bits) if bits else label
+        return f"haptic combo {body} ({label})" if bits else f"haptic combo ({label})"
     return label or kind
 
 
-_AGENT_KINDS = {"preset", "soundscape", "sleep", "ai_prescription"}
+_AGENT_KINDS = {"preset", "soundscape", "sleep", "ai_prescription", "haptic_combo"}
+_HAPTIC_PATTERNS = {"auto", "heartbeat", "breath478", "frequency"}
+_HAPTIC_DURATIONS = (5, 10, 15, 20, 30, 45, 60, 90)
 
 
 def _validate_agent_reply(raw: dict, is_pro: bool) -> dict:
@@ -1067,6 +1095,41 @@ def _validate_agent_reply(raw: dict, is_pro: bool) -> dict:
                     continue
                 entry["intent"] = intent
                 entry["pro_only"] = not is_pro
+            elif kind == "haptic_combo":
+                # Bundled one-tap card: vibration pattern + optional carrier
+                # frequency / soundscape / session length. The combo is FREE
+                # (no Pro gating) because Pulsing Haptics itself is a free
+                # accessibility feature; if the LLM supplies an inner
+                # frequency/soundscape they must validate as the free kinds do.
+                pat = str(item.get("pattern") or "auto").lower()
+                if pat not in _HAPTIC_PATTERNS:
+                    pat = "auto"
+                entry["pattern"] = pat
+                # Optional carrier frequency.
+                fhz = item.get("frequency")
+                if fhz is not None:
+                    try:
+                        f = float(fhz)
+                        if 1 <= f <= 1200:
+                            entry["frequency"] = f
+                    except Exception:
+                        pass
+                # Optional soundscape layer.
+                sc = item.get("soundscape")
+                if sc:
+                    sc_s = str(sc).lower()
+                    if sc_s in ALLOWED_AMBIENT:
+                        entry["soundscape"] = sc_s
+                # Optional session length (minutes).
+                dm = item.get("duration_min")
+                if dm is not None:
+                    try:
+                        d = int(dm)
+                        if d in _HAPTIC_DURATIONS:
+                            entry["duration_min"] = d
+                    except Exception:
+                        pass
+                entry["pro_only"] = False
             out.append(entry)
     return {"message": msg, "suggestions": out}
 
@@ -1191,6 +1254,30 @@ async def agent_checkin(body: AgentCheckinIn, user: dict = Depends(get_current_u
         record_sug["duration_min"] = dm if dm in (30, 60, 120, 240, 480) else 30
     elif kind == "ai_prescription":
         record_sug["intent"] = str(sug.get("intent") or "")[:300]
+    elif kind == "haptic_combo":
+        pat = str(sug.get("pattern") or "auto").lower()
+        record_sug["pattern"] = pat if pat in _HAPTIC_PATTERNS else "auto"
+        fhz = sug.get("frequency")
+        if fhz is not None:
+            try:
+                f = float(fhz)
+                if 1 <= f <= 1200:
+                    record_sug["frequency"] = f
+            except Exception:
+                pass
+        sc = sug.get("soundscape")
+        if sc:
+            sc_s = str(sc).lower()
+            if sc_s in ALLOWED_AMBIENT:
+                record_sug["soundscape"] = sc_s
+        dm = sug.get("duration_min")
+        if dm is not None:
+            try:
+                d = int(dm)
+                if d in _HAPTIC_DURATIONS:
+                    record_sug["duration_min"] = d
+            except Exception:
+                pass
 
     doc = {
         "id": uuid.uuid4().hex,

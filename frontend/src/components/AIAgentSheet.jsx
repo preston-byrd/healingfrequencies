@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Sparkles, Send, X, Lock, Play } from 'lucide-react';
+import { Sparkles, Send, X, Lock, Play, HeartPulse } from 'lucide-react';
 import api from '@/lib/api';
 import audioEngine from '@/lib/audioEngine';
+import haptic from '@/lib/hapticEngine';
 
 /**
  * Conversational check-in / companion sheet. Now a CONTROLLED component:
@@ -133,6 +134,34 @@ export default function AIAgentSheet({
         window.dispatchEvent(new CustomEvent('sf:agent:sleep', { detail: { duration_min: s.duration_min } }));
       } else if (s.kind === 'ai_prescription') {
         onTriggerAIPrescription && onTriggerAIPrescription(s.intent);
+      } else if (s.kind === 'haptic_combo') {
+        // One-tap card: turn haptics on with the chosen pattern, then lay
+        // down the (optional) carrier sound underneath, then either start a
+        // plain session or hand off to Sleep Mode if duration_min is one of
+        // the sleep durations. Auto-enables haptics for the user when they
+        // accept this combo — the modal toggle is the manual surface.
+        haptic.setEnabled(true);
+        haptic.setPattern(s.pattern || 'auto');
+        // Reset audio state so the combo lands on a known baseline.
+        audioEngine.setBinaural(0);
+        audioEngine.setIsochronic(0);
+        ['rain', 'ocean', 'forest', 'wind', 'crickets', 'bowls', 'brown', 'white']
+          .forEach((k) => audioEngine.setAmbient(k, 0));
+        if (typeof s.frequency === 'number' && s.frequency > 0) {
+          audioEngine.setFrequency(s.frequency);
+          audioEngine.setWaveform('sine');
+        }
+        if (s.soundscape) {
+          audioEngine.setAmbient(s.soundscape, 0.5);
+        }
+        // Sleep durations we know about (30/60/120/240/480 min) route through
+        // Sleep Mode so the timer + fade + Pro gating apply. Shorter durations
+        // just start the session — Smart Fade will still taper the last 5 min.
+        if (s.duration_min && [30, 60, 120, 240, 480].includes(s.duration_min)) {
+          window.dispatchEvent(new CustomEvent('sf:agent:sleep', { detail: { duration_min: s.duration_min } }));
+        } else if (!audioEngine.playing) {
+          await audioEngine.start();
+        }
       }
     } catch (e) {
       console.warn('[AIAgentSheet] applySuggestion failed', e);
@@ -201,7 +230,11 @@ export default function AIAgentSheet({
                       <Play
                         size={14}
                         className={`shrink-0 ${s.pro_only && !isPro ? 'text-[#8A9A92]' : 'text-[#72C2AC]'}`}
+                        style={s.kind === 'haptic_combo' ? { display: 'none' } : undefined}
                       />
+                      {s.kind === 'haptic_combo' && (
+                        <HeartPulse size={14} className="shrink-0 text-[#C4A67A]" />
+                      )}
                       <div className="flex-1 min-w-0">
                         <div className="text-[#E8E3D9] text-sm truncate">{s.label}</div>
                         <div className="text-[10px] text-[#8A9A92] uppercase tracking-wider font-mono">
@@ -209,6 +242,14 @@ export default function AIAgentSheet({
                           {s.kind === 'preset' && s.frequency && ` · ${s.frequency} Hz`}
                           {s.kind === 'soundscape' && s.soundscape && ` · ${s.soundscape}`}
                           {s.kind === 'sleep' && s.duration_min && ` · ${s.duration_min >= 60 ? `${s.duration_min / 60}h` : `${s.duration_min}m`}`}
+                          {s.kind === 'haptic_combo' && (
+                            <>
+                              {s.pattern && ` · ${s.pattern}`}
+                              {s.frequency && ` · ${s.frequency} Hz`}
+                              {s.soundscape && ` · ${s.soundscape}`}
+                              {s.duration_min && ` · ${s.duration_min >= 60 ? `${s.duration_min / 60}h` : `${s.duration_min}m`}`}
+                            </>
+                          )}
                         </div>
                       </div>
                       {s.pro_only && !isPro && (
