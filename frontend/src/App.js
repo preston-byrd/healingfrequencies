@@ -6,6 +6,7 @@ import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
 import AccountDashboard from '@/components/AccountDashboard';
 import LandingPage from '@/components/LandingPage';
+import PlayDeepLink from '@/components/PlayDeepLink';
 
 const LANDING_DISMISSED_KEY = 'solarisound:landing_dismissed';
 
@@ -20,12 +21,21 @@ function Shell() {
     catch { return true; }
   });
 
+  // Voice-shortcut deep link route — /play opens the minimal player UI
+  // regardless of auth state so Siri / Google Assistant flows just work.
+  // We track this in state so the "Open full app" button can dismiss it
+  // without forcing a navigation/reload (audio engine stays alive).
+  const [deepLinkActive, setDeepLinkActive] = useState(() => {
+    return typeof window !== 'undefined' && window.location.pathname === '/play';
+  });
+
   // Auto-navigate to account when returning from Stripe checkout
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (p.get('stripe_session_id') || p.get('stripe_canceled')) {
       setShowLanding(false);
       setView('account');
+      setDeepLinkActive(false);
     }
   }, []);
 
@@ -33,6 +43,21 @@ function Shell() {
     try { sessionStorage.setItem(LANDING_DISMISSED_KEY, '1'); } catch (e) { /* private mode */ }
     setShowLanding(false);
   };
+
+  // /play route always wins — works signed-in or signed-out.
+  if (deepLinkActive) {
+    return (
+      <PlayDeepLink
+        onOpenApp={() => {
+          // Strip the /play path from the URL bar without reloading, then let
+          // the normal auth gate take over. Audio keeps playing through the
+          // audioEngine singleton.
+          try { window.history.replaceState({}, '', '/'); } catch (e) { /* noop */ }
+          setDeepLinkActive(false);
+        }}
+      />
+    );
+  }
 
   if (loading) {
     return (

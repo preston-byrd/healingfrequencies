@@ -41,6 +41,13 @@ html, body, #root {
   box-sizing: border-box;
 }
 
+/* Used by the /play deep-link landing's breathing orb — gentle scale loop
+   that mirrors a calm inhale/exhale cadence. */
+@keyframes breathe {
+  0%, 100% { transform: scale(0.92); opacity: 0.7; }
+  50%      { transform: scale(1.08); opacity: 1; }
+}
+
 body {
   margin: 0;
   font-family: 'Outfit', system-ui, sans-serif;

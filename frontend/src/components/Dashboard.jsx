@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -12,6 +12,7 @@ import InstallAppModal from '@/components/InstallAppModal';
 import usePWAInstall from '@/lib/usePWAInstall';
 import HapticsModal from '@/components/HapticsModal';
 import haptic from '@/lib/hapticEngine';
+import VoiceShortcutsModal from '@/components/VoiceShortcutsModal';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -337,6 +338,7 @@ export default function Dashboard({ onOpenAccount }) {
   // on play and stops on pause/sleep-end. Stays a no-op on unsupported
   // devices (iOS Safari / iOS standalone) so audio is never blocked.
   const [hapticsOpen, setHapticsOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   useEffect(() => {
     haptic.attachToAudio();
     return () => { haptic.stop(); };
@@ -784,6 +786,15 @@ export default function Dashboard({ onOpenAccount }) {
                   aria-label="Pulsing Haptics"
                 >
                   <HeartPulse size={16} />
+                </button>
+                <button
+                  data-testid="voice-shortcuts-button"
+                  onClick={() => setVoiceOpen(true)}
+                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+                  title="Voice Shortcuts"
+                  aria-label="Voice Shortcuts"
+                >
+                  <Mic size={16} />
                 </button>
                 <button
                   data-testid="account-button"
@@ -1541,6 +1552,10 @@ export default function Dashboard({ onOpenAccount }) {
       {/* Pulsing Haptics — optional vibration sync. Engine auto-attaches to
           audio playback on mount; this modal is just the toggle / pattern UI. */}
       <HapticsModal open={hapticsOpen} onClose={() => setHapticsOpen(false)} />
+
+      {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus
+          copyable deep-link URLs (/play?preset=…) for hands-free playback. */}
+      <VoiceShortcutsModal open={voiceOpen} onClose={() => setVoiceOpen(false)} />
     </div>
   );
 }
