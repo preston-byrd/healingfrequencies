@@ -14,6 +14,8 @@ import HapticsModal from '@/components/HapticsModal';
 import haptic from '@/lib/hapticEngine';
 import VoiceShortcutsModal from '@/components/VoiceShortcutsModal';
 import CalibrationModal from '@/components/CalibrationModal';
+import OnboardingTransitionCard from '@/components/OnboardingTransitionCard';
+import detectHeadphones from '@/lib/detectHeadphones';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -343,28 +345,85 @@ export default function Dashboard({ onOpenAccount }) {
   // ---- Hearing-profile calibration --------------------------------------
   // On mount we fetch the user's saved profile (if any) and immediately
   // apply it to the audio engine so every subsequent tone goes through the
-  // personal EQ chain. If no profile exists AND the user hasn't skipped,
-  // we open the calibration modal as a one-time onboarding step.
+  // personal EQ chain. The calibration modal is NOT auto-opened on mount —
+  // it's triggered by the OnboardingTransitionCard 30 s after the user
+  // accepts a suggestion (so they're in a calm state before the test).
   const [calibrationOpen, setCalibrationOpen] = useState(false);
+  const [hasProfile, setHasProfile] = useState(false);   // real calibration exists
+  const [otcOpen, setOtcOpen] = useState(false);
+  const [otcHeadphones, setOtcHeadphones] = useState(false);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const { data } = await api.get('/me/hearing-profile');
         if (cancelled) return;
-        if (data && data.bands && !data.skipped) {
+        if (data && data.bands && data.bands.length > 0 && !data.skipped) {
           audioEngine.setHearingProfile(data);
-        } else if (!data) {
-          // Brand-new user, never calibrated, never skipped — auto-prompt.
-          // Delay a beat so it doesn't fight the AI Companion auto-open.
-          setTimeout(() => { if (!cancelled) setCalibrationOpen(true); }, 1200);
+          setHasProfile(true);
+        } else {
+          setHasProfile(false);
         }
       } catch (e) {
-        // 404 / network — don't auto-prompt; user can launch from header.
         console.warn('[Dashboard] hearing-profile fetch failed', e);
       }
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  // ---- Onboarding transition flow ---------------------------------------
+  // Wired to the AIAgentSheet's `sf:agent:suggestion-taken` event. ~30 s
+  // after a suggestion is tapped, we layer a soft uncalibrated 432 Hz
+  // baseline tone under whatever the user is hearing, run a best-effort
+  // headphone detection, and slide up the OnboardingTransitionCard with
+  // the guidance + calibration pivot. The card is shown on EVERY login
+  // (per the user's spec) — the copy adapts when the user is already
+  // calibrated so it reads as a polite "fine-tune anytime" nudge rather
+  // than nagging.
+  const transitionTimerRef = React.useRef(null);
+  useEffect(() => {
+    const onSuggestion = () => {
+      // Reset any prior pending timer (e.g. user picked twice in a session).
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      transitionTimerRef.current = setTimeout(async () => {
+        try {
+          // Best-effort headphone detection; default false on unsupported.
+          const hp = await detectHeadphones();
+          setOtcHeadphones(!!hp);
+          // Soft uncalibrated 432 Hz baseline. Volume kept low so it sits
+          // gently under the user's chosen session.
+          try { audioEngine.setBaseline(432, 0.05); } catch (e) { /* graceful */ }
+          setOtcOpen(true);
+        } catch (e) {
+          console.warn('[Dashboard] onboarding transition failed', e);
+        }
+      }, 30000);
+    };
+    window.addEventListener('sf:agent:suggestion-taken', onSuggestion);
+    return () => {
+      window.removeEventListener('sf:agent:suggestion-taken', onSuggestion);
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+    };
+  }, []);
+
+  const dismissTransitionCard = useCallback(() => {
+    setOtcOpen(false);
+    // Fade out the baseline tone so the user is left with their original
+    // session. Engine handles the fade internally.
+    try { audioEngine.setBaseline(null); } catch (e) { /* */ }
+  }, []);
+
+  const startCalibrationFromTransition = useCallback(() => {
+    setOtcOpen(false);
+    // Leave the baseline running while the modal is open — it's part of
+    // the calm-cooperative state the user is in. Modal close handler will
+    // tear it down.
+    setCalibrationOpen(true);
+  }, []);
+
+  const closeCalibration = useCallback(() => {
+    setCalibrationOpen(false);
+    try { audioEngine.setBaseline(null); } catch (e) { /* */ }
   }, []);
   useEffect(() => {
     haptic.attachToAudio();
@@ -1599,8 +1658,23 @@ export default function Dashboard({ onOpenAccount }) {
           accessible from the header Ear icon at any time. */}
       <CalibrationModal
         open={calibrationOpen}
-        onClose={() => setCalibrationOpen(false)}
-        onComplete={() => { /* engine already applied profile inside the modal */ }}
+        onClose={closeCalibration}
+        onComplete={(res) => {
+          // Successful real calibration → switch the copy on next visit.
+          if (res && !res.skipped) setHasProfile(true);
+        }}
+      />
+
+      {/* Onboarding Transition Card — slides up 30 s after a suggestion is
+          tapped (per the onboarding strategy). Composes the Step 2 guidance
+          line + Step 3 calibration pivot. Copy adapts when the user is
+          already calibrated so it reads as a fine-tune nudge. */}
+      <OnboardingTransitionCard
+        open={otcOpen}
+        headphonesDetected={otcHeadphones}
+        alreadyCalibrated={hasProfile}
+        onStart={startCalibrationFromTransition}
+        onSkip={dismissTransitionCard}
       />
     </div>
   );

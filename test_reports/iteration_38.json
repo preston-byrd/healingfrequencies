@@ -1,0 +1,48 @@
+{
+  "summary": "Iter39 onboarding transition flow validated end-to-end on the no-headphones / not-yet-calibrated branch. Login → AI Companion → type → press Enter → suggestion appears → tap → OnboardingTransitionCard slides up (~100ms via 30s→100ms setTimeout patch). All copy variants match spec. Skip dismisses card without opening calibration modal. Re-trigger after reload (simulating fresh login) works. Header buttons regression intact. Auto-open of CalibrationModal on first mount has been correctly removed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "OnboardingTransitionCard at 1280x900 viewport", "issues": ["Card sits at fixed bottom-0 and on shorter viewports/with Made-with-Emergent badge present, the buttons (otc-start/otc-skip) can sit very close to the bottom edge — Playwright reported 'Element outside viewport' for otc-start click after scroll. User-clickable in practice but consider increasing pb-* spacing or lifting above the badge."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Consider raising bottom padding on OnboardingTransitionCard or shifting it above the 'Made with Emergent' badge to avoid bottom-edge clipping on shorter viewports."
+  ],
+  "critical_code_review_comments": [
+    "Dashboard.jsx: greetedRef gates the AIAgentSheet auto-open per React mount — works because Dashboard remounts on each login/reload. Solid pattern.",
+    "OnboardingTransitionCard.jsx: `onSkip` is wired to BOTH the X close button and the Skip button — matches spec.",
+    "audioEngine.setBaseline: idempotent, lazy ctx, safety-capped volume (0.25). Cleanly fades out on setBaseline(null). No console errors observed on dismiss.",
+    "Dashboard transitionTimerRef is correctly cleared on unmount AND on subsequent suggestion taps — no leaks."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (frontend-only)", "frontend": "~95%"},
+  "verified_expectations": [
+    "Login + AI Companion auto-open with personalised greeting (Hello Admin)",
+    "Typing 'I want to relax' + Enter produces suggestions",
+    "Tapping suggestion closes sheet, audio starts (Now Tuning shows 432 Hz in screenshot)",
+    "OnboardingTransitionCard slides up after the (collapsed) 30s timer",
+    "otc-guidance EXACT match (no-headphones variant): \"Let's slow things down. Pop in your headphones, and let this baseline tone calm your nervous system.\"",
+    "otc-pivot-body contains 'unlock the full therapeutic power'",
+    "otc-start text EXACT: 'Start 30-Sec Calibration'",
+    "otc-skip text: 'Skip for now'",
+    "Clicking otc-skip dismisses card AND does not open calibration-modal (both counts=0 after)",
+    "Re-trigger after reload (simulated fresh login) — card reappears 30s after next suggestion tap",
+    "All 7 header buttons present: ai-companion, install-app, haptics, voice-shortcuts, calibration, account, logout",
+    "REGRESSION: CalibrationModal does NOT auto-open on first mount even after DELETE /api/me/hearing-profile (200)",
+    "DELETE /api/me/hearing-profile returns 200 with admin token (backend regression OK)",
+    "No JS console errors during the full flow (only unrelated 401s from a pre-auth fetch on landing page)"
+  ],
+  "not_fully_verified": [
+    "otc-start → calibration-modal open: card became partially off-viewport at 1280x900 so Playwright click reported 'outside viewport'. Card itself was visible (screenshot confirms). Functional path is correct in code: startCalibrationFromTransition sets calibrationOpen=true.",
+    "alreadyCalibrated=true variant ('Recalibrate (30 s)' / 'Not now' / 'You're already calibrated' copy) — not separately executed in this run; relied on conditional copy in OnboardingTransitionCard.jsx which is straightforwardly correct on code review.",
+    "Baseline 432 Hz oscillator audibility — cannot assert from Playwright; no console errors observed on card dismiss → setBaseline(null) cleanup is clean."
+  ],
+  "seed_data_creation": "Called DELETE /api/me/hearing-profile via fetch with admin Bearer token to force the not-yet-calibrated copy branch.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Login flow: landing page first → click 'Start tuning' → email/password form. Admin: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8. To force 'not calibrated' copy: DELETE /api/me/hearing-profile with bearer token before reload. AIAgentSheet auto-opens once per Dashboard mount (greetedRef). Use Enter key on agent-input (Send button can be blocked by Made-with-Emergent badge). Set viewport >=900 height; the OnboardingTransitionCard sits at bottom and can clip on shorter screens. Use add_init_script to collapse setTimeout(30000) → 100ms for CI speed."
+}

@@ -171,6 +171,15 @@ export default function AIAgentSheet({
     } catch (e) {
       console.warn('[AIAgentSheet] applySuggestion failed', e);
     }
+    // Broadcast that the user just accepted a suggestion. The Dashboard
+    // listens for this and starts the 30s-after onboarding transition
+    // (Step 2 + Step 3 of the onboarding strategy). Fire-and-forget event
+    // — kept here rather than at every individual kind so we never miss it.
+    try {
+      window.dispatchEvent(new CustomEvent('sf:agent:suggestion-taken', {
+        detail: { kind: s.kind, label: s.label },
+      }));
+    } catch (e) { /* event dispatch shouldn't ever throw, but be safe */ }
     close();
   };
 

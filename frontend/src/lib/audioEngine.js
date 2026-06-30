@@ -698,6 +698,55 @@ class AudioEngine {
     this._emit();
   }
 
+  // ---- Baseline tone -----------------------------------------------------
+  // Independent low-volume oscillator that runs IN PARALLEL with the main
+  // session — used by the onboarding transition flow to gently layer a
+  // soothing 432 Hz under whatever the user already chose. Connects directly
+  // to `master` so it sits underneath the same EQ chain as the rest of the
+  // mix (when calibrated). Call setBaseline(null) or setBaseline(0,0) to
+  // fade it out cleanly.
+  setBaseline(hz, volume = 0.06) {
+    // Tear down any prior baseline first so calling this multiple times is
+    // idempotent and never leaks oscillators.
+    if (this._baselineOsc || this._baselineGain) {
+      const now = this.ctx ? this.ctx.currentTime : 0;
+      try {
+        if (this._baselineGain && this.ctx) {
+          this._baselineGain.gain.cancelScheduledValues(now);
+          this._baselineGain.gain.linearRampToValueAtTime(0, now + 0.6);
+        }
+        if (this._baselineOsc && this.ctx) this._baselineOsc.stop(now + 0.7);
+      } catch (e) { /* graceful */ }
+      const oldOsc = this._baselineOsc;
+      const oldGain = this._baselineGain;
+      this._baselineOsc = null;
+      this._baselineGain = null;
+      setTimeout(() => {
+        try { oldOsc && oldOsc.disconnect(); } catch (e) { /* */ }
+        try { oldGain && oldGain.disconnect(); } catch (e) { /* */ }
+      }, 900);
+    }
+    if (!hz || !volume) return;
+    // Lazy-build the AudioContext so the baseline can be requested before
+    // the user has tapped play.
+    this._ensureCtx().then((ctx) => {
+      try {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = hz;
+        const g = ctx.createGain();
+        g.gain.value = 0;
+        osc.connect(g).connect(this.master);
+        osc.start();
+        const now = ctx.currentTime;
+        const v = Math.max(0, Math.min(0.25, volume)); // safety cap
+        g.gain.linearRampToValueAtTime(v, now + 1.5); // slow swell so it feels organic
+        this._baselineOsc = osc;
+        this._baselineGain = g;
+      } catch (e) { _warn('audio', e); }
+    });
+  }
+
   setWaveform(w) {
     this.waveform = w;
     if (this.osc) this.osc.type = w;
