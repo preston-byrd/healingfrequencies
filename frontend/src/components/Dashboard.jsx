@@ -342,6 +342,29 @@ export default function Dashboard({ onOpenAccount }) {
   // devices (iOS Safari / iOS standalone) so audio is never blocked.
   const [hapticsOpen, setHapticsOpen] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  // ---- Account dropdown menu --------------------------------------------
+  // Consolidates Pulsing Haptics, Voice Shortcuts, Install Solarisound, and
+  // Equalizer Calibration behind the Account icon to keep the header from
+  // sprawling. Opens on click, closes on outside-click or Escape, and
+  // collapses any item that doesn't apply (e.g. Install hides when the app
+  // is already running standalone).
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = React.useRef(null);
+  useEffect(() => {
+    if (!accountMenuOpen) return undefined;
+    const onDocClick = (e) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(e.target)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setAccountMenuOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [accountMenuOpen]);
   // ---- Hearing-profile calibration --------------------------------------
   // On mount we fetch the user's saved profile (if any) and immediately
   // apply it to the audio engine so every subsequent tone goes through the
@@ -853,52 +876,68 @@ export default function Dashboard({ onOpenAccount }) {
                 >
                   <Sparkles size={16} />
                 </button>
-                {showInstall && (
+                <div className="relative" ref={accountMenuRef}>
                   <button
-                    data-testid="install-app-button"
-                    onClick={() => setInstallOpen(true)}
-                    className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
-                    title="Install app"
-                    aria-label="Install app"
+                    data-testid="account-button"
+                    onClick={() => setAccountMenuOpen((o) => !o)}
+                    aria-haspopup="menu"
+                    aria-expanded={accountMenuOpen}
+                    className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors flex items-center"
+                    title="Account menu"
                   >
-                    <Smartphone size={16} />
+                    <UserCircle size={18} />
                   </button>
-                )}
-                <button
-                  data-testid="haptics-button"
-                  onClick={() => setHapticsOpen(true)}
-                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
-                  title="Pulsing Haptics"
-                  aria-label="Pulsing Haptics"
-                >
-                  <HeartPulse size={16} />
-                </button>
-                <button
-                  data-testid="voice-shortcuts-button"
-                  onClick={() => setVoiceOpen(true)}
-                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
-                  title="Voice Shortcuts"
-                  aria-label="Voice Shortcuts"
-                >
-                  <Mic size={16} />
-                </button>
-                <button
-                  data-testid="calibration-button"
-                  onClick={() => setCalibrationOpen(true)}
-                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
-                  title="Equalizer Calibration"
-                  aria-label="Equalizer Calibration"
-                >
-                  <Ear size={16} />
-                </button>
-                <button
-                  data-testid="account-button"
-                  onClick={onOpenAccount}
-                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
-                  title="Account"
-                >
-                  <UserCircle size={18} />
-                </button>
+                  {accountMenuOpen && (
+                    <div
+                      data-testid="account-menu"
+                      role="menu"
+                      className="absolute right-0 mt-2 w-56 z-50 bg-[#0E1F18]/97 backdrop-blur-md border border-[#5C9E8C]/25 rounded-xl shadow-2xl py-1.5 overflow-hidden"
+                    >
+                      <button
+                        data-testid="account-menu-account"
+                        onClick={() => { setAccountMenuOpen(false); onOpenAccount && onOpenAccount(); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8E3D9] hover:bg-[#5C9E8C]/15 transition-colors"
+                      >
+                        <UserCircle size={14} className="text-[#72C2AC]" />
+                        Account
+                      </button>
+                      <button
+                        data-testid="account-menu-haptics"
+                        onClick={() => { setAccountMenuOpen(false); setHapticsOpen(true); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8E3D9] hover:bg-[#5C9E8C]/15 transition-colors"
+                      >
+                        <HeartPulse size={14} className="text-[#72C2AC]" />
+                        Pulsing Haptics
+                      </button>
+                      <button
+                        data-testid="account-menu-voice"
+                        onClick={() => { setAccountMenuOpen(false); setVoiceOpen(true); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8E3D9] hover:bg-[#5C9E8C]/15 transition-colors"
+                      >
+                        <Mic size={14} className="text-[#72C2AC]" />
+                        Voice Shortcuts
+                      </button>
+                      {showInstall && (
+                        <button
+                          data-testid="account-menu-install"
+                          onClick={() => { setAccountMenuOpen(false); setInstallOpen(true); }}
+                          className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8E3D9] hover:bg-[#5C9E8C]/15 transition-colors"
+                        >
+                          <Smartphone size={14} className="text-[#72C2AC]" />
+                          Install Solarisound
+                        </button>
+                      )}
+                      <button
+                        data-testid="account-menu-calibration"
+                        onClick={() => { setAccountMenuOpen(false); setCalibrationOpen(true); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8E3D9] hover:bg-[#5C9E8C]/15 transition-colors"
+                      >
+                        <Ear size={14} className="text-[#72C2AC]" />
+                        Equalizer Calibration
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <button
                   data-testid="logout-button"
                   onClick={logout}

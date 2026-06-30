@@ -183,6 +183,16 @@
   - Testing iteration 38 — **10/10 backend + 13/13 frontend** all PASS. Backend covers GET null, POST real bands w/ gain_db, POST skip stub, POST 400, 401 unauth, DELETE 200, out-of-range freq drop. Frontend covers auto-open on null profile, 4-step walk, band sequence, SVG chart, results text shows +6 dB lines, redo resets to 60 Hz, skip persists + prevents auto-reopen, manual header open, regression on all 7 header buttons.
 
 - **Onboarding Transition Strategy (iter 39)** (Feb 2026): replaces the cold "auto-open calibration on first login" with a guided, calm-state transition that runs 30 s after the user accepts an AI Companion suggestion.
+  - **AIAgentSheet** dispatches a `sf:agent:suggestion-taken` window event whenever the user taps any suggestion card.
+  - **Dashboard** listens, waits 30 s, then runs best-effort `detectHeadphones()`, layers a soft uncalibrated **432 Hz baseline tone** via the new `audioEngine.setBaseline(hz, volume)` (parallel oscillator, 1.5 s swell, safety-capped to 0.25), and slides up `OnboardingTransitionCard` with conditional copy (guidance line w/ or w/o "Pop in your headphones" depending on detection; pivot text + `[Start 30-Sec Calibration]` / `[Skip for Now]`).
+  - **Already-calibrated** users see "Want to fine-tune your hearing profile?" + `[Recalibrate (30 s)]` / `[Not now]` so the ritual remains friendly. Card still appears on every login per spec.
+  - **Removed** the cold auto-open of `CalibrationModal` on first dashboard mount. Skip / Start / X dismissal all fade the baseline tone cleanly.
+  - Testing iteration 39 — **12/13 cases PASS + 1 design tweak** (bottom padding bumped to clear the Made-with-Emergent badge).
+
+- **Account dropdown menu (iter 40)** (Feb 2026): consolidated header — moved Pulsing Haptics, Voice Shortcuts, Install Solarisound, and Equalizer Calibration into a dropdown that opens off the Account icon. The header now only carries AI Companion, Account, and Logout, dramatically reducing top-bar clutter.
+  - Click `[data-testid=account-button]` → `[data-testid=account-menu]` panel slides into view with 5 items: `account-menu-account` (opens AccountDashboard), `account-menu-haptics`, `account-menu-voice`, `account-menu-install` (hidden when already standalone), `account-menu-calibration`. Each item closes the menu + opens the appropriate modal.
+  - Closes on outside-click (document mousedown listener) and Escape key. Keeps focus management simple for now.
+  - Smoke-tested: 5/5 items render, open the correct modal, menu closes on outside-click + Escape, all old standalone buttons removed cleanly.
   - **AIAgentSheet** dispatches a `sf:agent:suggestion-taken` window event whenever the user taps any suggestion card. Includes the chosen `{kind, label}` detail.
   - **Dashboard** listens for that event and starts a 30-second timer. At T+30s:
     1. Runs `detectHeadphones()` — best-effort `navigator.mediaDevices.enumerateDevices()` heuristic (heard outputs count > 1 OR label matches `headphone|airpod|earpod|earbud|head-set|bluetooth|bt-audio|beats|sony-wh|jbl-tune|powerbeats`).
