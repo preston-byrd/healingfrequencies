@@ -89,6 +89,11 @@ const PRO_PREVIEW = [
   { label: 'Soundscapes', Icon: Cloud },
 ];
 
+// Sound Bath sessions always default to a fixed 10-minute contemplative
+// window regardless of the user's saved session-length preference. The
+// user can still let the timer expire naturally or tap Stop to end early.
+const BATH_DEFAULT_MIN = 10;
+
 function formatTime(secs) {
   const m = Math.floor(secs / 60).toString().padStart(2, '0');
   const s = Math.floor(secs % 60).toString().padStart(2, '0');
@@ -1182,15 +1187,25 @@ export default function Dashboard({ onOpenAccount }) {
           </div>
 
           {/* Sound Bath — algorithmic crystal-bowl / chime / gong washes.
-              Pro-only alongside Specials & Soundscapes. Bath duration is
-              tied to the session-timer slider (defaults to 10 min); the bath
-              stops when the timer hits 0 or the player Play/Pause is tapped. */}
+              Pro-only alongside Specials & Soundscapes. Every bath tap
+              force-arms the session timer to 10 min (baths are designed
+              for a fixed contemplative window regardless of the user's
+              last session-length preference). The Duration slider itself
+              is intentionally NOT touched so the user's saved pref for
+              non-bath sessions is preserved. Tapping an active preset —
+              or the header Stop button — silences EVERYTHING: the bath
+              scheduler, the base audio-engine oscillator, and the timer. */}
           <SoundBathPanel
             isPro={isPro}
             onUnlock={onOpenAccount}
             onSaveBath={saveBathArrangement}
-            onBathStart={() => { setRemaining(duration * 60); }}
-            onBathStop={() => { setRemaining(0); }}
+            onBathStart={() => { setRemaining(BATH_DEFAULT_MIN * 60); }}
+            onBathStop={() => {
+              setRemaining(0);
+              // Full silence — kill the audioEngine base oscillator too so
+              // there's no residual "hum" after the bath fades out.
+              try { audioEngine.stop(); } catch (e) { /* graceful */ }
+            }}
           />
 
           {/* Soundscapes — curated multi-layer mixes, Pro only */}
