@@ -180,8 +180,10 @@ export default function Dashboard({ onOpenAccount }) {
       const secsLeft = Math.max(0, Math.round((endAt - Date.now()) / 1000));
       if (secsLeft <= 0) {
         // Timer expired: graceful stop with no resume snapshot, and clear any
-        // soundscape selection so the next user action starts fresh.
+        // soundscape selection so the next user action starts fresh. Sound
+        // Bath (if active) is also stopped so it ends with the countdown.
         audioEngine._pendingAmbient = null;
+        try { getSoundBath(audioEngine).stop(); } catch (e) { /* graceful */ }
         audioEngine.stop();
         setRemaining(0);
         setActiveSoundscape(null);
@@ -294,7 +296,7 @@ export default function Dashboard({ onOpenAccount }) {
   // Fetch saved sessions
   useEffect(() => { refreshSessions(); }, []);
 
-  // ---- AI Companion sheet (controlled by Dashboard) ------------------------
+  // ---- Wellness Assistant sheet (controlled by Dashboard) ------------------------
   // Greeting on each login is personalised ("Hello [Name], how are you feeling
   // right now?"). PRIOR_INSIGHTS (last 3 mood→suggestion check-ins) are
   // injected into the LLM prompt on the BACKEND, so a returning user who said
@@ -309,7 +311,7 @@ export default function Dashboard({ onOpenAccount }) {
   // effect from re-opening the sheet if the `user` object reference changes
   // mid-mount (e.g. profile name edit).
   //
-  // Manual open via the "AI Companion" header button uses a neutral
+  // Manual open via the "Wellness Assistant" header button uses a neutral
   // "How can I help you?" greeting instead.
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentGreeting, setAgentGreeting] = useState('');
@@ -414,7 +416,7 @@ export default function Dashboard({ onOpenAccount }) {
       // Arm the player's countdown for a default 5-minute session when the
       // user accepts a playback-style suggestion. This is the auto-timer
       // the user asked for — it doesn't interfere with Sleep Mode (which
-      // already has its own longer duration) or AI Prescription (which
+      // already has its own longer duration) or Wellness Prescription (which
       // just opens a panel rather than starting playback).
       const kind = e?.detail?.kind;
       const detail = e?.detail || {};
@@ -501,7 +503,7 @@ export default function Dashboard({ onOpenAccount }) {
     window.addEventListener('sf:agent:sleep', onAgentSleep);
     return () => window.removeEventListener('sf:agent:sleep', onAgentSleep);
   }, []);
-  // AI Prescription pre-fill handoff: AIAgentSheet calls this to open the
+  // Wellness Prescription pre-fill handoff: AIAgentSheet calls this to open the
   // AI panel with the user's intent already typed in.
   const triggerAIPrescription = useCallback((intent) => {
     setAiOpen(true);
@@ -598,6 +600,9 @@ export default function Dashboard({ onOpenAccount }) {
       setRemaining(duration * 60);
       audioEngine.start();
     } else {
+      // Stop any active Sound Bath alongside the main engine so a Pause tap
+      // from the player halts EVERYTHING the user was hearing.
+      try { getSoundBath(audioEngine).stop(); } catch (e) { /* graceful */ }
       audioEngine.stop();
       setRemaining(0);
     }
@@ -930,8 +935,8 @@ export default function Dashboard({ onOpenAccount }) {
                   data-testid="ai-companion-button"
                   onClick={openCompanion}
                   className="text-[#C4A67A] hover:text-[#E8B872] transition-colors"
-                  title="AI Companion"
-                  aria-label="Open AI Companion"
+                  title="Wellness Assistant"
+                  aria-label="Open Wellness Assistant"
                 >
                   <Sparkles size={16} />
                 </button>
@@ -1177,11 +1182,15 @@ export default function Dashboard({ onOpenAccount }) {
           </div>
 
           {/* Sound Bath — algorithmic crystal-bowl / chime / gong washes.
-              Pro-only alongside Specials & Soundscapes. */}
+              Pro-only alongside Specials & Soundscapes. Bath duration is
+              tied to the session-timer slider (defaults to 10 min); the bath
+              stops when the timer hits 0 or the player Play/Pause is tapped. */}
           <SoundBathPanel
             isPro={isPro}
             onUnlock={onOpenAccount}
             onSaveBath={saveBathArrangement}
+            onBathStart={() => { setRemaining(duration * 60); }}
+            onBathStop={() => { setRemaining(0); }}
           />
 
           {/* Soundscapes — curated multi-layer mixes, Pro only */}
@@ -1400,7 +1409,7 @@ export default function Dashboard({ onOpenAccount }) {
 
         {/* RIGHT — Custom + Ambient + Save */}
         <aside className="w-full lg:w-[360px] flex flex-col gap-4 lg:gap-6 lg:h-full lg:overflow-y-auto custom-scrollbar">
-          {/* AI Prescription (Pro). Click the header to expand; free-text
+          {/* Wellness Prescription (Pro). Click the header to expand; free-text
               intent + optional mood/goal → backend Claude Sonnet 4.5 →
               prescription applied to the engine in one shot. */}
           <div className="glass p-5" data-testid="ai-recommend-panel">
@@ -1411,7 +1420,7 @@ export default function Dashboard({ onOpenAccount }) {
             >
               <div className="flex items-center gap-2">
                 <Sparkles size={14} className="text-[#C4A67A]" />
-                <div className="label-tiny">AI Prescription</div>
+                <div className="label-tiny">Wellness Prescription</div>
                 {!isPro && <Lock size={11} className="text-[#C4A67A]" />}
               </div>
               <div className="text-[10px] text-[#8A9A92] font-mono tracking-wider">
@@ -1728,7 +1737,7 @@ export default function Dashboard({ onOpenAccount }) {
       </div>
 
       {/* Conversational check-in agent. Controlled by Dashboard so both
-          the once-per-session auto-open AND the manual "AI Companion"
+          the once-per-session auto-open AND the manual "Wellness Assistant"
           header button can use the same sheet with different greetings. */}
       <AIAgentSheet
         open={agentOpen}

@@ -3,7 +3,7 @@ import { Sparkles, X, Ear, ChevronRight } from 'lucide-react';
 
 /**
  * OnboardingTransitionCard — slide-up bottom card that triggers about
- * 30 seconds after the user accepts a suggestion from the AI Companion.
+ * 30 seconds after the user accepts a suggestion from the Wellness Assistant.
  *
  * It composes the two messages from the onboarding strategy:
  *   • Guidance line ("Let's slow things down…") with conditional copy

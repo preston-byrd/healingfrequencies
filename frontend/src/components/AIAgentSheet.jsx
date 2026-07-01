@@ -8,7 +8,7 @@ import haptic from '@/lib/hapticEngine';
  * Conversational check-in / companion sheet. Now a CONTROLLED component:
  * the host (Dashboard) owns the `open` flag and the opening `greeting` so
  * it can drive both the once-per-session auto-open AND the manual
- * "AI Companion" button (greeting: "How can I help you?").
+ * "Wellness Assistant" button (greeting: "How can I help you?").
  *
  * Suggestion taps:
  *   - apply the choice to the existing audio engine (preset/soundscape) OR
@@ -210,7 +210,7 @@ export default function AIAgentSheet({
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#5C9E8C]/15">
           <div className="flex items-center gap-2">
             <Sparkles size={14} className="text-[#C4A67A]" />
-            <div className="label-tiny text-[#C4A67A]">AI Companion</div>
+            <div className="label-tiny text-[#C4A67A]">Wellness Assistant</div>
           </div>
           <button
             data-testid="ai-agent-close"

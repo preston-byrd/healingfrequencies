@@ -129,7 +129,7 @@ export default function PlayDeepLink({ onOpenApp }) {
     if (!playing) return;
     if (!cfg.duration_min) return;
     if ([30, 60, 120, 240, 480].includes(cfg.duration_min)) {
-      // Fire the same event the AI Companion uses to trigger Sleep Mode.
+      // Fire the same event the Wellness Assistant uses to trigger Sleep Mode.
       window.dispatchEvent(new CustomEvent('sf:agent:sleep', { detail: { duration_min: cfg.duration_min } }));
     }
   }, [playing, cfg.duration_min]);

@@ -15,8 +15,12 @@ import { BATH_PRESETS, getSoundBath } from '@/lib/soundBathEngine';
  *   onUnlock    — () => void, opens the Account paywall.
  *   onSaveBath  — (presetKey, label) => Promise<void>, persists the currently
  *                 playing bath as a bookmarkable "arrangement".
+ *   onBathStart — (presetKey) => void, notifies parent that a bath just
+ *                 started so it can arm the session timer / update player UI.
+ *   onBathStop  — () => void, notifies parent that the bath was stopped from
+ *                 within the panel (e.g. same-preset re-tap or Stop button).
  */
-export default function SoundBathPanel({ isPro = true, onUnlock, onSaveBath }) {
+export default function SoundBathPanel({ isPro = true, onUnlock, onSaveBath, onBathStart, onBathStop }) {
   const bath = getSoundBath(audioEngine);
   const [snap, setSnap] = useState(() => bath.snapshot());
   const [saveState, setSaveState] = useState('idle');   // idle | saving | saved | error
@@ -32,6 +36,7 @@ export default function SoundBathPanel({ isPro = true, onUnlock, onSaveBath }) {
     // internally stops any prior bath before launching the new arrangement).
     if (snap.active && snap.preset === key) {
       bath.stop();
+      onBathStop && onBathStop();
     } else {
       if (!audioEngine.playing) {
         // Sound bath is a stand-alone experience — make sure the audio
@@ -40,6 +45,7 @@ export default function SoundBathPanel({ isPro = true, onUnlock, onSaveBath }) {
         try { await audioEngine.start(); } catch (e) { /* graceful */ }
       }
       await bath.start(key);
+      onBathStart && onBathStart(key);
     }
   };
 
@@ -96,7 +102,7 @@ export default function SoundBathPanel({ isPro = true, onUnlock, onSaveBath }) {
             </button>
             <button
               data-testid="sound-bath-stop-all"
-              onClick={() => bath.stop()}
+              onClick={() => { bath.stop(); onBathStop && onBathStop(); }}
               className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-mono text-[#C4A67A] hover:text-[#E8B872] transition-colors whitespace-nowrap"
             >
               <Square size={10} /> Stop

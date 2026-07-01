@@ -957,7 +957,7 @@ def _validate_reco(raw: dict) -> dict:
     """Coerce / clamp every field so a hallucinated value can't break the player."""
     freq = float(raw.get("frequency", 432))
     freq = max(1.0, min(1200.0, freq))
-    name = str(raw.get("name", "AI Prescription"))[:80]
+    name = str(raw.get("name", "Wellness Prescription"))[:80]
     desc = str(raw.get("description", ""))[:240]
     waveform = str(raw.get("waveform", "sine")).lower()
     if waveform not in ALLOWED_WAVEFORMS:
@@ -1092,7 +1092,7 @@ Your reply MUST be valid JSON only — no prose outside the JSON, no code fences
       "duration_min": 60       // one of: 30, 60, 120, 240, 480
     },
     {
-      "kind": "ai_prescription", // launches the full AI Prescription with this intent
+      "kind": "ai_prescription", // launches the full Wellness Prescription with this intent
       "label": "Custom prescription for slowing down",
       "intent": "anxious, need to slow my nervous system down"
     },
@@ -1116,7 +1116,7 @@ Rules:
 - If user says "no", "not those", "something else": ask once if they'd like another set, then provide it.
 - Match or gently shift their state — calm for anxious, focus for restless, warmth for low-energy.
 - Sleep Mode is Pro — only include it if the user explicitly mentions sleep/night/rest.
-- AI Prescription is Pro — include it when their need is complex/specific.
+- Wellness Prescription is Pro — include it when their need is complex/specific.
 - Haptic combos pair well with sleep ("can't sleep" → heartbeat + 396 Hz or breath478 + 432 Hz),
   anxiety ("racing thoughts" → breath478 + 528 Hz), and focus ("scattered" → frequency at 10 Hz alpha).
   Use sparingly — at most ONE haptic_combo per suggestion set, and never the only option.
