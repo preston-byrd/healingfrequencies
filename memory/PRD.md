@@ -203,6 +203,14 @@
   - **Removed** the auto-open of CalibrationModal on first dashboard mount. The Ear-icon header button remains for on-demand access at any time.
   - Testing iteration 39 — **~95% pass (12/13 verified, 1 design tweak)**. Verified end-to-end on the not-yet-calibrated / no-headphones branch: timing, exact copy match for guidance & pivot & button labels, Skip dismissal, login re-trigger, no auto-open regression, all 7 header buttons intact, no JS console errors during baseline-tone teardown. Bottom padding bumped from `pb-3 sm:pb-4` → `pb-16 sm:pb-6` to clear the Made-with-Emergent badge on shorter viewports.
 
+- **Sound Bath completion — Save + Pro-lock + Pro Unlocks list (iter 41)** (Feb 2026): completed the algorithmic Sound Bath feature into a shippable Pro upsell.
+  - **Save arrangement** — while any bath preset is active, a `[data-testid=sound-bath-save]` button appears next to the Stop button. Tapping it POSTs to `/api/sessions` with an extended `sound_bath: {preset_key, label}` payload; button label transitions `Save → Saving → Saved` and the arrangement appears in the Saved Sessions list. Loading a saved bath calls `getSoundBath(audioEngine).start(preset_key)` — the preset key replays but note timing is freshly randomised (soundBathEngine is intentionally not seed-replayable).
+  - **Pro gating** — `SoundBathPanel` now takes `isPro / onUnlock / onSaveBath` props. When `isPro=false`, the panel matches Specials/Soundscapes pattern: `Lock` icon + `[data-testid=sound-bath-pro-badge]` (PRO), preset grid dimmed with `pointer-events-none`, and a full-panel `[data-testid=sound-bath-unlock-cta]` overlay routes to Account/paywall. Preset taps are gated at the click handler too.
+  - **Pro Unlocks list refreshed** — `AccountDashboard.proFeatures` now includes *"Sound Baths — 7 algorithmic crystal-bowl, chime & gong washes"*, *"Breathwork guide with pulsing haptics"*, and *"Equalizer hearing calibration (personal EQ profile)"*. The top-of-dashboard `PRO_PREVIEW` chip banner now leads with a **Sound Baths** chip. Post-checkout `ThankYouCelebration` copy updated accordingly.
+  - **Backend** — `SessionIn.sound_bath: Optional[dict] = None` (backward compatible). Free-tier 3-session cap still applies to bath saves.
+  - **Toggle behaviour** — reconfirmed: tapping the same active preset stops the bath (1.5 s note-tail fade); tapping a different preset hard-cancels the current bath and launches a new arrangement.
+  - Testing iteration 39 report — **backend 3/3, frontend 100% (all 11 checkpoints)** on desktop 1920x1080 + mobile 390x800.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
