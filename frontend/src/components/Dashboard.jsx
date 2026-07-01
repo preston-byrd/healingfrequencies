@@ -17,6 +17,7 @@ import CalibrationModal from '@/components/CalibrationModal';
 import OnboardingTransitionCard from '@/components/OnboardingTransitionCard';
 import detectHeadphones from '@/lib/detectHeadphones';
 import SoundBathPanel from '@/components/SoundBathPanel';
+import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -80,6 +81,7 @@ const SOUNDSCAPES = [
 
 // Pro feature index for the "What's in Pro" banner row
 const PRO_PREVIEW = [
+  { label: 'Sound Baths', Icon: Waves },
   { label: 'Brainwave & Specials', Icon: Brain },
   { label: 'φ Golden Stack', Icon: Sparkles },
   { label: 'Sleep Mode', Icon: Moon },
@@ -764,6 +766,34 @@ export default function Dashboard({ onOpenAccount }) {
     setDuration(s.duration_minutes || 10);
     setBreathwork(!!s.breathwork);
     Object.entries(s.ambient || {}).forEach(([k, v]) => audioEngine.setAmbient(k, v));
+    // If this session bookmarked a Sound Bath preset, relaunch it now.
+    // Random note stream isn't seed-replayable, but the preset key is — so a
+    // fresh arrangement of the same bath fires.
+    if (s.sound_bath && s.sound_bath.preset_key && isPro) {
+      (async () => {
+        try {
+          if (!audioEngine.playing) await audioEngine.start();
+          const bath = getSoundBath(audioEngine);
+          await bath.start(s.sound_bath.preset_key);
+        } catch (e) { console.warn('[Dashboard] bath resume failed', e); }
+      })();
+    }
+  };
+
+  // Save the currently-playing Sound Bath as a bookmarkable arrangement.
+  const saveBathArrangement = async (presetKey, label) => {
+    const stamp = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    await api.post('/sessions', {
+      name: `${label} · ${stamp}`,
+      frequency: state.frequency,
+      waveform: state.waveform,
+      binaural: 0,
+      duration_minutes: duration,
+      ambient: {},
+      breathwork: false,
+      sound_bath: { preset_key: presetKey, label },
+    });
+    refreshSessions();
   };
 
   const deleteSession = async (id) => {
@@ -1147,10 +1177,12 @@ export default function Dashboard({ onOpenAccount }) {
           </div>
 
           {/* Sound Bath — algorithmic crystal-bowl / chime / gong washes.
-              Free for everyone (unlike the curated Soundscapes below which
-              are Pro-only). Placed above Soundscapes so it's discoverable
-              on first paint. */}
-          <SoundBathPanel />
+              Pro-only alongside Specials & Soundscapes. */}
+          <SoundBathPanel
+            isPro={isPro}
+            onUnlock={onOpenAccount}
+            onSaveBath={saveBathArrangement}
+          />
 
           {/* Soundscapes — curated multi-layer mixes, Pro only */}
           <div className={`glass p-5 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="soundscapes-section">

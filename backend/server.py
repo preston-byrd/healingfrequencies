@@ -333,6 +333,10 @@ class SessionIn(BaseModel):
     duration_minutes: int = 10
     ambient: dict = Field(default_factory=dict)  # {rain: 0..1, ocean: 0..1, forest: 0..1}
     breathwork: bool = False
+    # Optional Sound-Bath bookmark. When present, the session represents an
+    # algorithmic Sound Bath preset the user wanted to revisit — the client
+    # replays `sound_bath.preset_key` on load. Shape: {preset_key, label}.
+    sound_bath: Optional[dict] = None
 
 
 class Session(SessionIn):

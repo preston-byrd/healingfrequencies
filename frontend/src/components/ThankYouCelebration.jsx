@@ -98,8 +98,8 @@ export function ThankYouCelebration({ planLabel, onStart }) {
           Thank you for tuning&nbsp;in.
         </h2>
         <p className="text-sm text-[#8A9A92] max-w-sm mx-auto mb-8 leading-relaxed">
-          Your <span className="text-[#72C2AC]">{planLabel}</span> plan is active. Brainwave tones, φ Golden Stack,
-          ambient layers, soundscapes, and Sleep Mode are now yours to wander through.
+          Your <span className="text-[#72C2AC]">{planLabel}</span> plan is active. Sound baths, brainwave tones,
+          φ Golden Stack, EQ calibration, pulsing haptics and Sleep Mode are now yours to wander through.
         </p>
 
         <button

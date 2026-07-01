@@ -1,0 +1,40 @@
+{
+  "summary": "Sound Bath feature-completion pass (iter39). Backend: added /app/backend/tests/test_sound_bath_sessions.py with 3 tests — all PASSED. Frontend: full multi-turn Pro/Free flow validated with data-testid selectors on desktop 1920x1080 and mobile 390x800. All 11 review-request checkpoints verified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_sound_bath_sessions.py",
+    "/app/test_reports/pytest/iter39_sound_bath.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "SessionIn.sound_bath is Optional[dict] — un-typed. Consider a nested Pydantic model (SoundBathBookmark) for stronger validation, but not blocking.",
+    "SoundBathPanel unmount cleanup useEffect has empty deps and closes over snap.active — the ref value at unmount time is what matters; harmless but eslint-react-hooks would warn.",
+    "SoundBathPanel unlock CTA is absolute inset-0 on the panel — it fully covers the preset grid on free tier which is the intended paywall behaviour and mobile-verified (CTA horizontally inside panel bounds)."
+  ],
+  "updated_files": ["/app/backend/tests/test_sound_bath_sessions.py"],
+  "success_rate": {"backend": "100% (3/3)", "frontend": "100% (all checkpoints)"},
+  "verified_expectations": [
+    "PRO: sound-bath-preset-crystal_bowl_bath tap → sound-bath-active-badge-crystal_bowl_bath appears; sound-bath-save + sound-bath-stop-all render in header",
+    "PRO: same-preset second tap stops (badge gone within ~2s, save/stop buttons gone)",
+    "PRO: switching preset moves the active badge (only newly-tapped card shows PLAYING)",
+    "PRO: sound-bath-save → POST /api/sessions returns 200 with sound_bath={preset_key, label}; new saved session appears in Saved Sessions",
+    "PRO: reloading, then clicking a saved session with sound_bath re-activates the badge (loadSession → getSoundBath().start(preset_key))",
+    "PRO: sound-bath-stop-all removes the active badge",
+    "FREE: sound-bath-pro-badge visible + Lock icon in header",
+    "FREE: preset grid opacity=0.45 and pointer-events=none",
+    "FREE: sound-bath-unlock-cta visible; clicking it routes to Account page (account-back-button appears)",
+    "FREE: forced click on a preset does NOT activate a bath (no active badge)",
+    "FREE: PRO_PREVIEW banner lists 'Sound Baths' first (Sound Baths idx=13 < Brainwave idx=25)",
+    "AccountDashboard proFeatures contains: 'Sound Baths — 7 algorithmic crystal-bowl, chime & gong washes', 'Equalizer hearing calibration (personal EQ profile)', 'Breathwork guide with pulsing haptics'",
+    "MOBILE 390x800: panel + CTA render inside panel horizontal bounds",
+    "BACKEND: POST /api/sessions with sound_bath round-trips through GET /api/sessions",
+    "BACKEND: sound_bath omitted still works (backward compatible)",
+    "BACKEND: free user still hits 402 on 4th session even when payload includes sound_bath"
+  ],
+  "seed_data_creation": "Registered ephemeral free user TEST_freesb_<timestamp>@example.com via /api/auth/register (auto-logs in via cookie). Created a few TEST_ prefixed sessions during backend test and cleaned them up. Admin created TEST_sb_crystal / TEST_no_sb sessions cleaned via DELETE.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "IMPORTANT: /api/auth/register auto-establishes an httpOnly session cookie, so if you register then hit '/' you'll land already-authenticated on the Dashboard (skip the login form). Always close AI Companion sheet first via [data-testid='ai-agent-close'] before interacting with the Sound Bath panel. Preset keys: crystal_bowl_bath, chime_meditation, gong_bath, full_ensemble, aurora_bath, grounding_bath, solfeggio_wash. Saved-session cards use [data-testid='saved-session-<uuid>'] and clicking the item container reloads it (loadSession). Header account/logout live inside [data-testid='account-menu'] under [data-testid='account-button']; use [data-testid='logout-button'] for logout. Backend sound_bath field is Optional[dict] on SessionIn (line 339 of server.py).",
+  "rca of the issue": "n/a — feature completion pass, no bugs found."
+}

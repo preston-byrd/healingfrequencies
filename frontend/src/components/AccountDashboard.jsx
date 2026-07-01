@@ -322,12 +322,14 @@ export default function AccountDashboard({ onBack }) {
 
   const proFeatures = [
     'Unlimited saved sessions',
+    'Sound Baths — 7 algorithmic crystal-bowl, chime & gong washes',
     'Soundscapes — 6 curated multi-layer mixes',
     'Brainwave & Specials presets (Delta, Theta, Schumann, 111, Tesla 369, Angel 444, …)',
     'φ Golden Stack harmonic mode',
     'Sleep Mode (30-min fade-to-silence)',
     'Ambient layers (rain · ocean · forest · wind · crickets · bowls · brown · white)',
-    'Breathwork guide',
+    'Breathwork guide with pulsing haptics',
+    'Equalizer hearing calibration (personal EQ profile)',
     'Custom frequency generator',
   ];
 
