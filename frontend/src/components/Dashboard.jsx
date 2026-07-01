@@ -932,7 +932,7 @@ export default function Dashboard({ onOpenAccount }) {
               <div className="label-tiny">Healing Frequencies</div>
               <div className="flex items-center gap-3">
                 <button
-                  data-testid="ai-companion-button"
+                  data-testid="wellness-assistant-button"
                   onClick={openCompanion}
                   className="text-[#C4A67A] hover:text-[#E8B872] transition-colors"
                   title="Wellness Assistant"

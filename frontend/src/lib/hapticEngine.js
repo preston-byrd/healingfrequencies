@@ -65,6 +65,49 @@ class HapticEngine {
     this._lastAudioState = null;
     this._breathPhaseIdx = 0; // 0=inhale, 1=hold, 2=exhale
     this._listeners = new Set();
+    // ---- Screen-lock / background handling ---------------------------------
+    // navigator.vibrate cannot be started from a hidden/locked document on
+    // most Android browsers, and any in-flight vibration continues silently
+    // rattling the chassis when the phone is set down or pocketed — which
+    // acoustically bleeds into the speaker as a "pulsating vibration-like
+    // noise" (bug reported by users). We solve this the correct way: pause
+    // the haptic loop while the page is hidden, cancel any tail with
+    // vibrate(0), and resume the loop when the page becomes visible again
+    // (only if audio is still playing). Audio playback itself is
+    // uninterrupted because it lives on a separate MediaSession thread.
+    this._suspended = false;      // suspended-by-visibility (distinct from user disable)
+    this._visHandler = null;
+    if (typeof document !== 'undefined') {
+      this._visHandler = () => this._onVisibilityChange();
+      document.addEventListener('visibilitychange', this._visHandler);
+      // pagehide fires reliably on iOS when the tab / PWA goes to background
+      // and is a safer signal than visibilitychange on some Android WebViews.
+      window.addEventListener?.('pagehide', this._visHandler);
+    }
+  }
+
+  _onVisibilityChange() {
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    if (hidden) {
+      // Screen just locked / tab went background. Silence the motor
+      // immediately so no in-flight pulse tail keeps rattling. Preserve
+      // `running` so the loop resumes cleanly when the user returns.
+      if (this.running) {
+        this._suspended = true;
+        this._cancelLoop();
+        try { if (this.supported) navigator.vibrate(0); }
+        catch (e) { console.warn('[hapticEngine] visibility-hide vibrate(0) failed', e); }
+      }
+    } else if (this._suspended) {
+      this._suspended = false;
+      // Only re-arm the loop if the user still has haptics on AND audio is
+      // still playing. Otherwise leave things quiet.
+      if (this.enabled && this.running && this._lastAudioState?.playing) {
+        this._tick();
+      } else {
+        this.running = false;
+      }
+    }
   }
 
   // ---- Subscribers (React) -------------------------------------------------
@@ -175,6 +218,12 @@ class HapticEngine {
 
   _tick() {
     if (!this.running || !this.supported) return;
+    // Bail early if screen is locked / tab hidden — see constructor for the
+    // full explanation. The visibility listener re-invokes _tick on return.
+    if (this._suspended || (typeof document !== 'undefined' && document.hidden)) {
+      this._suspended = true;
+      return;
+    }
     const state = this._lastAudioState || audioEngine.getState();
     const fadeFactor = state.sessionFadeActive ? 0.45 : 1; // gentle taper in smart-fade window
     const pat = this._resolvePattern(state);
@@ -232,16 +281,27 @@ class HapticEngine {
       return { vibration: [80, 1920, 80, 1920, 80, 1920, 80], intervalMs: 8000 };
     }
     if (pat === 'frequency') {
-      // Pulse on the binaural OR isochronic rate. Clamp to 0.5–30 Hz so the
-      // motor can keep up and the user perceives discrete pulses.
-      const rate = state.binaural && state.binaural > 0
+      // Pulse on the binaural OR isochronic rate. IMPORTANT: the human
+      // touch-perception limit for discrete pulses is ~4 Hz — anything
+      // above that fuses into a continuous mechanical buzz on the
+      // vibration motor, which (a) provides zero perceptual benefit and
+      // (b) audibly rattles the phone chassis on hard surfaces, causing
+      // the "pulsating vibration-like noise" bug reported after screen
+      // lock. So we clamp the pulse rate to 0.5–4 Hz. When the audio
+      // rate exceeds 4 Hz (typical for alpha / beta / gamma bands) we
+      // divide it into a related integer sub-harmonic that stays under
+      // 4 Hz — the user still feels a rhythm tied to the entrainment
+      // rate, just at a comfortable cadence.
+      const rawRate = state.binaural && state.binaural > 0
         ? state.binaural
         : (state.isochronic && state.isochronic > 0 ? state.isochronic : 7);
-      const hz = Math.max(0.5, Math.min(30, rate));
+      let hz = Math.max(0.5, rawRate);
+      while (hz > 4) hz = hz / 2;                     // sub-harmonic fold
+      hz = Math.max(0.5, Math.min(4, hz));
       const periodMs = 1000 / hz;
       // Pulse duration ≈ 25% of period, capped at 120ms so it stays subtle.
-      const pulse = Math.max(8, Math.min(120, Math.round(periodMs * 0.25)));
-      return { vibration: [pulse], intervalMs: Math.max(40, Math.round(periodMs)) };
+      const pulse = Math.max(20, Math.min(120, Math.round(periodMs * 0.25)));
+      return { vibration: [pulse], intervalMs: Math.max(250, Math.round(periodMs)) };
     }
     return null;
   }

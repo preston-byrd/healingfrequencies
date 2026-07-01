@@ -27,7 +27,7 @@ html, body, #root {
 /* Standalone PWA on iOS draws under the status bar by design
    (apple-mobile-web-app-status-bar-style=black-translucent). Without an
    explicit padding the top of every screen overlaps the status bar — on
-   the dashboard the AI Companion / Account / Logout icons end up tucked
+   the dashboard the Wellness Assistant / Account / Logout icons end up tucked
    beneath the clock / signal / battery indicators. Reserve
    safe-area-inset space on all four sides at the root so EVERY route
    (Dashboard, AccountDashboard, LandingPage, AuthScreen) sits below the
