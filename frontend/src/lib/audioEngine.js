@@ -559,18 +559,30 @@ class AudioEngine {
     const lfo = ctx.createOscillator();
     lfo.type = 'square';
     lfo.frequency.value = Math.max(0.5, Math.min(40, hz));
+    // Soft-edge the square-wave gate. A hard square wave produces
+    // instantaneous 0→1 gain jumps that click audibly, and those clicks
+    // get amplified by the MediaStream → hidden <audio> pipeline while
+    // the phone is screen-locked — sounding like an "unwanted pulsating"
+    // artifact even at low isochronic rates. A lowpass at 120 Hz softens
+    // each edge to ~3–5 ms (inaudible as a click) while keeping the
+    // perceptual pulse rhythm intact for entrainment.
+    const smoother = ctx.createBiquadFilter();
+    smoother.type = 'lowpass';
+    smoother.frequency.value = 120;
+    smoother.Q.value = 0.5;
     const scale = ctx.createGain();
-    scale.gain.value = 0.5; // square is -1..1 → scaled to -0.5..0.5
+    scale.gain.value = 0.5; // shape into ±0.5
     const offset = ctx.createConstantSource();
     offset.offset.value = 0.5; // shift to 0..1
     // Clear the static baseline (was 1.0) so the LFO + offset are the only drivers.
     this.gateGain.gain.cancelScheduledValues(ctx.currentTime);
     this.gateGain.gain.setValueAtTime(0, ctx.currentTime);
-    lfo.connect(scale).connect(this.gateGain.gain);
+    lfo.connect(smoother).connect(scale).connect(this.gateGain.gain);
     offset.connect(this.gateGain.gain);
     lfo.start();
     offset.start();
     this.isoLfo = lfo;
+    this.isoSmoother = smoother;
     this.isoScale = scale;
     this.isoOffset = offset;
   }
@@ -578,12 +590,13 @@ class AudioEngine {
   _killIsochronicLFO(restoreBaseline = 1) {
     if (!this.ctx) return;
     const ctx = this.ctx;
-    [this.isoLfo, this.isoScale, this.isoOffset].forEach((n) => {
+    [this.isoLfo, this.isoSmoother, this.isoScale, this.isoOffset].forEach((n) => {
       if (!n) return;
       try { if (typeof n.stop === 'function') n.stop(); } catch (e) { _warn('audio', e); }
       try { n.disconnect(); } catch (e) { _warn('audio', e); }
     });
     this.isoLfo = null;
+    this.isoSmoother = null;
     this.isoScale = null;
     this.isoOffset = null;
     if (this.gateGain && restoreBaseline) {
