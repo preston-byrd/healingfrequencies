@@ -436,7 +436,7 @@ async def list_sessions(user: dict = Depends(get_current_user)):
 
 
 @api.post("/sessions")
-async def create_session(body: SessionIn, user: dict = Depends(get_current_user)):
+async def create_session(body: SessionIn, request: Request, user: dict = Depends(get_current_user)):
     # Feature gate: Basic plan caps saved sessions at 3
     if not _is_pro(user):
         count = await db.sessions.count_documents({"user_id": user["id"]})
@@ -453,14 +453,24 @@ async def create_session(body: SessionIn, user: dict = Depends(get_current_user)
     })
     await db.sessions.insert_one(doc)
     doc.pop("_id", None)
+    await _audit(
+        "session.saved", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"session_id": doc["id"], "name": doc.get("name")},
+    )
     return doc
 
 
 @api.delete("/sessions/{sid}")
-async def delete_session(sid: str, user: dict = Depends(get_current_user)):
+async def delete_session(sid: str, request: Request, user: dict = Depends(get_current_user)):
     res = await db.sessions.delete_one({"id": sid, "user_id": user["id"]})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
+    await _audit(
+        "session.deleted", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"session_id": sid},
+    )
     return {"ok": True}
 
 
@@ -638,13 +648,18 @@ async def change_password(body: PasswordChangeIn, request: Request, response: Re
 
 
 @api.put("/me/profile")
-async def update_profile(body: ProfileUpdateIn, user: dict = Depends(get_current_user)):
+async def update_profile(body: ProfileUpdateIn, request: Request, user: dict = Depends(get_current_user)):
     new_name = body.name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {"name": new_name}},
+    )
+    await _audit(
+        "profile.updated", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"name": new_name},
     )
     return {"id": user["id"], "email": user["email"], "name": new_name}
 
@@ -794,7 +809,7 @@ async def get_hearing_profile(user: dict = Depends(get_current_user)):
 
 
 @api.post("/me/hearing-profile")
-async def save_hearing_profile(body: HearingProfileIn, user: dict = Depends(get_current_user)):
+async def save_hearing_profile(body: HearingProfileIn, request: Request, user: dict = Depends(get_current_user)):
     """Persist the user's calibration. Two valid shapes:
       1) {bands: [...]}    — save a real calibration. We compute gain_db
                               server-side so a malicious client can't ask for
@@ -811,6 +826,10 @@ async def save_hearing_profile(body: HearingProfileIn, user: dict = Depends(get_
             "skipped": True,
         }
         await db.users.update_one({"id": user["id"]}, {"$set": {"hearing_profile": stub}})
+        await _audit(
+            "hearing.skipped", request,
+            user_id=user["id"], user_email=user.get("email"),
+        )
         return stub
 
     if not body.bands:
@@ -837,14 +856,24 @@ async def save_hearing_profile(body: HearingProfileIn, user: dict = Depends(get_
         "skipped": False,
     }
     await db.users.update_one({"id": user["id"]}, {"$set": {"hearing_profile": profile}})
+    boosted = [b["freq"] for b in record_bands if b["gain_db"] > 0]
+    await _audit(
+        "hearing.calibrated", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"boosted_bands": boosted, "band_count": len(record_bands)},
+    )
     return profile
 
 
 @api.delete("/me/hearing-profile")
-async def delete_hearing_profile(user: dict = Depends(get_current_user)):
+async def delete_hearing_profile(request: Request, user: dict = Depends(get_current_user)):
     """Reset the user's calibration. Used by the 'Recalibrate' button in
     Account → Hearing profile."""
     await db.users.update_one({"id": user["id"]}, {"$unset": {"hearing_profile": ""}})
+    await _audit(
+        "hearing.reset", request,
+        user_id=user["id"], user_email=user.get("email"),
+    )
     return {"ok": True}
 
 
@@ -1300,6 +1329,16 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     parts.append("Reply now with the JSON object only.")
     user_text = "\n".join(parts)
 
+    # Audit only the FIRST turn of each companion session — subsequent turns
+    # in the same conversation stay quiet so the audit log doesn't drown in
+    # per-message rows. `history` is empty on turn 1 by construction.
+    if not (body.history or []):
+        await _audit(
+            "agent.session_started", request,
+            user_id=user["id"], user_email=user.get("email"),
+            metadata={"session_id": body.session_id, "message_preview": body.message.strip()[:80]},
+        )
+
     chat = LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=body.session_id or f"agent-{user['id']}-{uuid.uuid4().hex[:6]}",
@@ -1328,7 +1367,7 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
 
 
 @api.post("/me/agent/checkin")
-async def agent_checkin(body: AgentCheckinIn, user: dict = Depends(get_current_user)):
+async def agent_checkin(body: AgentCheckinIn, request: Request, user: dict = Depends(get_current_user)):
     """Persist a (mood → chosen suggestion) pair from the AI Companion sheet.
     Called by the frontend when the user actually taps a suggestion, so we
     only log moments the user committed to (not idle browsing). Read back
@@ -1413,6 +1452,15 @@ async def agent_checkin(body: AgentCheckinIn, user: dict = Depends(get_current_u
             await db.agent_checkins.delete_many({"id": {"$in": stale}})
     except Exception as exc:  # noqa: BLE001 — defensive housekeeping; never fail the request
         logger.warning("[agent_checkin] history trim failed: %s", exc)
+    await _audit(
+        "agent.suggestion_taken", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={
+            "kind": record_sug.get("kind"),
+            "label": record_sug.get("label"),
+            "mood_preview": body.message.strip()[:80],
+        },
+    )
     return {"ok": True, "id": doc["id"]}
 
 

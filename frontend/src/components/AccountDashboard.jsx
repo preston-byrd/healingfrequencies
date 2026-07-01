@@ -716,7 +716,9 @@ export default function AccountDashboard({ onBack }) {
                   key={ev.id}
                   className="flex items-center gap-3 text-[11px] font-mono py-1 border-b border-[#5C9E8C]/8"
                 >
-                  <span className="text-[#5A6B65] tabular-nums w-[88px] shrink-0">
+                  <span className="text-[#5A6B65] tabular-nums w-[130px] shrink-0" title={new Date(ev.ts).toLocaleString()}>
+                    {new Date(ev.ts).toLocaleDateString([], { month: 'short', day: '2-digit' })}
+                    {' · '}
                     {new Date(ev.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                   </span>
                   <span className="text-[#C4A67A] w-[170px] shrink-0 truncate">{ev.event}</span>
