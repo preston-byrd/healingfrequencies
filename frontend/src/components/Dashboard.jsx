@@ -16,6 +16,7 @@ import VoiceShortcutsModal from '@/components/VoiceShortcutsModal';
 import CalibrationModal from '@/components/CalibrationModal';
 import OnboardingTransitionCard from '@/components/OnboardingTransitionCard';
 import detectHeadphones from '@/lib/detectHeadphones';
+import SoundBathPanel from '@/components/SoundBathPanel';
 
 const SOLFEGGIO = [
   { hz: 174, name: 'Foundation', desc: 'Pain relief' },
@@ -1144,6 +1145,12 @@ export default function Dashboard({ onOpenAccount }) {
               </button>
             )}
           </div>
+
+          {/* Sound Bath — algorithmic crystal-bowl / chime / gong washes.
+              Free for everyone (unlike the curated Soundscapes below which
+              are Pro-only). Placed above Soundscapes so it's discoverable
+              on first paint. */}
+          <SoundBathPanel />
 
           {/* Soundscapes — curated multi-layer mixes, Pro only */}
           <div className={`glass p-5 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="soundscapes-section">
