@@ -770,24 +770,39 @@ export default function Dashboard({ onOpenAccount }) {
   };
 
   const loadSession = (s) => {
+    // Stop any current playback so a saved session always starts from a
+    // clean slate (no residual soundscape / bath / smart-fade state).
+    try { getSoundBath(audioEngine).stop(); } catch (e) { /* graceful */ }
+    if (audioEngine.playing) audioEngine.stop();
+
     audioEngine.setFrequency(s.frequency);
     audioEngine.setWaveform(s.waveform);
     audioEngine.setBinaural(s.binaural || 0);
-    setDuration(s.duration_minutes || 10);
+    const mins = s.duration_minutes || 10;
+    setDuration(mins);
     setBreathwork(!!s.breathwork);
     Object.entries(s.ambient || {}).forEach(([k, v]) => audioEngine.setAmbient(k, v));
-    // If this session bookmarked a Sound Bath preset, relaunch it now.
-    // Random note stream isn't seed-replayable, but the preset key is — so a
-    // fresh arrangement of the same bath fires.
-    if (s.sound_bath && s.sound_bath.preset_key && isPro) {
-      (async () => {
-        try {
-          if (!audioEngine.playing) await audioEngine.start();
+
+    // Auto-start playback and arm the countdown to THIS session's saved
+    // duration — the player transport (Play/Pause icon + countdown widget)
+    // becomes the single source of truth for the loaded session. Stopping
+    // from the player halts everything, exactly like a fresh session.
+    (async () => {
+      try {
+        // Small delay so the previous stop()'s toneGain fade has room to
+        // settle before we spin up the new oscillator — avoids brief overlap.
+        await new Promise((r) => setTimeout(r, s.sound_bath ? 0 : 120));
+        if (!audioEngine.playing) await audioEngine.start();
+        setRemaining(mins * 60);
+        // If this session bookmarked a Sound Bath preset, relaunch it now.
+        // Random note stream isn't seed-replayable, but the preset key is — so
+        // a fresh arrangement of the same bath fires alongside the base tone.
+        if (s.sound_bath && s.sound_bath.preset_key && isPro) {
           const bath = getSoundBath(audioEngine);
           await bath.start(s.sound_bath.preset_key);
-        } catch (e) { console.warn('[Dashboard] bath resume failed', e); }
-      })();
-    }
+        }
+      } catch (e) { console.warn('[Dashboard] loadSession start failed', e); }
+    })();
   };
 
   // Save the currently-playing Sound Bath as a bookmarkable arrangement.
@@ -1309,7 +1324,11 @@ export default function Dashboard({ onOpenAccount }) {
               )}
               {sessions.map((s) => (
                 <div key={s.id} data-testid={`saved-session-${s.id}`} className="glass-soft p-3 flex items-center justify-between gap-2">
-                  <button onClick={() => loadSession(s)} className="text-left flex-1 min-w-0">
+                  <button
+                    data-testid={`load-session-${s.id}`}
+                    onClick={() => loadSession(s)}
+                    className="text-left flex-1 min-w-0"
+                  >
                     <div className="text-sm text-[#E8E3D9] truncate">{s.name}</div>
                     <div className="text-[11px] font-mono text-[#72C2AC]">{s.frequency}Hz · {s.duration_minutes}m</div>
                   </button>
