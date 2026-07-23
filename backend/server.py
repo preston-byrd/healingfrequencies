@@ -2165,17 +2165,35 @@ async def admin_delete_user(user_id: str, request: Request, user: dict = Depends
 
 # --- Admin observability ----------------------------------------------------
 @api.get("/admin/security")
-async def admin_security(user: dict = Depends(get_current_user)):
+async def admin_security(
+    days: Optional[int] = None,
+    user: dict = Depends(get_current_user),
+):
     """Live security counters for the admin dashboard tile.
     Each counter exposes `last_hour` / `last_24h` / `last_7d` totals plus the
     most recent audit events. Counters are in-memory (reset on restart);
     audit-log events are persisted in MongoDB.
+
+    Query params:
+        days — optional (7 | 30 | 90). When present, the `recent_events`
+               feed is scoped to events with `ts >= now - days` and the
+               limit is expanded (up to 300 items) so the admin can page
+               through a longer history. Omit or pass an invalid value to
+               get the default 12-item most-recent snapshot.
     """
     _require_admin(user)
     metrics = {name: _metric_summary(name) for name in _METRIC_BUCKETS.keys()}
-    # Most recent 12 events for context (lets the tile show a recent activity feed).
-    recent_cursor = db.audit_log.find({}, {"_id": 0}).sort("ts", -1).limit(12)
-    recent = await recent_cursor.to_list(12)
+    # Recent-events feed. Default snapshot = 12 items (backwards compatible).
+    # When `days` is supplied and one of the accepted values, filter by ts
+    # and lift the cap so the feed becomes browsable history.
+    recent_query: dict = {}
+    recent_limit = 12
+    if days in (7, 30, 90):
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        recent_query = {"ts": {"$gte": cutoff.isoformat()}}
+        recent_limit = 300
+    recent_cursor = db.audit_log.find(recent_query, {"_id": 0}).sort("ts", -1).limit(recent_limit)
+    recent = await recent_cursor.to_list(recent_limit)
     # Pending registration count for the "new user notification" badge:
     # how many users registered in the last 24h that the admin hasn't acknowledged.
     one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
@@ -2185,6 +2203,8 @@ async def admin_security(user: dict = Depends(get_current_user)):
     return {
         "metrics": metrics,
         "recent_events": recent,
+        "recent_window_days": days if days in (7, 30, 90) else None,
+        "recent_returned": len(recent),
         "new_users_24h": new_users_24h,
     }
 

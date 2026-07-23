@@ -55,9 +55,14 @@ export default function AccountDashboard({ onBack }) {
 
   // admin security tile — counters + recent audit events + new-user badge
   const [security, setSecurity] = useState(null);
-  const loadSecurity = async () => {
+  // Range for the "Recent Activity" feed. `null` = default snapshot (12 most
+  // recent items across all time). 7/30/90 = filter by that many days AND
+  // lift the cap to 300 items for browsable history.
+  const [activityRangeDays, setActivityRangeDays] = useState(null);
+  const loadSecurity = async (rangeDays = activityRangeDays) => {
     try {
-      const { data } = await api.get('/admin/security');
+      const params = rangeDays ? { days: rangeDays } : {};
+      const { data } = await api.get('/admin/security', { params });
       setSecurity(data);
     } catch (e) {
       console.warn('[AccountDashboard] loadSecurity failed', e);
@@ -93,11 +98,13 @@ export default function AccountDashboard({ onBack }) {
 
   // Admin security tile auto-refresh — poll every 30s while the tab is open.
   // Light query (single GET, no Stripe call) so it's safe to keep alive.
+  // Re-subscribes when the activity range changes so the poll stays in sync
+  // with the selected 7d / 30d / 90d window.
   useEffect(() => {
     if (!sub?.is_admin) return undefined;
-    const id = setInterval(() => { loadSecurity(); }, 30000);
+    const id = setInterval(() => { loadSecurity(activityRangeDays); }, 30000);
     return () => clearInterval(id);
-  }, [sub?.is_admin]);
+  }, [sub?.is_admin, activityRangeDays]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle Stripe return: ?stripe_session_id=...
   useEffect(() => {
@@ -710,9 +717,46 @@ export default function AccountDashboard({ onBack }) {
               })}
             </div>
 
-            {/* Recent audit events feed — 12 most recent across all event types.
-                Click an event chip to filter by prefix (UX TODO if needed). */}
-            <div className="label-tiny mb-2 text-[#8A9A92]">Recent activity</div>
+            {/* Recent audit events feed — default snapshot shows the 12 most
+                recent across all event types. Admin can widen the window via
+                the 7d / 30d / 90d chips (backend expands the cap to 300 rows
+                and filters by ts). Latest badge shows how many events came
+                back so the admin knows they're not silently truncated. */}
+            <div className="flex items-center justify-between mb-2 gap-3 flex-wrap">
+              <div className="label-tiny text-[#8A9A92]">Recent activity</div>
+              <div className="flex items-center gap-1 text-[10px] font-mono">
+                {[
+                  { key: null, label: 'Latest' },
+                  { key: 7,    label: '7d'     },
+                  { key: 30,   label: '30d'    },
+                  { key: 90,   label: '90d'    },
+                ].map((opt) => {
+                  const isActive = activityRangeDays === opt.key;
+                  return (
+                    <button
+                      key={String(opt.key)}
+                      data-testid={`admin-activity-range-${opt.key ?? 'latest'}`}
+                      onClick={() => { setActivityRangeDays(opt.key); loadSecurity(opt.key); }}
+                      className={`px-2 py-1 rounded-md tracking-widest uppercase transition-colors ${
+                        isActive
+                          ? 'bg-[#5C9E8C]/25 text-[#72C2AC] border border-[#5C9E8C]/40'
+                          : 'text-[#8A9A92] hover:text-[#E8E3D9] border border-transparent'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+                {activityRangeDays && (
+                  <span
+                    className="ml-2 text-[10px] text-[#5A6B65]"
+                    data-testid="admin-activity-count"
+                  >
+                    {security.recent_returned ?? (security.recent_events || []).length} events
+                  </span>
+                )}
+              </div>
+            </div>
             <div className="space-y-1.5 max-h-56 overflow-y-auto custom-scrollbar pr-1" data-testid="admin-recent-events">
               {(security.recent_events || []).map((ev) => (
                 <div
