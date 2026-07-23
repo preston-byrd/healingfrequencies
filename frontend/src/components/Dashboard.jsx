@@ -6,6 +6,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
+import WellnessCheckinCard from '@/components/WellnessCheckinCard';
 import StreakPanel from '@/components/StreakPanel';
 import AIAgentSheet from '@/components/AIAgentSheet';
 import InstallAppModal from '@/components/InstallAppModal';
@@ -146,6 +147,13 @@ export default function Dashboard({ onOpenAccount }) {
   // by this unified 300s path.
   const SMART_FADE_SECONDS = 300; // 5 minutes
   const fadeArmedRef = React.useRef(false);
+  // Marks whether the CURRENT session was launched by the Wellness Assistant
+  // (i.e. via `sf:agent:suggestion-taken`). When true, the timer-expiry
+  // branch shows a soft "How are you feeling now?" check-in instead of
+  // silently ending — giving the user the option to extend +10 min or close
+  // the assistant flow gracefully.
+  const assistantOwnedRef = React.useRef(false);
+  const [checkinOpen, setCheckinOpen] = useState(false);
 
   const checkIn = async (minutes) => {
     try {
@@ -195,6 +203,13 @@ export default function Dashboard({ onOpenAccount }) {
         setRemaining(0);
         setActiveSoundscape(null);
         fadeArmedRef.current = false;
+        // If the Wellness Assistant kicked off this session, show the soft
+        // "How are you feeling now?" check-in prompt now that the 5-min
+        // fade has fully resolved to silence. The prompt gives the user a
+        // graceful choice: extend the session by 10 min or close the flow.
+        if (assistantOwnedRef.current) {
+          setCheckinOpen(true);
+        }
       } else {
         // Smart Fade — arm the master-bus taper once secsLeft crosses below
         // the 5-min threshold. The fade is scheduled with the EXACT remaining
@@ -440,6 +455,10 @@ export default function Dashboard({ onOpenAccount }) {
         const DEFAULT_MIN = 5;
         setDuration(DEFAULT_MIN);
         setRemaining(DEFAULT_MIN * 60);
+        // Mark this session as Wellness-Assistant-owned so the timer-expiry
+        // branch knows to surface the "How are you feeling now?" check-in
+        // once the fade completes.
+        assistantOwnedRef.current = true;
       }
       // Reset any prior pending transition timer (e.g. user picked twice in a session).
       if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
@@ -482,6 +501,31 @@ export default function Dashboard({ onOpenAccount }) {
   const closeCalibration = useCallback(() => {
     setCalibrationOpen(false);
     try { audioEngine.setBaseline(null); } catch (e) { /* */ }
+  }, []);
+
+  // ---- Wellness Assistant post-session check-in --------------------------
+  // Handlers for the "How are you feeling now?" card that surfaces after a
+  // Wellness-Assistant-triggered 5-minute session fully fades to silence.
+  const dismissCheckin = useCallback(() => {
+    setCheckinOpen(false);
+    assistantOwnedRef.current = false;
+  }, []);
+
+  const continueCheckin = useCallback(() => {
+    // Extend the session by 10 more minutes: re-arm the audio engine with
+    // the SAME configuration the user was hearing (nothing was mutated on
+    // stop besides the transport), arm the countdown, and keep the
+    // assistantOwnedRef flag so a subsequent natural expiry surfaces another
+    // check-in if the user wants to keep extending.
+    setCheckinOpen(false);
+    const EXTEND_MIN = 10;
+    (async () => {
+      try {
+        if (!audioEngine.playing) await audioEngine.start();
+        setDuration(EXTEND_MIN);
+        setRemaining(EXTEND_MIN * 60);
+      } catch (e) { console.warn('[Dashboard] checkin continue failed', e); }
+    })();
   }, []);
   useEffect(() => {
     haptic.attachToAudio();
@@ -612,6 +656,9 @@ export default function Dashboard({ onOpenAccount }) {
       try { getSoundBath(audioEngine).stop(); } catch (e) { /* graceful */ }
       audioEngine.stop();
       setRemaining(0);
+      // Manual stop bypasses the natural fade path, so don't queue a
+      // "how are you feeling now?" check-in on the next fade completion.
+      assistantOwnedRef.current = false;
     }
   };
 
@@ -1387,6 +1434,11 @@ export default function Dashboard({ onOpenAccount }) {
         <main className="flex-1 relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/30 min-h-[480px] lg:min-h-0">
           <Visualizer playing={state.playing} frequency={state.frequency} mode={visualMode} />
           <Breathwork active={breathwork && state.playing} />
+          <WellnessCheckinCard
+            open={checkinOpen}
+            onContinue={continueCheckin}
+            onDone={dismissCheckin}
+          />
 
           {/* Visual-mode chips — Rings / Chladni / Ripples.
               Desktop (sm+): top-right horizontal row of the visualizer.
