@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2 } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -17,6 +17,7 @@ import CalibrationModal from '@/components/CalibrationModal';
 import OnboardingTransitionCard from '@/components/OnboardingTransitionCard';
 import detectHeadphones from '@/lib/detectHeadphones';
 import SoundBathPanel from '@/components/SoundBathPanel';
+import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -82,6 +83,7 @@ const SOUNDSCAPES = [
 // Pro feature index for the "What's in Pro" banner row
 const PRO_PREVIEW = [
   { label: 'Sound Baths', Icon: Waves },
+  { label: 'Meditation Sounds', Icon: Flower2 },
   { label: 'Brainwave & Specials', Icon: Brain },
   { label: 'φ Golden Stack', Icon: Sparkles },
   { label: 'Sleep Mode', Icon: Moon },
@@ -1219,6 +1221,21 @@ export default function Dashboard({ onOpenAccount }) {
               setRemaining(0);
               // Full silence — kill the audioEngine base oscillator too so
               // there's no residual "hum" after the bath fades out.
+              try { audioEngine.stop(); } catch (e) { /* graceful */ }
+            }}
+          />
+
+          {/* Meditation Sounds — Pro-only. Three tabs (Presets · Chakras ·
+              Breath) sit thematically between Sound Bath and Soundscapes.
+              Timer arms to a fixed 10-min contemplative window per tap; the
+              user can stop from the player transport or by re-tapping the
+              same tile. */}
+          <MeditationSoundsPanel
+            isPro={isPro}
+            onUnlock={onOpenAccount}
+            onSessionStart={() => { setRemaining(BATH_DEFAULT_MIN * 60); }}
+            onSessionStop={() => {
+              setRemaining(0);
               try { audioEngine.stop(); } catch (e) { /* graceful */ }
             }}
           />

@@ -323,6 +323,7 @@ export default function AccountDashboard({ onBack }) {
   const proFeatures = [
     'Unlimited saved sessions',
     'Sound Baths — 7 algorithmic crystal-bowl, chime & gong washes',
+    'Meditation Sounds — curated presets, 7 chakra tones & guided breath pacers',
     'Soundscapes — 6 curated multi-layer mixes',
     'Brainwave & Specials presets (Delta, Theta, Schumann, 111, Tesla 369, Angel 444, …)',
     'φ Golden Stack harmonic mode',

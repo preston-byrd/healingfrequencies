@@ -36,7 +36,7 @@
 import audioEngine from './audioEngine';
 
 const LS_KEY = 'sf_haptic_prefs_v1';
-const VALID_PATTERNS = ['auto', 'heartbeat', 'breath478', 'frequency'];
+const VALID_PATTERNS = ['auto', 'heartbeat', 'breath478', 'breathBox', 'breathCoherent', 'frequency'];
 
 function _loadPrefs() {
   if (typeof localStorage === 'undefined') return { enabled: false, pattern: 'auto' };
@@ -279,6 +279,24 @@ class HapticEngine {
       // EXHALE 8s: 4 evenly-spaced gentle taps so the user feels the
       // release pacing. Sum of array (excluding final tail): 80*4 + 1920*3 = 6080ms.
       return { vibration: [80, 1920, 80, 1920, 80, 1920, 80], intervalMs: 8000 };
+    }
+    if (pat === 'breathBox') {
+      // Box breathing (Navy SEAL cadence): 4s inhale · 4s hold · 4s exhale · 4s hold.
+      // 4-phase cycle, one tap per phase transition.
+      const phase = this._breathPhaseIdx % 4;
+      this._breathPhaseIdx = (this._breathPhaseIdx + 1) % 4;
+      // 200ms pulse at each phase boundary; user feels the "corner" of the box.
+      return { vibration: [200], intervalMs: 4000 };
+      // (phase var referenced for parity with 4-7-8 pattern; all corners feel identical by design)
+    }
+    if (pat === 'breathCoherent') {
+      // Coherent breathing at ~5.5 breaths/min (5.5s inhale · 5.5s exhale)
+      // proven to boost HRV. Two-phase cycle, gentle pulse at each turn.
+      const phase = this._breathPhaseIdx % 2;
+      this._breathPhaseIdx = (this._breathPhaseIdx + 1) % 2;
+      // Inhale phase gets a slightly longer pulse (feels like an "up-swell"),
+      // exhale gets a shorter one (feels like a "release").
+      return { vibration: [phase === 0 ? 240 : 120], intervalMs: 5500 };
     }
     if (pat === 'frequency') {
       // Pulse on the binaural OR isochronic rate. IMPORTANT: the human
