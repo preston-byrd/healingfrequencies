@@ -741,18 +741,23 @@ export default function Dashboard({ onOpenAccount }) {
     if (!isPro) { onOpenAccount(); return; }
     setBreathwork((prev) => {
       const next = !prev;
-      // Turning it ON without any active session is a dead tap — the
-      // Breathwork overlay only renders when `state.playing` is true. Auto-
-      // start the audio engine (with the user's currently-selected tone) so
-      // the breathing orb appears immediately. Timer arms to the session's
-      // Duration slider so this counts as a normal session.
-      if (next && !audioEngine.playing) {
-        (async () => {
-          try {
-            await audioEngine.start();
-            setRemaining(duration * 60);
-          } catch (e) { console.warn('[Dashboard] breathwork auto-start failed', e); }
-        })();
+      if (next) {
+        // Turning ON: audio must be running for the breathing overlay to
+        // render, so auto-start the engine + arm the timer.
+        if (!audioEngine.playing) {
+          (async () => {
+            try {
+              await audioEngine.start();
+              setRemaining(duration * 60);
+            } catch (e) { console.warn('[Dashboard] breathwork auto-start failed', e); }
+          })();
+        }
+      } else {
+        // Turning OFF: single-tap stop should undo everything the ON-tap
+        // started — silence audio, halt any sound-bath, clear the timer.
+        try { getSoundBath(audioEngine).stop(); } catch (e) { /* graceful */ }
+        try { audioEngine.stop(); } catch (e) { /* graceful */ }
+        setRemaining(0);
       }
       return next;
     });
