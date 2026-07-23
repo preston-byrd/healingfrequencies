@@ -41,16 +41,26 @@ export default function Breathwork({ active }) {
   else scale = 1.0 - 0.3 * progress;
 
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+    <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+      {/* Breathing orb — the phase word sits inside the circle so it never
+          collides with the transport (Play/Pause + timer) that anchors at
+          the bottom of the visualizer, especially on mobile viewports. */}
       <div
-        className="w-48 h-48 rounded-full border border-[#72C2AC]/50"
+        className="relative w-40 h-40 sm:w-48 sm:h-48 rounded-full border border-[#72C2AC]/50 flex items-center justify-center"
         style={{
           transform: `scale(${scale})`,
           transition: 'transform 0.1s linear',
           boxShadow: '0 0 60px rgba(114,194,172,0.25), inset 0 0 60px rgba(114,194,172,0.15)',
         }}
-      />
-      <div className="mt-6 label-tiny" data-testid="breath-phase">{PHASES[phaseIdx].name}</div>
+      >
+        <div
+          data-testid="breath-phase"
+          className="text-[13px] sm:text-[11px] tracking-[0.24em] uppercase font-semibold text-[#C9DED6] drop-shadow-[0_1px_6px_rgba(0,0,0,0.55)]"
+          style={{ transform: `scale(${1 / scale})`, transition: 'transform 0.1s linear' }}
+        >
+          {PHASES[phaseIdx].name}
+        </div>
+      </div>
     </div>
   );
 }
