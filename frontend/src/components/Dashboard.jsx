@@ -7,6 +7,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
 import WellnessCheckinCard from '@/components/WellnessCheckinCard';
+import FlowModePanel from '@/components/FlowModePanel';
 import StreakPanel from '@/components/StreakPanel';
 import AIAgentSheet from '@/components/AIAgentSheet';
 import InstallAppModal from '@/components/InstallAppModal';
@@ -154,6 +155,9 @@ export default function Dashboard({ onOpenAccount }) {
   // the assistant flow gracefully.
   const assistantOwnedRef = React.useRef(false);
   const [checkinOpen, setCheckinOpen] = useState(false);
+  // Flow Mode current stage — {stageIdx: 0|1|2, meta: {hz, name, sub}} while
+  // a journey is running; null otherwise. Powers the visualiser overlay.
+  const [flowStage, setFlowStage] = useState(null);
 
   const checkIn = async (minutes) => {
     try {
@@ -1214,6 +1218,26 @@ export default function Dashboard({ onOpenAccount }) {
             </div>
           </div>
 
+          {/* Flow Mode — 3-stage guided frequency journeys. Free users get
+              the 3 pre-built journeys; Pro unlocks the Custom Flow builder
+              that lets them pick any 3 Solfeggio frequencies for a
+              personalised journey. Sits directly below the Solfeggio /
+              Sleep card, above the Pro-locked Brainwave & Specials tile. */}
+          <FlowModePanel
+            isPro={isPro}
+            solfeggioList={SOLFEGGIO.map((p) => ({ hz: p.hz, label: p.name, sub: p.desc }))}
+            onFlowStart={(mins) => { setDuration(mins); setRemaining(mins * 60); }}
+            onFlowStop={() => {
+              setRemaining(0);
+              try { audioEngine.stop(); } catch (e) { /* graceful */ }
+              setFlowStage(null);
+            }}
+            onStageChange={(stageIdx, meta) => {
+              setFlowStage(meta ? { stageIdx, meta } : null);
+            }}
+            onUnlock={onOpenAccount}
+          />
+
           {/* Brainwave & Specials — Pro only */}
           <div className={`glass p-5 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="specials-section">
             <div className="flex items-center justify-between mb-3">
@@ -1471,14 +1495,43 @@ export default function Dashboard({ onOpenAccount }) {
             ))}
           </div>
 
-          {/* Frequency label (top) */}
+          {/* Frequency label (top) — while a Flow journey is running the
+              central label shows the CURRENT stage's frequency + name plus
+              a 3-dot progress row. Smooth transitions between stages come
+              for free because the label re-renders when flowStage changes. */}
           <div className="absolute top-6 left-1/2 -translate-x-1/2 text-center z-10">
-            <div className="label-tiny">Now Tuning</div>
-            <div data-testid="current-frequency" className="font-mono text-4xl text-[#72C2AC] tracking-widest mt-1">
-              {state.frequency.toFixed(1)}<span className="text-base text-[#8A9A92] ml-1">Hz</span>
+            <div className="label-tiny">
+              {flowStage ? `Flow · Stage ${flowStage.stageIdx + 1} of 3` : 'Now Tuning'}
             </div>
-            {activePreset && (
-              <div className="font-display text-xl text-[#E8E3D9] mt-1">{activePreset.name}</div>
+            <div
+              data-testid="current-frequency"
+              className="font-mono text-4xl text-[#72C2AC] tracking-widest mt-1 transition-opacity duration-700"
+            >
+              {(flowStage ? flowStage.meta.hz : state.frequency).toFixed(1)}<span className="text-base text-[#8A9A92] ml-1">Hz</span>
+            </div>
+            {(flowStage || activePreset) && (
+              <div className="font-display text-xl text-[#E8E3D9] mt-1 transition-opacity duration-700">
+                {flowStage ? flowStage.meta.name : activePreset.name}
+              </div>
+            )}
+            {flowStage && flowStage.meta.sub && (
+              <div className="text-[11px] text-[#8A9A92] mt-0.5">{flowStage.meta.sub}</div>
+            )}
+            {flowStage && (
+              <div className="flex items-center gap-1.5 mt-3 justify-center" data-testid="visualizer-flow-progress">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className={`h-1 w-8 rounded-full transition-colors duration-500 ${
+                      i < flowStage.stageIdx
+                        ? 'bg-[#72C2AC]'
+                        : i === flowStage.stageIdx
+                        ? 'bg-[#72C2AC]/60'
+                        : 'bg-[#5C9E8C]/20'
+                    }`}
+                  />
+                ))}
+              </div>
             )}
           </div>
 
