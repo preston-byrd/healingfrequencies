@@ -7,6 +7,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
 import WellnessCheckinCard from '@/components/WellnessCheckinCard';
+import SessionUnlockCard from '@/components/SessionUnlockCard';
 import FlowModePanel from '@/components/FlowModePanel';
 import StreakPanel from '@/components/StreakPanel';
 import AIAgentSheet from '@/components/AIAgentSheet';
@@ -158,6 +159,11 @@ export default function Dashboard({ onOpenAccount }) {
   // Flow Mode current stage — {stageIdx: 0|1|2, meta: {hz, name, sub}} while
   // a journey is running; null otherwise. Powers the visualiser overlay.
   const [flowStage, setFlowStage] = useState(null);
+  // Saved-session lock — free / trial-expired users can still see their
+  // saved sessions (safely stored, never deleted) but tapping any of them
+  // opens the SessionUnlockCard upgrade prompt instead of loading. Data is
+  // fully preserved so a Pro upgrade instantly restores access.
+  const [sessionUnlockOpen, setSessionUnlockOpen] = useState(false);
 
   const checkIn = async (minutes) => {
     try {
@@ -844,6 +850,10 @@ export default function Dashboard({ onOpenAccount }) {
   };
 
   const loadSession = (s) => {
+    // Non-Pro users can see their saved sessions but tapping any locked row
+    // opens the calm upgrade prompt instead — sessions themselves are never
+    // deleted or modified, so a Pro upgrade instantly restores access.
+    if (!isPro) { setSessionUnlockOpen(true); return; }
     // Stop any current playback so a saved session always starts from a
     // clean slate (no residual soundscape / bath / smart-fade state).
     try { getSoundBath(audioEngine).stop(); } catch (e) { /* graceful */ }
@@ -1416,18 +1426,33 @@ export default function Dashboard({ onOpenAccount }) {
                   <button
                     data-testid={`load-session-${s.id}`}
                     onClick={() => loadSession(s)}
-                    className="text-left flex-1 min-w-0"
+                    className="text-left flex-1 min-w-0 flex items-center gap-2"
                   >
-                    <div className="text-sm text-[#E8E3D9] truncate">{s.name}</div>
-                    <div className="text-[11px] font-mono text-[#72C2AC]">{s.frequency}Hz · {s.duration_minutes}m</div>
+                    {!isPro && (
+                      <Lock
+                        size={12}
+                        className="text-[#C4A67A] shrink-0"
+                        data-testid={`session-lock-${s.id}`}
+                      />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm text-[#E8E3D9] truncate">{s.name}</div>
+                      <div className="text-[11px] font-mono text-[#72C2AC]">{s.frequency}Hz · {s.duration_minutes}m</div>
+                    </div>
                   </button>
-                  <button
-                    data-testid={`delete-session-${s.id}`}
-                    onClick={() => deleteSession(s.id)}
-                    className="text-[#8A9A92] hover:text-[#D96C6C] transition-colors"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {/* Delete is hidden for non-Pro users so trial-expired
+                      accounts can't accidentally lose their saved data
+                      before deciding whether to upgrade. Sessions remain
+                      recoverable the moment they subscribe. */}
+                  {isPro && (
+                    <button
+                      data-testid={`delete-session-${s.id}`}
+                      onClick={() => deleteSession(s.id)}
+                      className="text-[#8A9A92] hover:text-[#D96C6C] transition-colors"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -1442,6 +1467,11 @@ export default function Dashboard({ onOpenAccount }) {
             open={checkinOpen}
             onContinue={continueCheckin}
             onDone={dismissCheckin}
+          />
+          <SessionUnlockCard
+            open={sessionUnlockOpen}
+            onUpgrade={() => { setSessionUnlockOpen(false); onOpenAccount(); }}
+            onDismiss={() => setSessionUnlockOpen(false)}
           />
 
           {/* Visual-mode chips — Rings / Chladni / Ripples.
