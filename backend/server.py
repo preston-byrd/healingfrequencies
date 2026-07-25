@@ -619,6 +619,44 @@ class CheckoutIn(BaseModel):
         default="card",
         pattern=r"^(card|apple_pay|google_pay|link)$",
     )
+    # Optional promo code applied at checkout. If it's a discount code the
+    # server creates a Stripe coupon on-the-fly and attaches it to the
+    # session; if it's a referral code it's recorded on the user + logged;
+    # comp codes never hit this endpoint (they short-circuit to /promo/redeem).
+    promo_code: Optional[str] = Field(default=None, max_length=48)
+
+
+# ------------------------------------------------------------------ #
+# Promo Codes                                                        #
+# ------------------------------------------------------------------ #
+class PromoCreateIn(BaseModel):
+    code: str = Field(..., min_length=3, max_length=48)
+    type: str = Field(..., pattern=r"^(comp|discount|referral)$")
+    active: bool = True
+    expires_at: Optional[str] = None    # ISO datetime string
+    max_uses: Optional[int] = Field(default=None, ge=1)
+    # comp
+    duration_days: Optional[int] = Field(default=None, ge=1, le=3650)
+    # discount
+    percent_off: Optional[int] = Field(default=None, ge=1, le=100)
+    applies_to: Optional[str] = Field(default=None, pattern=r"^(monthly|annual|both)$")
+    # referral
+    rep_name: Optional[str] = Field(default=None, max_length=120)
+    rep_email: Optional[str] = Field(default=None, max_length=200)
+
+
+class PromoUpdateIn(BaseModel):
+    active: Optional[bool] = None
+    expires_at: Optional[str] = None
+    max_uses: Optional[int] = Field(default=None, ge=1)
+
+
+class PromoValidateIn(BaseModel):
+    code: str = Field(..., min_length=1, max_length=48)
+
+
+class PromoRedeemIn(BaseModel):
+    code: str = Field(..., min_length=1, max_length=48)
 
 
 class PlanPricesIn(BaseModel):
@@ -1636,6 +1674,40 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
     if include_trial:
         subscription_data["trial_period_days"] = trial_days
 
+    # Optional promo-code application. Discount codes: create a Stripe coupon
+    # on-the-fly and attach via `discounts`. Referral codes: tag the user and
+    # log the redemption. Comp codes should never reach this endpoint — they
+    # short-circuit via /promo/redeem.
+    promo_discounts = None
+    promo_doc = None
+    if body.promo_code:
+        promo_doc = await db.promo_codes.find_one({"code": body.promo_code.strip().upper()})
+        ok, reason = _promo_active_now(promo_doc)
+        if not ok:
+            raise HTTPException(status_code=400, detail=reason)
+        if promo_doc["type"] == "comp":
+            raise HTTPException(status_code=400, detail="Complimentary codes are redeemed directly, not at checkout.")
+        if promo_doc["type"] == "discount":
+            # Enforce plan restriction (monthly-only / annual-only / both).
+            applies = promo_doc.get("applies_to", "both")
+            if applies != "both" and applies != body.plan:
+                raise HTTPException(status_code=400, detail=f"This code only applies to the {applies} plan.")
+            metadata["promo_code"] = promo_doc["code"]
+            try:
+                coupon = await _stripe_call(
+                    _stripe.Coupon.create,
+                    percent_off=int(promo_doc["percent_off"]),
+                    duration="once",
+                    name=f"Solarisound promo {promo_doc['code']}",
+                )
+                promo_discounts = [{"coupon": coupon.id}]
+            except Exception as e:
+                logger.warning("[checkout] Stripe coupon.create failed for promo=%s: %s", promo_doc.get("code"), e)
+                raise HTTPException(status_code=502, detail="Could not apply that discount code right now — please try again.")
+        elif promo_doc["type"] == "referral":
+            metadata["promo_code"] = promo_doc["code"]
+            metadata["referral_rep"] = promo_doc.get("rep_name") or ""
+
     # Unified try/except so ANY Stripe failure (Customer.create, Session.create,
     # network/timeout, bad key, restricted account) produces the same 502
     # envelope with a friendly message. Without this, AuthenticationError raised
@@ -1649,8 +1721,9 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
             _stripe.api_base, include_trial, customer_id,
         )
 
-        session = await _stripe_call(
-            _stripe.checkout.Session.create,
+        # Build kwargs so we only pass `discounts` when we have a real coupon.
+        # Stripe rejects an empty `discounts=[]` list.
+        session_kwargs = dict(
             mode="subscription",
             customer=customer_id,
             line_items=[{
@@ -1667,8 +1740,40 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
             cancel_url=cancel_url,
             metadata=metadata,
             subscription_data=subscription_data,
-            allow_promotion_codes=True,
         )
+        if promo_discounts:
+            session_kwargs["discounts"] = promo_discounts
+        else:
+            # Only allow Stripe-managed promotion codes when we're NOT already
+            # applying our own coupon (Stripe rejects both flags together).
+            session_kwargs["allow_promotion_codes"] = True
+
+        session = await _stripe_call(
+            _stripe.checkout.Session.create,
+            **session_kwargs,
+        )
+        # Log our-side redemption tally so the admin's usage counter updates.
+        # We do this optimistically at checkout-creation time (matches our
+        # existing metrics behaviour on `/me/checkout`). Webhook-driven double-
+        # count is prevented by keying on the session_id in metadata.
+        if promo_doc:
+            log_entry = {
+                "user_id": user["id"],
+                "user_email": user.get("email"),
+                "user_name": user.get("name") or user.get("email"),
+                "plan": body.plan,
+                "redeemed_at": datetime.now(timezone.utc).isoformat(),
+                "stripe_session_id": getattr(session, "id", None),
+            }
+            await db.promo_codes.update_one(
+                {"code": promo_doc["code"]},
+                {"$inc": {"redemptions": 1}, "$push": {"redemption_log": log_entry}},
+            )
+            if promo_doc["type"] == "referral":
+                await db.users.update_one(
+                    {"id": user["id"]},
+                    {"$set": {"referral_code": promo_doc["code"], "referral_rep": promo_doc.get("rep_name")}},
+                )
     except HTTPException:
         raise
     except Exception as e:
@@ -2366,6 +2471,199 @@ async def admin_sound_lineage(
 @api.get("/")
 async def root():
     return {"message": "Healing Frequencies API"}
+
+
+# =========================================================================
+# Promo Codes
+# =========================================================================
+# Three code types (comp / discount / referral) share one Mongo collection.
+# The `type` field decides which sub-flow runs on redemption. See the class
+# `PromoCreateIn` docstring for field-by-field semantics.
+# =========================================================================
+
+def _promo_public(doc: dict) -> dict:
+    """Strip Mongo internals + return an API-safe dict for the admin list."""
+    if not doc:
+        return {}
+    doc = {k: v for k, v in doc.items() if k != "_id"}
+    return doc
+
+
+def _promo_active_now(doc: dict) -> tuple[bool, str]:
+    """Return (is_valid, reason) — reason is a user-facing error string if
+    the code cannot be redeemed right now."""
+    if not doc:
+        return False, "Code not found."
+    if not doc.get("active", True):
+        return False, "This code has been deactivated."
+    exp = doc.get("expires_at")
+    if exp:
+        try:
+            if datetime.fromisoformat(exp.replace("Z", "+00:00")) < datetime.now(timezone.utc):
+                return False, "This code has expired."
+        except ValueError:
+            pass
+    max_uses = doc.get("max_uses")
+    if max_uses is not None and doc.get("redemptions", 0) >= max_uses:
+        return False, "This code has reached its redemption limit."
+    return True, ""
+
+
+def _promo_summary(doc: dict) -> str:
+    """Human-friendly one-liner describing what the code unlocks."""
+    t = doc.get("type")
+    if t == "comp":
+        d = doc.get("duration_days", 0)
+        return f"Complimentary Pro access for {d} day{'s' if d != 1 else ''}"
+    if t == "discount":
+        p = doc.get("percent_off", 0)
+        target = doc.get("applies_to", "both")
+        scope = {"monthly": "monthly", "annual": "annual", "both": "monthly or annual"}.get(target, "Pro")
+        return f"{p}% off the {scope} plan"
+    if t == "referral":
+        return f"Referral tracking — {doc.get('rep_name') or 'partner'}"
+    return "Promo code"
+
+
+@api.post("/admin/promo")
+async def admin_create_promo(body: PromoCreateIn, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    code = body.code.strip().upper()
+    existing = await db.promo_codes.find_one({"code": code})
+    if existing:
+        raise HTTPException(status_code=409, detail="A promo code with this name already exists.")
+    # Type-specific validation
+    if body.type == "comp" and not body.duration_days:
+        raise HTTPException(status_code=400, detail="duration_days is required for Complimentary Access codes.")
+    if body.type == "discount" and (not body.percent_off or not body.applies_to):
+        raise HTTPException(status_code=400, detail="percent_off and applies_to are required for Discount codes.")
+    if body.type == "referral" and not body.rep_name:
+        raise HTTPException(status_code=400, detail="rep_name is required for Referral codes.")
+
+    doc = {
+        "code": code,
+        "type": body.type,
+        "active": bool(body.active),
+        "expires_at": body.expires_at,
+        "max_uses": body.max_uses,
+        "duration_days": body.duration_days,
+        "percent_off": body.percent_off,
+        "applies_to": body.applies_to,
+        "rep_name": body.rep_name,
+        "rep_email": body.rep_email,
+        "redemptions": 0,
+        "redemption_log": [],  # list of {user_id, user_email, user_name, plan, redeemed_at}
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": user.get("email"),
+    }
+    await db.promo_codes.insert_one(doc)
+    await _audit("promo_created", None, user_email=user.get("email"), metadata={"code": code, "type": body.type})
+    return _promo_public(doc)
+
+
+@api.get("/admin/promo")
+async def admin_list_promo(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    cursor = db.promo_codes.find({}, {"_id": 0}).sort("created_at", -1).limit(500)
+    return await cursor.to_list(500)
+
+
+@api.patch("/admin/promo/{code}")
+async def admin_update_promo(code: str, body: PromoUpdateIn, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update.")
+    res = await db.promo_codes.update_one({"code": code.upper()}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Code not found.")
+    await _audit("promo_updated", None, user_email=user.get("email"), metadata={"code": code.upper(), "updates": updates})
+    doc = await db.promo_codes.find_one({"code": code.upper()}, {"_id": 0})
+    return doc
+
+
+@api.delete("/admin/promo/{code}")
+async def admin_delete_promo(code: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    res = await db.promo_codes.delete_one({"code": code.upper()})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Code not found.")
+    await _audit("promo_deleted", None, user_email=user.get("email"), metadata={"code": code.upper()})
+    return {"ok": True}
+
+
+@api.post("/promo/validate")
+async def promo_validate(body: PromoValidateIn, user: dict = Depends(get_current_user)):
+    """User-facing: check whether a promo code is redeemable right now and
+    return a friendly summary of what it unlocks. Does NOT mutate anything —
+    the actual redemption happens via `/promo/redeem` (comp/referral) or
+    `/me/checkout` with `promo_code` (discount)."""
+    code = body.code.strip().upper()
+    doc = await db.promo_codes.find_one({"code": code})
+    ok, reason = _promo_active_now(doc)
+    if not ok:
+        return {"valid": False, "reason": reason}
+    return {
+        "valid": True,
+        "type": doc["type"],
+        "summary": _promo_summary(doc),
+        "duration_days": doc.get("duration_days"),
+        "percent_off": doc.get("percent_off"),
+        "applies_to": doc.get("applies_to"),
+    }
+
+
+@api.post("/promo/redeem")
+async def promo_redeem(body: PromoRedeemIn, user: dict = Depends(get_current_user)):
+    """User-facing: redeem a Complimentary or Referral code. Discount codes
+    are NOT redeemed here — they're applied at checkout via `/me/checkout`.
+
+    Comp codes grant Pro instantly for `duration_days`. Referral codes
+    attach the rep to the user's record + append to the redemption log
+    without changing subscription state.
+    """
+    code = body.code.strip().upper()
+    doc = await db.promo_codes.find_one({"code": code})
+    ok, reason = _promo_active_now(doc)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
+    if doc["type"] == "discount":
+        raise HTTPException(status_code=400, detail="Discount codes are applied at checkout, not redeemed here.")
+
+    # Guard against double-redemption per user (comp only — referral can be
+    # re-tagged if the user restarted their signup flow).
+    if doc["type"] == "comp":
+        already = any(entry.get("user_id") == user["id"] for entry in doc.get("redemption_log", []))
+        if already:
+            raise HTTPException(status_code=400, detail="You've already redeemed this code.")
+
+    log_entry = {
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "user_name": user.get("name") or user.get("email"),
+        "plan": "comp_pro" if doc["type"] == "comp" else "referral_signup",
+        "redeemed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    updates = {"$inc": {"redemptions": 1}, "$push": {"redemption_log": log_entry}}
+    await db.promo_codes.update_one({"code": code}, updates)
+
+    if doc["type"] == "comp":
+        # Grant Pro for duration_days. Uses the same pathway as manual admin
+        # grants so downstream (subscriptions collection) stays consistent.
+        days = int(doc.get("duration_days") or 30)
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=days)).isoformat()
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"pro_status": "active", "pro_source": f"promo:{code}", "pro_expires_at": expires}},
+        )
+        await _audit("promo_comp_redeemed", None, user_id=user["id"], user_email=user.get("email"), metadata={"code": code, "days": days})
+        return {"ok": True, "unlocked": "pro_comp", "duration_days": days, "expires_at": expires}
+
+    # Referral
+    await db.users.update_one({"id": user["id"]}, {"$set": {"referral_code": code, "referral_rep": doc.get("rep_name")}})
+    await _audit("promo_referral_tagged", None, user_id=user["id"], user_email=user.get("email"), metadata={"code": code})
+    return {"ok": True, "unlocked": "referral", "rep_name": doc.get("rep_name")}
 
 
 app.include_router(api)

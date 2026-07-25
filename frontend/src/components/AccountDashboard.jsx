@@ -3,6 +3,7 @@ import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Searc
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { ThankYouCelebration } from '@/components/ThankYouCelebration';
+import PromoCodesSection from '@/components/PromoCodesSection';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
@@ -40,6 +41,14 @@ export default function AccountDashboard({ onBack }) {
 
   // upgrade UI state
   const [selectedPlan, setSelectedPlan] = useState('monthly');     // 'monthly' | 'annual'
+  // Promo code state — user-facing entry on the paywall. `validation` holds
+  // the /promo/validate response so we can render the "what this unlocks"
+  // confirmation card before the user commits.
+  const [promoInput, setPromoInput] = useState('');
+  const [promoValidation, setPromoValidation] = useState(null);   // {valid, type, summary, ...}
+  const [promoBusy, setPromoBusy] = useState(false);
+  const [promoErr, setPromoErr] = useState('');
+  const [compRedeemed, setCompRedeemed] = useState(false);        // triggers ThankYouCelebration
   const [paymentLinkUrl, setPaymentLinkUrl] = useState(null);      // shown in PaymentLinkModal
   const paymentSupport = usePaymentMethodSupport();
 
@@ -196,6 +205,12 @@ export default function AccountDashboard({ onBack }) {
         plan: selectedPlan,
         origin_url: window.location.origin,
         payment_method_preference: method,
+        // Forward any validated promo code so discount / referral flows are
+        // applied inside Stripe (and our redemption counter increments).
+        // Comp codes never reach here — they short-circuit via redeemPromo().
+        promo_code: promoValidation?.valid && promoValidation.type !== 'comp'
+          ? promoInput.trim().toUpperCase()
+          : undefined,
       });
       if (!data?.url) {
         setErr('Checkout could not start: no Stripe URL returned. Check the server logs and your STRIPE_API_KEY.');
@@ -219,6 +234,49 @@ export default function AccountDashboard({ onBack }) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
+
+  // ---- Promo Code entry (paywall) ---------------------------------------
+  const validatePromo = async () => {
+    const code = promoInput.trim().toUpperCase();
+    if (!code) return;
+    setPromoBusy(true); setPromoErr(''); setPromoValidation(null);
+    try {
+      const { data } = await api.post('/promo/validate', { code });
+      if (!data.valid) {
+        setPromoErr(data.reason || "That code doesn't seem to work. Double-check it or try another.");
+      } else {
+        setPromoValidation(data);
+      }
+    } catch (e) {
+      setPromoErr("We couldn't check that code just now — please try again in a moment.");
+    } finally {
+      setPromoBusy(false);
+    }
+  };
+
+  const redeemPromo = async () => {
+    if (!promoValidation?.valid) return;
+    if (promoValidation.type !== 'comp') return;
+    setPromoBusy(true); setPromoErr('');
+    try {
+      await api.post('/promo/redeem', { code: promoInput.trim().toUpperCase() });
+      await load();
+      setCompRedeemed(true);
+      setPromoInput('');
+      setPromoValidation(null);
+    } catch (e) {
+      setPromoErr(formatApiError(e) || 'Could not redeem this code.');
+    } finally {
+      setPromoBusy(false);
+    }
+  };
+
+  const clearPromo = () => {
+    setPromoInput('');
+    setPromoValidation(null);
+    setPromoErr('');
+  };
+
 
   const changePassword = async (e) => {
     e.preventDefault();
@@ -524,6 +582,85 @@ export default function AccountDashboard({ onBack }) {
                     Apple Pay and Google Pay aren&apos;t available on this device or browser. They appear automatically on supported devices.
                   </p>
                 )}
+
+                {/* Promo code entry — appears below the pay buttons. Comp
+                    codes short-circuit checkout entirely (grants Pro directly
+                    + confetti). Discount + Referral codes attach to the next
+                    /me/checkout call. Styled to match the surrounding dark
+                    palette + spacing conventions. */}
+                <div className="mt-3 pt-3 border-t border-[#5C9E8C]/15" data-testid="promo-entry-block">
+                  {!promoValidation ? (
+                    <>
+                      <label className="label-tiny block mb-1 text-[#8A9A92]">Have a promo code?</label>
+                      <div className="flex gap-2">
+                        <input
+                          data-testid="promo-entry-input"
+                          value={promoInput}
+                          onChange={(e) => { setPromoInput(e.target.value.toUpperCase()); setPromoErr(''); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') validatePromo(); }}
+                          placeholder="ENTER CODE"
+                          maxLength={48}
+                          className="flex-1 bg-black/30 border border-[#5C9E8C]/25 rounded-lg px-3 py-2 text-sm font-mono tracking-widest text-[#E8E3D9] focus:outline-none focus:border-[#72C2AC]/60"
+                        />
+                        <button
+                          data-testid="promo-entry-apply"
+                          onClick={validatePromo}
+                          disabled={!promoInput.trim() || promoBusy}
+                          className="px-4 text-[11px] uppercase tracking-widest font-mono text-[#C4A67A] hover:text-[#E8B872] border border-[#C4A67A]/30 rounded-lg disabled:opacity-40"
+                        >
+                          {promoBusy ? 'Checking…' : 'Apply'}
+                        </button>
+                      </div>
+                      {promoErr && (
+                        <div className="mt-2 text-[11px] text-[#D96C6C] leading-relaxed" data-testid="promo-entry-error">
+                          {promoErr}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    // Confirmation card — shows what the code unlocks BEFORE
+                    // the user commits. Comp codes have a dedicated "Redeem"
+                    // button; discount / referral just wait for the user to
+                    // pick a payment method (which forwards the code).
+                    <div className="glass-soft border border-[#72C2AC]/30 p-3 rounded-xl" data-testid="promo-entry-confirmation">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <div className="text-[11px] font-mono tracking-widest text-[#72C2AC]" data-testid="promo-entry-code">
+                          {promoInput}
+                        </div>
+                        <button
+                          onClick={clearPromo}
+                          data-testid="promo-entry-clear"
+                          className="text-[10px] uppercase tracking-widest font-mono text-[#8A9A92] hover:text-[#E8E3D9]"
+                        >
+                          Change
+                        </button>
+                      </div>
+                      <div className="text-[12px] text-[#E8E3D9] leading-relaxed" data-testid="promo-entry-summary">
+                        {promoValidation.summary}
+                      </div>
+                      {promoValidation.type === 'comp' && (
+                        <button
+                          data-testid="promo-entry-redeem"
+                          onClick={redeemPromo}
+                          disabled={promoBusy}
+                          className="w-full mt-3 py-2.5 rounded-lg bg-[#5C9E8C]/25 hover:bg-[#5C9E8C]/40 border border-[#72C2AC]/50 hover:border-[#72C2AC] text-[#72C2AC] text-sm font-medium tracking-wide transition-colors disabled:opacity-40"
+                        >
+                          {promoBusy ? 'Unlocking…' : 'Redeem Free Access'}
+                        </button>
+                      )}
+                      {promoValidation.type !== 'comp' && (
+                        <div className="mt-2 text-[10px] text-[#8A9A92] leading-relaxed">
+                          Applied automatically when you continue with checkout above.
+                        </div>
+                      )}
+                      {promoErr && (
+                        <div className="mt-2 text-[11px] text-[#D96C6C] leading-relaxed" data-testid="promo-entry-error">
+                          {promoErr}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
               {/* Trial messaging — billing starts after 7 days, card required */}
               {!sub.trial_used && (
@@ -790,6 +927,11 @@ export default function AccountDashboard({ onBack }) {
               <Sparkles size={14} className="text-[#C4A67A]" />
               <div className="label-tiny text-[#C4A67A]">Admin · Plan Prices</div>
             </div>
+            {/* Promo Codes management — sits inside the admin section so free
+                users never see the section header. */}
+            <div className="mb-6">
+              <PromoCodesSection />
+            </div>
             <form onSubmit={saveAdminPrices} className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl">
               <div>
                 <label className="label-tiny block mb-1">Monthly (USD)</label>
@@ -935,6 +1077,16 @@ export default function AccountDashboard({ onBack }) {
           planLabel={celebratingPlan}
           onStart={() => {
             setCelebratingPlan(null);
+            onBack();
+          }}
+        />
+      )}
+
+      {compRedeemed && (
+        <ThankYouCelebration
+          planLabel="Pro (complimentary)"
+          onStart={() => {
+            setCompRedeemed(false);
             onBack();
           }}
         />
