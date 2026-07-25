@@ -1218,26 +1218,6 @@ export default function Dashboard({ onOpenAccount }) {
             </div>
           </div>
 
-          {/* Flow Mode — 3-stage guided frequency journeys. Free users get
-              the 3 pre-built journeys; Pro unlocks the Custom Flow builder
-              that lets them pick any 3 Solfeggio frequencies for a
-              personalised journey. Sits directly below the Solfeggio /
-              Sleep card, above the Pro-locked Brainwave & Specials tile. */}
-          <FlowModePanel
-            isPro={isPro}
-            solfeggioList={SOLFEGGIO.map((p) => ({ hz: p.hz, label: p.name, sub: p.desc }))}
-            onFlowStart={(mins) => { setDuration(mins); setRemaining(mins * 60); }}
-            onFlowStop={() => {
-              setRemaining(0);
-              try { audioEngine.stop(); } catch (e) { /* graceful */ }
-              setFlowStage(null);
-            }}
-            onStageChange={(stageIdx, meta) => {
-              setFlowStage(meta ? { stageIdx, meta } : null);
-            }}
-            onUnlock={onOpenAccount}
-          />
-
           {/* Brainwave & Specials — Pro only */}
           <div className={`glass p-5 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="specials-section">
             <div className="flex items-center justify-between mb-3">
@@ -1792,6 +1772,26 @@ export default function Dashboard({ onOpenAccount }) {
               style={{ '--v': `${state.toneVolume * 100}%` }}
             />
           </div>
+
+          {/* Flow Mode — 3-stage guided frequency journeys. Sits in the right
+              column between Custom Generator and Ambient Layers so it lives
+              in the "shape the sound" tools area. Free users get the 3
+              pre-built journeys; Pro unlocks the Custom Flow builder for
+              picking any 3 Solfeggio frequencies. */}
+          <FlowModePanel
+            isPro={isPro}
+            solfeggioList={SOLFEGGIO.map((p) => ({ hz: p.hz, label: p.name, sub: p.desc }))}
+            onFlowStart={(mins) => { setDuration(mins); setRemaining(mins * 60); }}
+            onFlowStop={() => {
+              setRemaining(0);
+              try { audioEngine.stop(); } catch (e) { /* graceful */ }
+              setFlowStage(null);
+            }}
+            onStageChange={(stageIdx, meta) => {
+              setFlowStage(meta ? { stageIdx, meta } : null);
+            }}
+            onUnlock={onOpenAccount}
+          />
 
           {/* Ambient Mixer — Pro only */}
           <div className={`glass p-6 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="ambient-section">
