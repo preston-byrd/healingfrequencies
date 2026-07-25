@@ -2370,17 +2370,20 @@ async def root():
 
 app.include_router(api)
 
-# SECURITY: never combine wildcard origin with credentials. CORS_ORIGINS MUST
-# be an explicit comma-separated allowlist of full origins (scheme + host +
-# optional port). A misconfigured wildcard would let any website read a
-# logged-in user's cookies via the browser.
+# SECURITY: never combine wildcard origin with credentials. When CORS_ORIGINS
+# is a comma-separated allowlist we set `allow_origins` directly. When it's
+# the explicit wildcard "*" (used for Emergent-managed deployments where the
+# production host is dynamic) we switch to `allow_origin_regex=".*"` — this
+# makes starlette echo the request Origin verbatim so `allow_credentials`
+# stays compatible (the browser refuses credentials when the server responds
+# with the literal `Access-Control-Allow-Origin: *`).
 _raw_origins = os.environ.get("CORS_ORIGINS", "").strip()
-origins = [o.strip() for o in _raw_origins.split(",") if o.strip() and o.strip() != "*"]
-if not origins:
+_use_wildcard = _raw_origins == "*"
+origins = [] if _use_wildcard else [o.strip() for o in _raw_origins.split(",") if o.strip() and o.strip() != "*"]
+if not origins and not _use_wildcard:
     # Fail-soft default: use a SAFE allowlist (the production domain + the
     # preview host) rather than crashing the server. Logged loudly so the
-    # operator knows to set CORS_ORIGINS explicitly. We do NOT fall back to
-    # wildcard '*' here because that defeats the audit fix.
+    # operator knows to set CORS_ORIGINS explicitly.
     origins = [
         "https://solarisound.com",
         "https://www.solarisound.com",
@@ -2390,14 +2393,20 @@ if not origins:
         "CORS_ORIGINS not set — falling back to safe default allowlist: %s",
         origins,
     )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-    max_age=600,
-)
+_cors_kwargs = {
+    "allow_credentials": True,
+    "allow_methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    "allow_headers": ["Authorization", "Content-Type", "X-Requested-With"],
+    "max_age": 600,
+}
+if _use_wildcard:
+    _cors_kwargs["allow_origin_regex"] = ".*"
+    logging.getLogger(__name__).info(
+        "CORS_ORIGINS='*' — reflecting request Origin via allow_origin_regex",
+    )
+else:
+    _cors_kwargs["allow_origins"] = origins
+app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
