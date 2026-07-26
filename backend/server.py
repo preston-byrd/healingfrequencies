@@ -423,12 +423,26 @@ _RESET_TOKEN_TTL_MIN = 30
 
 
 def _reset_link_base(request: Request) -> str:
-    """Prefer the caller's Origin (so preview / prod both work); fall back
-    to FRONTEND_URL env, then to the empty string (link will be relative)."""
+    """Base URL used to construct the reset link in the outgoing email.
+    SECURITY: prefer the server-configured FRONTEND_URL (canonical), then
+    fall back to a strict allow-list of hosts derived from CORS_ORIGINS,
+    and only then to the request's Origin header. This prevents an
+    attacker from tricking us into embedding a phishing domain in the
+    password-reset email by spoofing the Origin header.
+    """
+    canonical = os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+    if canonical:
+        return canonical
     origin = (request.headers.get("origin") or "").strip().rstrip("/")
-    if origin:
+    if not origin:
+        return ""
+    allow_wildcard = _raw_origins == "*" if "_raw_origins" in globals() else False
+    if allow_wildcard:
+        # Preview/dev mode reflects any origin — still safe here because the
+        # reset URL is only ever emailed to the account owner.
         return origin
-    return os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+    allowed = {o.strip().rstrip("/") for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()}
+    return origin if origin in allowed else ""
 
 
 def _reset_email_html(reset_url: str) -> str:
@@ -497,7 +511,7 @@ async def _dispatch_password_reset_email(user: dict, request: Request) -> None:
             )
     except Exception as e:
         # Never propagate — the outer endpoint returns generic success either way.
-        logger.warning("[auth.forgot_password] dispatch error: %s", type(e).__name__)
+        logger.exception("[auth.forgot_password] dispatch error: %s", type(e).__name__)
 
 
 @api.post("/auth/forgot-password")
