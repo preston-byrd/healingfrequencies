@@ -1,0 +1,41 @@
+{
+  "summary": "iter43 backend-only verification of the legacy pro_expires_at fallback in _is_pro() + /me/subscription, and the new one-shot POST /api/admin/promo/migrate-legacy endpoint. Wrote 9 new tests in test_legacy_pro_migration.py hand-injecting the legacy field via direct pymongo writes against the local Mongo (the preview URL cannot be used for these tests because it routes to a Mongo we cannot touch — see context_for_next_testing_agent). ALL 9 NEW TESTS PASS. ALL 14 iter41+42 promo_redeem regression tests still pass (test_promo_redeem.py: 14/14). Verified: (a) legacy field in future -> pro=true / plan=pro / days_left ~30; (b) legacy field in past -> pro=false / days_left=0; (c) Zulu 'Z' suffix parsed correctly; (d) free-tier 3-session cap lifted for legacy-pro user (5 saves succeed, no 402); (e) non-admin gets 403 on migrate-legacy; (f) admin migration promotes legacy user (pro_until=pro_expires_at, plan='pro', pro_source='promo:legacy' when empty); (g) canonical (pro_until-already-set) users untouched — pro_until/plan/pro_source byte-identical after migration; (h) idempotency — second migration run returns migrated=0; (i) pro_source is preserved when already set (only fills 'promo:legacy' when empty); (j) fresh WELCOME30 redemption continues to write canonical pro_until (no regression).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "verified_backend_expectations": [
+    "pytest test_legacy_pro_migration.py: 9/9 PASS (3.92s)",
+    "pytest test_promo_redeem.py (iter41+42 regression): 14/14 PASS (8.30s)",
+    "_is_pro() honors legacy pro_expires_at when pro_until missing",
+    "_is_pro() correctly rejects expired legacy pro_expires_at",
+    "_is_pro() parses ISO with 'Z' Zulu suffix without crashing",
+    "/me/subscription returns pro=true/plan=pro/days_left=30 from legacy field alone",
+    "/api/sessions cap lifted for legacy-pro user (5x saves OK)",
+    "POST /admin/promo/migrate-legacy shape: {ok, migrated: int, scanned: int}",
+    "Non-admin -> 403 on migrate-legacy",
+    "Migration writes pro_until=pro_expires_at, plan=pro, pro_source='promo:legacy' (only when empty)",
+    "Migration is idempotent (second run migrated=0)",
+    "Migration does NOT touch users with pro_until already set (canonical untouched)",
+    "Migration preserves existing pro_source (e.g. 'promo:TRYME' not overwritten)"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_legacy_pro_migration.py",
+    "/app/backend/tests/test_promo_redeem.py",
+    "/app/test_reports/pytest/legacy_pro_iter43.xml",
+    "/app/test_reports/pytest/promo_regression_iter43.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py L2717: migration query uses {\"pro_until\": {\"$in\": [None, \"\"]}} which correctly matches missing OR null OR empty-string. Confirmed working. Note: users where pro_until key is entirely absent are also matched because MongoDB $in with null matches missing fields. Verified via idempotency test.",
+    "server.py L563 _is_pro(): the exception-swallowing `except Exception: continue` is fine defensively but silently masks malformed datetime strings. If a bad string enters the DB, users may quietly lose Pro access with no log line. Consider a debug log inside the except.",
+    "server.py L742 days_left calc: `delta.days + (1 if delta.seconds > 0 else 0)` for future dates gives inclusive rounding but for a value 30 days in future the .days may show 29 with .seconds > 0 -> yielding 30. Confirmed correct via test (accepts 29 or 30). For a Zulu-suffix input we verified round-trip works.",
+    "Non-blocking iter42 carry-over: AccountDashboard.jsx Stripe-return branch (L124-164) still does not call refreshGlobalSub() after load(), so paid-checkout return may still show stale isPro. Not in scope for iter43 but flagged."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (23/23 — 9 new + 14 regression)", "frontend": "N/A (backend-only per request)"},
+  "test_credentials": "Admin: admin@example.com / (loaded from backend/.env via tests/_creds.py). Ephemeral users test_legacy_<uuid>@example.com created against localhost:8001.",
+  "seed_data_creation": "9 ephemeral test_legacy_<uuid>@example.com users seeded in local Mongo test_database, plus ~1 test_promo_<uuid> user with WELCOME30 redemption. WELCOME30 redemption count incremented by 1. Left in DB (harmless — prefixed).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "IMPORTANT: test_legacy_pro_migration.py hits http://localhost:8001 directly (NOT the preview REACT_APP_BACKEND_URL). Reason: the test hand-injects the legacy `pro_expires_at` field via direct pymongo write into MONGO_URL from backend/.env — that Mongo is only shared with the local backend. The preview URL routes to a different environment whose Mongo we cannot touch. If you need to run these tests against a different backend, set the BACKEND_TEST_URL env var AND ensure MONGO_URL points to the same Mongo the target backend uses. Also note EmailStr lowercases emails on register — always use lowercase 'test_' prefix (NOT 'TEST_') when doing direct Mongo lookups.",
+  "rca of the issue": "Prod user prestonebyrd@gmail.com redeemed WELCOME30/TRYME under the pre-iter41 code path which wrote the entitlement to `pro_expires_at` + `pro_status` but not the canonical `pro_until`. iter41's `_is_pro()` only reads `pro_until`, so the user's DB record silently made them look free-tier. The iter43 fix: (1) `_is_pro()` and `/me/subscription` now iterate over ('pro_until','pro_expires_at') and use the first present, non-expired value — historical redemptions are unlocked live with no DB touch; (2) `.replace('Z','+00:00')` on both parse paths hardens against Zulu-suffix ISO strings that older Mongo drivers/paths may have serialised; (3) POST /api/admin/promo/migrate-legacy is a one-shot idempotent cleanup that promotes stale records to the canonical schema so downstream code that reads only `pro_until` (e.g. analytics, exports) also picks them up. Verified all three code paths behave as expected and no regression to canonical flow."
+}

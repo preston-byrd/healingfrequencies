@@ -561,16 +561,25 @@ async def checkin(body: CheckinIn, user: dict = Depends(get_current_user)):
 
 # --- Subscription / Billing --------------------------------------------------
 def _is_pro(user: dict) -> bool:
-    """User has Pro access if they are admin OR their pro_until is in the future."""
+    """User has Pro access if they are admin OR their entitlement window is
+    still in the future. Reads the canonical `pro_until` field first, and
+    falls back to the legacy `pro_expires_at` field that was written by an
+    early version of `/promo/redeem` (pre-iter41). This lets any user who
+    redeemed a comp promo before the schema was normalised still see their
+    Pro access without needing a manual DB touch."""
     if user.get("role") == "admin":
         return True
-    pu = user.get("pro_until")
-    if not pu:
-        return False
-    try:
-        return datetime.fromisoformat(pu) > datetime.now(timezone.utc)
-    except Exception:
-        return False
+    now = datetime.now(timezone.utc)
+    for field in ("pro_until", "pro_expires_at"):
+        raw = user.get(field)
+        if not raw:
+            continue
+        try:
+            if datetime.fromisoformat(raw.replace("Z", "+00:00")) > now:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def _get_plan_config() -> dict:
@@ -723,11 +732,13 @@ async def my_subscription(user: dict = Depends(get_current_user)):
     full = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0}) or {}
     is_admin = full.get("role") == "admin"
     pro = _is_pro(full)
-    pro_until = full.get("pro_until")
+    # Prefer `pro_until` (canonical) but fall back to legacy `pro_expires_at`
+    # so users who redeemed pre-iter41 still see the correct countdown.
+    pro_until = full.get("pro_until") or full.get("pro_expires_at")
     days_left = 0
     if pro_until:
         try:
-            delta = datetime.fromisoformat(pro_until) - datetime.now(timezone.utc)
+            delta = datetime.fromisoformat(pro_until.replace("Z", "+00:00")) - datetime.now(timezone.utc)
             days_left = max(0, delta.days + (1 if delta.seconds > 0 else 0))
         except Exception:
             pass
@@ -2692,6 +2703,38 @@ async def promo_redeem(body: PromoRedeemIn, user: dict = Depends(get_current_use
     await db.users.update_one({"id": user["id"]}, {"$set": {"referral_code": code, "referral_rep": doc.get("rep_name")}})
     await _audit("promo_referral_tagged", None, user_id=user["id"], user_email=user.get("email"), metadata={"code": code})
     return {"ok": True, "unlocked": "referral", "rep_name": doc.get("rep_name")}
+
+
+@api.post("/admin/promo/migrate-legacy")
+async def admin_migrate_legacy_promo(user: dict = Depends(get_current_user)):
+    """One-shot cleanup: promote any user with legacy `pro_expires_at` (from
+    the pre-iter41 comp-redeem path) to the canonical `pro_until` field so
+    downstream code that only reads `pro_until` picks them up too. Idempotent
+    — running it twice is a no-op. Reports how many records were touched.
+    """
+    _require_admin(user)
+    cursor = db.users.find(
+        {"pro_expires_at": {"$exists": True, "$ne": None}, "pro_until": {"$in": [None, ""]}},
+        {"_id": 0, "id": 1, "email": 1, "pro_expires_at": 1, "pro_source": 1},
+    )
+    stale = await cursor.to_list(500)
+    migrated = 0
+    for u in stale:
+        exp = u.get("pro_expires_at")
+        if not exp:
+            continue
+        updates = {"pro_until": exp, "plan": "pro"}
+        if not u.get("pro_source"):
+            updates["pro_source"] = "promo:legacy"
+        await db.users.update_one({"id": u["id"]}, {"$set": updates})
+        migrated += 1
+    await _audit(
+        "promo_legacy_migrated", None,
+        user_email=user.get("email"),
+        metadata={"count": migrated, "scanned": len(stale)},
+    )
+    return {"ok": True, "migrated": migrated, "scanned": len(stale)}
+
 
 
 app.include_router(api)
