@@ -1,0 +1,53 @@
+{
+  "summary": "iter41 promo-redemption bug-fix review. Backend fix (writing to canonical pro_until / plan / pro_source and additive stacking) is FULLY verified — 14/14 pytest checks pass, including validate/redeem happy paths, unknown/inactive/max-uses/double-redeem negatives, discount-code redirection, additive stacking (+30d then +10d ⇒ ~40d left), free-tier 3-session cap being lifted after redemption, and admin redemption-count increment. HOWEVER a FRONTEND stale-state bug was found: after `/promo/redeem` succeeds and the user taps 'Start your first Pro session' from the ThankYouCelebration, the Dashboard still shows PRO INCLUDES banner, sound-bath-pro-badge, sound-bath-unlock-cta, meditation-pro-badge, and locks on all Pro features. `/api/me/subscription` returns pro:true, pro_source:'promo:WELCOME30', is_promo_pro:true — the SubscriptionContext just isn't being refreshed. A full page reload immediately fixes the UI, confirming this is a client-side context-refresh miss, not a server issue.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Comp promo redemption → return to Dashboard",
+        "issue": "After AccountDashboard.redeemPromo() succeeds, the global SubscriptionContext is never refreshed. AccountDashboard.jsx L263 only calls the local `load()` (rehydrates its own useState `sub`), but Dashboard.jsx reads `isPro` from `useSubscription()` context (SubscriptionContext.js). So tapping ThankYouCelebration → onStart → onBack() returns the user to a Dashboard that still thinks isPro=false: PRO INCLUDES banner visible, sound-bath-pro-badge visible, sound-bath-unlock-cta visible, meditation-pro-badge visible, Sleep Mode/Golden Stack/Custom frequency/Brainwave/Custom Flow all still locked. A hard page reload immediately corrects the UI, proving it's purely a stale-context bug. FIX: in AccountDashboard.jsx redeemPromo (~L257), grab `refresh` from `useSubscription()` and call `await refresh()` right after `api.post('/promo/redeem', …)` (or inside the ThankYouCelebration onStart callback at L1088). One-line change.",
+        "affected_selectors": ["pro-preview-banner", "sound-bath-pro-badge", "sound-bath-unlock-cta", "meditation-pro-badge", "flow-mode-panel Custom Flow PRO badge"]
+      }
+    ],
+    "design_issues": []
+  },
+  "verified_backend_expectations": [
+    "POST /api/promo/validate WELCOME30 (uppercase & lowercase) → valid=true, type='comp', duration_days=30, summary contains 'Complimentary'",
+    "POST /api/promo/validate BOGUSXYZ → valid=false with reason",
+    "POST /api/promo/redeem WELCOME30 → 200 {ok:true, unlocked:'pro_comp', duration_days:30, pro_until:<ISO>}",
+    "GET /api/me/subscription after redeem → pro:true, plan:'pro', pro_source:'promo:WELCOME30', is_promo_pro:true, days_left ∈ [28,31]",
+    "POST /api/promo/redeem WELCOME30 twice → 2nd call 400 'You've already redeemed this code.'",
+    "POST /api/promo/redeem DOESNOTEXIST → 400 'Code not found.'",
+    "POST /api/promo/redeem <inactive comp> → 400 'This code has been deactivated.'",
+    "POST /api/promo/redeem <comp with max_uses=1 already spent> → 400 'This code has reached its redemption limit.'",
+    "POST /api/promo/redeem SAVE20 (discount) → 400 telling user discount codes apply at checkout, not /promo/redeem",
+    "Free tier: 3 saved sessions succeed (200), 4th returns 402 'Free plan saves up to 3…'. After redeeming WELCOME30, sessions 4-6 also succeed (200)",
+    "Additive stacking: WELCOME30 (30d) then a 10d comp → days_left grows by ~10 (not overwritten). pro_source updates to latest comp code",
+    "Regression: fresh free user reports pro:false, is_promo_pro:false, no pro_source. Admin reports pro:true but NOT is_promo_pro (no promo pro_source)",
+    "Admin /api/admin/promo GET shows WELCOME30 redemptions count increments by 1 after each user redeems"
+  ],
+  "verified_frontend_expectations": [
+    "Free user paywall: promo-entry-input accepts 'WELCOME30', promo-entry-apply → promo-entry-confirmation card shows summary 'Complimentary Pro access for 30 days'",
+    "promo-entry-redeem button is rendered ONLY for comp codes",
+    "Tapping Redeem → ThankYouCelebration mounts (data-testid=thank-you-celebration), page contains 'complimentary' copy",
+    "AFTER a full page reload post-redemption, Dashboard correctly hides pro-preview-banner, sound-bath-pro-badge, sound-bath-unlock-cta, meditation-pro-badge (all query→None). This confirms /me/subscription is correct end-to-end and the ONLY missing piece is client-side context refresh"
+  ],
+  "test_report_links": ["/app/backend/tests/test_promo_redeem.py", "/app/test_reports/pytest/promo_results.xml"],
+  "action_items": [
+    "FRONTEND FIX (1-line): AccountDashboard.jsx redeemPromo (~L257) must also call SubscriptionContext.refresh() so Dashboard.jsx's `isPro` reflects the new pro_until immediately. Either destructure `refresh` from useSubscription() at the top of AccountDashboard and `await refresh()` after `api.post('/promo/redeem', …)`, OR wire the ThankYouCelebration.onStart (L1088) to `await refresh(); setCompRedeemed(false); onBack();`. Same pattern already needed for consistency with post-checkout celebration at L1076."
+  ],
+  "critical_code_review_comments": [
+    "SubscriptionContext.refresh() should ideally also be called after successful Stripe checkout return; currently the celebratingPlan branch (L1076) likely has the same stale-context risk if the user returns to Dashboard via onBack() before a natural refetch. Not covered by this review but worth an audit.",
+    "AccountDashboard.jsx maintains its OWN local `sub` state (via load()) which duplicates SubscriptionContext. Consider deriving from context to eliminate the sync burden entirely.",
+    "promo/redeem response body could optionally include the fresh subscription snapshot so the client doesn't need a second /me/subscription round-trip — minor perf improvement, non-blocking."
+  ],
+  "updated_files": ["/app/backend/tests/test_promo_redeem.py"],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "partial — comp-redemption UX broken until page reload"},
+  "test_credentials": "Admin: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8. Fresh test users registered ad-hoc via /api/auth/register with prefix TEST_promo_* — no cleanup needed (ephemeral).",
+  "seed_data_creation": "Backend pytest registered a handful of TEST_promo_<uuid>@example.com free users and created + immediately deleted two ephemeral admin comp codes (TEST_INACTIVE_* and TEST_MAXUSES_*). Frontend test registered TEST_promo_ui_<ts>@example.com and TEST_promo_ui2_<ts>@example.com. All temp promo codes were cleaned up in finally blocks; test users are harmless.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Once main agent wires SubscriptionContext.refresh() into the redeem flow, re-run the /tmp browser script that first verified banner/badges disappear after redeem WITHOUT a reload. The pytest suite at /app/backend/tests/test_promo_redeem.py is idempotent (uses uuid-based emails and ephemeral admin codes) — safe to re-run any number of times. Note that pytest.ini enables pytest-xdist so tests can race on shared codes like WELCOME30; the current tests are careful to only assert local state or use ephemeral codes, so parallelism is fine.",
+  "rca of the issue": "Backend bug from the prior implementation (writing pro_expires_at/pro_status which _is_pro didn't read) is FIXED — /promo/redeem now correctly writes pro_until, plan='pro', pro_source, with additive stacking. Additionally uncovered a NEW frontend-only bug: AccountDashboard.redeemPromo does not call SubscriptionContext.refresh(), so the Dashboard route reads stale isPro=false after onBack(), leaving Pro-locked panels visually gated despite backend saying pro:true. Reproduction: register a fresh user, open Account paywall, enter WELCOME30, Apply, Redeem, click Start on the celebration → return to Dashboard → pro-preview-banner and every *-pro-badge/unlock-cta are still visible. Reload the page → they immediately vanish. Mitigation: add `const { refresh } = useSubscription()` in AccountDashboard.jsx and `await refresh()` inside redeemPromo (and post-checkout celebrating flow for consistency)."
+}

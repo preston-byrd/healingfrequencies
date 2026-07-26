@@ -735,6 +735,11 @@ async def my_subscription(user: dict = Depends(get_current_user)):
     sub_status = full.get("stripe_subscription_status")
     in_trial = sub_status == "trialing"
     plan = "admin" if is_admin else (full.get("plan") or ("pro" if pro else "basic"))
+    # Surface the entitlement source so the client can differentiate paid Pro
+    # from Stripe trial vs promo comp. `pro_source` is set by /promo/redeem
+    # (e.g. "promo:WELCOME30") and left blank for Stripe-driven Pro.
+    pro_source = full.get("pro_source")
+    is_promo_pro = bool(pro_source and pro_source.startswith("promo:"))
     return {
         "plan": plan,
         "pro": pro,
@@ -748,6 +753,8 @@ async def my_subscription(user: dict = Depends(get_current_user)):
         "cancel_at_period_end": bool(full.get("stripe_cancel_at_period_end")),
         "has_billing_portal": bool(full.get("stripe_customer_id")),
         "payment_failed_at": full.get("payment_failed_at"),
+        "pro_source": pro_source,
+        "is_promo_pro": is_promo_pro,
     }
 
 
@@ -2648,17 +2655,38 @@ async def promo_redeem(body: PromoRedeemIn, user: dict = Depends(get_current_use
     await db.promo_codes.update_one({"code": code}, updates)
 
     if doc["type"] == "comp":
-        # Grant Pro for duration_days. Uses the same pathway as manual admin
-        # grants so downstream (subscriptions collection) stays consistent.
+        # Grant Pro for duration_days. Writes to the canonical `pro_until`
+        # field that `_is_pro()` reads — this is the SAME entitlement path as
+        # Stripe subscription grants and admin manual grants, so every
+        # Pro-only feature (Brainwave & Specials, Soundscapes, Sleep Mode,
+        # Smart Fade, Haptics, Wellness Prescriptions, Sound Bath, Meditation
+        # Sounds, Flow Custom Builder, saved-session load, etc.) unlocks
+        # automatically once this write completes.
         days = int(doc.get("duration_days") or 30)
         now = datetime.now(timezone.utc)
-        expires = (now + timedelta(days=days)).isoformat()
+        # If the user already has a pro_until in the future (e.g. paid Pro
+        # active OR a prior comp code still running), extend from that point
+        # instead of overwriting so codes can stack additively. Otherwise
+        # start from `now`.
+        current_until = None
+        try:
+            cu = user.get("pro_until") or (await db.users.find_one({"id": user["id"]}, {"pro_until": 1}) or {}).get("pro_until")
+            if cu:
+                current_until = datetime.fromisoformat(cu)
+        except Exception:
+            current_until = None
+        base = current_until if (current_until and current_until > now) else now
+        new_until = (base + timedelta(days=days)).isoformat()
         await db.users.update_one(
             {"id": user["id"]},
-            {"$set": {"pro_status": "active", "pro_source": f"promo:{code}", "pro_expires_at": expires}},
+            {"$set": {
+                "pro_until": new_until,
+                "pro_source": f"promo:{code}",
+                "plan": "pro",
+            }},
         )
-        await _audit("promo_comp_redeemed", None, user_id=user["id"], user_email=user.get("email"), metadata={"code": code, "days": days})
-        return {"ok": True, "unlocked": "pro_comp", "duration_days": days, "expires_at": expires}
+        await _audit("promo_comp_redeemed", None, user_id=user["id"], user_email=user.get("email"), metadata={"code": code, "days": days, "pro_until": new_until})
+        return {"ok": True, "unlocked": "pro_comp", "duration_days": days, "pro_until": new_until}
 
     # Referral
     await db.users.update_one({"id": user["id"]}, {"$set": {"referral_code": code, "referral_rep": doc.get("rep_name")}})
