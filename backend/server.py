@@ -325,6 +325,15 @@ class LoginIn(BaseModel):
     password: str
 
 
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class SessionIn(BaseModel):
     name: str
     frequency: float
@@ -402,6 +411,178 @@ async def login(body: LoginIn, request: Request, response: Response):
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
     return {"id": user["id"], "email": email, "name": user.get("name", ""), "token": token}
+
+
+# --- Password reset ---------------------------------------------------------
+# SECURITY: JWT-signed reset tokens (30-min TTL) whose `jti` is persisted in
+# `password_reset_tokens` so we can enforce single-use. The forgot-password
+# endpoint ALWAYS returns the same generic response to prevent user email
+# enumeration. Rate-limited per-IP (5 req / 15 min ≈ refill 1 / 180s) and
+# per-email (3 req / 15 min ≈ refill 1 / 300s) to reduce abuse.
+_RESET_TOKEN_TTL_MIN = 30
+
+
+def _reset_link_base(request: Request) -> str:
+    """Prefer the caller's Origin (so preview / prod both work); fall back
+    to FRONTEND_URL env, then to the empty string (link will be relative)."""
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if origin:
+        return origin
+    return os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+
+
+def _reset_email_html(reset_url: str) -> str:
+    return f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · Password reset</td></tr>
+      <tr><td style="padding-top: 12px; font-size: 22px; font-weight: 500; color: #E8E3D9;">Reset your password</td></tr>
+      <tr><td style="padding-top: 14px; font-size: 14px; line-height: 1.55; color: #C6CDCA;">
+        We received a request to reset the password for your Solarisound account.
+        Click the button below within the next 30 minutes to choose a new password.
+      </td></tr>
+      <tr><td style="padding-top: 24px;">
+        <a href="{reset_url}" style="display: inline-block; padding: 12px 22px; border-radius: 999px; background: #5C9E8C; color: #08120F; text-decoration: none; font-weight: 500; letter-spacing: .02em;">Reset password</a>
+      </td></tr>
+      <tr><td style="padding-top: 20px; font-size: 12px; color: #8A9A92; word-break: break-all;">
+        Or paste this link in your browser:<br/>
+        <span style="color: #72C2AC;">{reset_url}</span>
+      </td></tr>
+      <tr><td style="padding-top: 20px; font-size: 12px; color: #5A6B65; line-height: 1.55;">
+        If you didn't request this, you can safely ignore this email — your password
+        won't change unless you visit the link above and choose a new one.
+      </td></tr>
+      <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">— Solarisound</td></tr>
+    </table>
+    """
+
+
+async def _dispatch_password_reset_email(user: dict, request: Request) -> None:
+    """Create a signed reset token, persist its jti, and send the email.
+    Silently swallows all errors so the caller always returns generic success."""
+    try:
+        jti = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        exp = now + timedelta(minutes=_RESET_TOKEN_TTL_MIN)
+        payload = {
+            "sub": user["id"],
+            "email": user["email"],
+            "type": "password_reset",
+            "jti": jti,
+            "iat": now.timestamp(),
+            "exp": exp,
+        }
+        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        await db.password_reset_tokens.insert_one({
+            "id": jti,
+            "user_id": user["id"],
+            "email": user["email"],
+            "created_at": now.isoformat(),
+            "expires_at": exp.isoformat(),
+            "used_at": None,
+            "ip": _client_ip(request),
+        })
+        base = _reset_link_base(request)
+        reset_url = f"{base}/?reset_token={token}" if base else f"/?reset_token={token}"
+        subject = "Reset your Solarisound password"
+        html = _reset_email_html(reset_url)
+        # Send via Resend (sync SDK wrapped for the event loop). If the SDK
+        # or API key is missing, _send_email_sync no-ops — we log below.
+        message_id = await asyncio.to_thread(
+            _send_email_sync, user["email"], subject, html
+        )
+        if not message_id:
+            logger.warning(
+                "[auth.forgot_password] email dispatch skipped or failed for %s",
+                user["email"],
+            )
+    except Exception as e:
+        # Never propagate — the outer endpoint returns generic success either way.
+        logger.warning("[auth.forgot_password] dispatch error: %s", type(e).__name__)
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordIn, request: Request):
+    ip = _client_ip(request)
+    email = body.email.lower().strip()
+    # Per-IP + per-email throttle. Both must pass. We check the IP bucket
+    # first so a single attacker can't burn through many emails from one host.
+    _rate_limit_or_429(
+        f"forgot:ip:{ip}", capacity=5, refill_per_sec=1 / 180,
+        label="password reset request",
+    )
+    _rate_limit_or_429(
+        f"forgot:email:{email}", capacity=3, refill_per_sec=1 / 300,
+        label="password reset request",
+    )
+    generic = {
+        "ok": True,
+        "message": "If an account exists for that email, a reset link is on its way.",
+    }
+    user = await db.users.find_one({"email": email})
+    await _audit(
+        "auth.forgot_password_requested", request,
+        user_id=(user or {}).get("id"),
+        user_email=email,
+        metadata={"account_exists": bool(user)},
+    )
+    if not user:
+        return generic
+    # Fire-and-forget dispatch so timing doesn't leak account existence.
+    asyncio.create_task(_dispatch_password_reset_email(user, request))
+    return generic
+
+
+@api.post("/auth/reset-password")
+async def reset_password(body: ResetPasswordIn, request: Request, response: Response):
+    ip = _client_ip(request)
+    # Throttle reset attempts per IP too — stops brute-forcing tokens.
+    _rate_limit_or_429(
+        f"reset:ip:{ip}", capacity=10, refill_per_sec=1 / 60,
+        label="reset attempt",
+    )
+    try:
+        payload = jwt.decode(body.token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="This reset link has expired. Please request a new one.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="This reset link is invalid.")
+    if payload.get("type") != "password_reset":
+        raise HTTPException(status_code=400, detail="This reset link is invalid.")
+    jti = payload.get("jti")
+    user_id = payload.get("sub")
+    if not jti or not user_id:
+        raise HTTPException(status_code=400, detail="This reset link is invalid.")
+    record = await db.password_reset_tokens.find_one({"id": jti})
+    if not record:
+        raise HTTPException(status_code=400, detail="This reset link is invalid.")
+    if record.get("used_at"):
+        raise HTTPException(status_code=400, detail="This reset link has already been used.")
+    if record.get("user_id") != user_id:
+        raise HTTPException(status_code=400, detail="This reset link is invalid.")
+    user = await db.users.find_one({"id": user_id})
+    if not user:
+        raise HTTPException(status_code=400, detail="This reset link is invalid.")
+    # SECURITY: mark the token used atomically BEFORE mutating the password so
+    # a concurrent replay is rejected. Guard on used_at being null.
+    marked = await db.password_reset_tokens.update_one(
+        {"id": jti, "used_at": None},
+        {"$set": {"used_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    if marked.modified_count != 1:
+        raise HTTPException(status_code=400, detail="This reset link has already been used.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password_hash": hash_password(body.new_password),
+                  "tokens_valid_after": now_iso}},
+    )
+    _bump_metric("session_revocations")
+    await _audit(
+        "auth.password_reset_completed", request,
+        user_id=user_id, user_email=user["email"],
+        metadata={"jti": jti},
+    )
+    return {"ok": True, "message": "Your password has been reset. You can now sign in."}
 
 
 @api.post("/auth/logout")

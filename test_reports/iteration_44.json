@@ -1,0 +1,35 @@
+{
+  "summary": "Verified new password-reset feature end-to-end. Backend: 11/11 pytest cases pass (generic forgot-password response for existing & non-existent emails, invalid/tampered/wrong-type/expired token handling, min-length password validation, full E2E reset -> token reuse rejected -> login-with-new-password -> old-password rejected, per-email rate limit hits 429, and full auth regression register/login/me/password-change/session-invalidation). Frontend: Forgot link only shown in login mode (hidden in register), modal opens with email pre-populated from login form and remains editable, submit shows 'Check your inbox' generic confirmation, ResetPasswordView renders on ?reset_token=..., client-side password mismatch and min-length validation work, invalid token returns inline 'This reset link is invalid.' error, URL retains reset_token on failed attempts (stripped only on success by design).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_password_reset.py",
+    "/app/test_reports/pytest/pwreset_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py exceeds 3000 lines — recommend splitting auth/password-reset into a dedicated module for maintainability.",
+    "_dispatch_password_reset_email swallows all exceptions with only a generic warning log (no exception type/stack). Consider logger.exception for observability without leaking to the user.",
+    "Reset email link is constructed from the request Origin header (attacker-controllable). If Origin can be spoofed to send victims to a phishing domain in the email body, this could be misused. Consider allow-listing FRONTEND_URL as canonical."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_password_reset.py"
+  ],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "100%"
+  },
+  "test_credentials": "Uses TEST_-prefixed disposable users created via /api/auth/register; admin creds from /app/memory/test_credentials.md not required for this feature.",
+  "seed_data_creation": "Test module creates TEST_pwreset_* + TEST_rl_* + TEST_reg_* users and cleans them (and their password_reset_tokens) after the module.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Password reset tests live at /app/backend/tests/test_password_reset.py. To forge a valid reset token: insert row into password_reset_tokens (id=jti, user_id, email, created_at, expires_at, used_at=None) and sign JWT with backend JWT_SECRET, HS256, payload {sub, email, type:'password_reset', jti, iat, exp}. Rate limits: 5 IP/15min, 3 email/15min for /api/auth/forgot-password; 10/min per IP for /api/auth/reset-password. Rate-limit test may cause subsequent forgot-password calls to 429 for ~15 min under the same IP — isolate with fresh emails.",
+  "rca of the issue": "N/A — no failures. Only self-inflicted test bug (case-sensitive email comparison) fixed by lowercasing in assertion since backend normalises emails to lowercase."
+}

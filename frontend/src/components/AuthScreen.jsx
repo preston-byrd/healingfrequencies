@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { formatApiError } from '@/lib/api';
+import ForgotPasswordModal from '@/components/ForgotPasswordModal';
+import { LOGIN } from '@/constants/testIds/auth';
 
 export default function AuthScreen() {
   const { login, register } = useAuth();
@@ -10,6 +12,7 @@ export default function AuthScreen() {
   const [name, setName] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showForgot, setShowForgot] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -91,6 +94,19 @@ export default function AuthScreen() {
           </button>
         </form>
 
+        {mode === 'login' && (
+          <div className="mt-4 text-center text-sm">
+            <button
+              data-testid={LOGIN.forgotPasswordLink}
+              type="button"
+              onClick={() => { setErr(''); setShowForgot(true); }}
+              className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+            >
+              Forgot your password?
+            </button>
+          </div>
+        )}
+
         <div className="mt-6 text-center text-sm text-[#8A9A92]">
           {mode === 'login' ? "New here?" : 'Already have an account?'}{' '}
           <button
@@ -103,6 +119,13 @@ export default function AuthScreen() {
           </button>
         </div>
       </div>
+
+      {showForgot && (
+        <ForgotPasswordModal
+          initialEmail={email}
+          onClose={() => setShowForgot(false)}
+        />
+      )}
     </div>
   );
 }

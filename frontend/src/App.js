@@ -7,12 +7,23 @@ import Dashboard from '@/components/Dashboard';
 import AccountDashboard from '@/components/AccountDashboard';
 import LandingPage from '@/components/LandingPage';
 import PlayDeepLink from '@/components/PlayDeepLink';
+import ResetPasswordView from '@/components/ResetPasswordView';
 
 const LANDING_DISMISSED_KEY = 'solarisound:landing_dismissed';
 
 function Shell() {
   const { user, loading } = useAuth();
   const [view, setView] = useState('main'); // 'main' | 'account'
+  // Password-reset deep link — if the URL carries `?reset_token=...` we
+  // render the reset view regardless of auth state so the user can complete
+  // the flow without signing in first.
+  const [resetToken, setResetToken] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const p = new URLSearchParams(window.location.search);
+      return p.get('reset_token');
+    } catch { return null; }
+  });
   // Whether to show the unauthenticated landing page. Once a visitor clicks
   // "Start tuning" we remember it for the rest of the session so they don't
   // see the splash again on every reload during signup.
@@ -54,6 +65,25 @@ function Shell() {
           // audioEngine singleton.
           try { window.history.replaceState({}, '', '/'); } catch (e) { /* noop */ }
           setDeepLinkActive(false);
+        }}
+      />
+    );
+  }
+
+  // Password reset landing page beats every other route so users can complete
+  // the flow whether they're signed in or not. On success/dismiss we clear
+  // the token param and fall through to the normal shell.
+  if (resetToken) {
+    return (
+      <ResetPasswordView
+        token={resetToken}
+        onDone={() => {
+          try {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('reset_token');
+            window.history.replaceState({}, '', url.pathname + (url.search || ''));
+          } catch (e) { /* noop */ }
+          setResetToken(null);
         }}
       />
     );
