@@ -1,0 +1,42 @@
+{
+  "summary": "iter42 retest of iter41 promo-redemption frontend fix. VERIFIED — the SubscriptionContext refresh fix in AccountDashboard.jsx (L28 destructures `refresh: refreshGlobalSub` from useSubscription, L273 calls `await refreshGlobalSub()` right after `/promo/redeem` succeeds) now correctly flips the global isPro flag without a page reload. After ThankYouCelebration onStart → onBack(), all 5 Pro-lock indicators (pro-preview-banner, sound-bath-pro-badge, sound-bath-unlock-cta, meditation-pro-badge, flow-custom-pro-badge) went from 1→0 immediately. session-lock-* count is 0. Backend /me/subscription confirms pro=true, pro_source='promo:WELCOME30', days_left=30. Free-user regression baseline also confirmed (all 5 indicators visible pre-redemption). Backend pytest suite re-run: 14/14 PASS (test_promo_redeem.py).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard on new-user first login", "issues": ["AI Agent Sheet (wellness-assistant) auto-opens on load and blocks pointer events on the dashboard (Solfeggio presets, sound-bath presets, etc.) until manually closed. Not a blocker for the promo fix — the celebration overlay handles it — but worth an audit: after ThankYouCelebration onStart → onBack(), the AI Agent Sheet re-materializes and re-covers the freshly-unlocked Pro tiles, so a user who wants to immediately try a sound-bath must first close the sheet. Consider suppressing the AI Agent auto-open when the user has just redeemed a promo, or making it dismiss on click-outside."]}
+    ]
+  },
+  "verified_frontend_expectations": [
+    "Fresh user registered via POST /api/auth/register, logged in via /api/auth/login, token stored in localStorage",
+    "Dashboard before redemption: pro-preview-banner=1, sound-bath-pro-badge=1, sound-bath-unlock-cta=1, meditation-pro-badge=1, flow-custom-pro-badge=1",
+    "Account menu → Account panel → promo-entry-input 'WELCOME30' → Apply → confirmation card renders with type=comp",
+    "Redeem Free Access → ThankYouCelebration mounts, 'Start your first Pro session' button present",
+    "Tap 'Start your first Pro session' → onBack() → Dashboard immediately (no page reload) shows pro-preview-banner=0, sound-bath-pro-badge=0, sound-bath-unlock-cta=0, meditation-pro-badge=0, flow-custom-pro-badge=0",
+    "session-lock-* count = 0 on Saved Sessions rows",
+    "Backend /me/subscription confirms pro=true, pro_source='promo:WELCOME30', days_left=30"
+  ],
+  "verified_backend_expectations": [
+    "pytest /app/backend/tests/test_promo_redeem.py: 14 passed in 8.93s (validate happy/lowercase/unknown, redeem happy/double/unknown/inactive/max-uses/discount-code-rejection, additive stacking, free-cap lifted, free-user regression, admin-not-promo regression, admin redemption-count increments)"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_promo_redeem.py",
+    "/app/test_reports/pytest/promo_results_iter42.xml"
+  ],
+  "action_items": [
+    "OPTIONAL/MINOR: consider suppressing AI Agent Sheet auto-open on the first render after a promo redemption so the user isn't immediately re-blocked. Not blocking the iter41 bug fix."
+  ],
+  "critical_code_review_comments": [
+    "The same SubscriptionContext.refresh() pattern is NOT applied inside the Stripe-checkout return branch (AccountDashboard.jsx ~L147 in the poll → setCelebratingPlan → load() sequence). If a user pays via card and lands back on ?stripe_session_id=..., celebratingPlan is set → ThankYouCelebration shows → onStart calls onBack(). Because only local load() runs and refreshGlobalSub is not called there, the same stale-context bug likely reappears for paid flows. Recommend adding `await refreshGlobalSub()` immediately after `load()` at L147 for parity with redeemPromo().",
+    "AccountDashboard.jsx still maintains its own local `sub` state that duplicates SubscriptionContext — non-blocking but consider deriving from context to eliminate double bookkeeping."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% — all 5 pro-lock indicators clear immediately after ThankYouCelebration onStart, no reload"},
+  "test_credentials": "Admin: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8. Fresh users via /api/auth/register with TEST_promo_ui*_<ts>@example.com — ephemeral, no cleanup needed.",
+  "seed_data_creation": "Backend pytest registered a handful of TEST_promo_<uuid>@example.com users and ephemeral admin comp codes (created + deleted in finally blocks). Frontend test registered TEST_promo_ui{3-6}_<ts>@example.com — all harmless, all now Pro via WELCOME30 (30d comp). Admin WELCOME30 redemption count incremented by ~5 as expected.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter41 promo-redemption bug is fully closed at both backend and frontend layers. If Stripe checkout return flow is next in scope, verify AccountDashboard.jsx L124-164 (poll → setCelebratingPlan → load) also calls refreshGlobalSub — it currently does NOT, so a paid user could see the same stale-isPro issue after ThankYouCelebration onStart → onBack. Suggest a parity fix + a Playwright test that mocks the /payments/status endpoint to return paid.",
+  "rca of the issue": "iter41 identified: AccountDashboard.redeemPromo did not refresh the SubscriptionContext, so Dashboard's `useSubscription().isPro` stayed false after promo redeem. iter42 verifies the 2-line fix (useSubscription().refresh destructured + awaited after /promo/redeem) works: the pro-preview-banner, sound-bath / meditation / flow-custom pro badges, unlock CTAs all disappear immediately on returning to the Dashboard, without a page reload. Backend fully unchanged and still 14/14."
+}

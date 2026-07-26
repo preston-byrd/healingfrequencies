@@ -4,6 +4,7 @@ import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { ThankYouCelebration } from '@/components/ThankYouCelebration';
 import PromoCodesSection from '@/components/PromoCodesSection';
+import { useSubscription } from '@/contexts/SubscriptionContext';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
@@ -21,6 +22,10 @@ function fmtMoney(amount, currency = 'usd') {
 
 export default function AccountDashboard({ onBack }) {
   const { user, setUserName } = useAuth();
+  // Global subscription context — must be refreshed after any entitlement
+  // change (promo redemption, Stripe checkout return) so Dashboard's isPro
+  // flag flips without requiring a page reload.
+  const { refresh: refreshGlobalSub } = useSubscription();
   const [sub, setSub] = useState(null);
   const [plan, setPlan] = useState(null);
   const [tx, setTx] = useState([]);
@@ -260,7 +265,12 @@ export default function AccountDashboard({ onBack }) {
     setPromoBusy(true); setPromoErr('');
     try {
       await api.post('/promo/redeem', { code: promoInput.trim().toUpperCase() });
+      // Refresh BOTH the local page state AND the global SubscriptionContext
+      // so the Dashboard route sees isPro=true the moment the user closes
+      // the ThankYouCelebration overlay. Without the global refresh, every
+      // Pro-locked panel remains gated until a full page reload.
       await load();
+      await refreshGlobalSub();
       setCompRedeemed(true);
       setPromoInput('');
       setPromoValidation(null);
