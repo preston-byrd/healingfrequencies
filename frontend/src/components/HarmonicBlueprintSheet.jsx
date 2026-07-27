@@ -1,29 +1,43 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { X, Mic, Upload, RotateCcw, Waves, Check, AlertTriangle, Sparkles } from 'lucide-react';
+import { X, Mic, Upload, RotateCcw, Waves, Check, AlertTriangle, Sparkles, Anchor } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import {
   validateBuffer, analyseBuffer,
   decodeBlobToBuffer, decodeFileToBuffer,
+  compareToEigenmode,
 } from '@/lib/harmonicBlueprintEngine';
 
 /**
  * Full-screen Harmonic Blueprint experience — voice capture, FFT analysis,
- * and visual resonance map. Rendered as an overlay on top of the Dashboard.
+ * eigenmode drift comparison, and visual resonance map.
  *
- * Steps: onboarding → permission → capture → analysing → results (or error).
+ * Steps: intro → capture → analysing → (review-findings | eigenmode-saved) → results.
  *
- * The raw audio blob is NEVER uploaded. `handleAnalyse` runs FFT locally and
- * only the derived profile JSON is POSTed to /api/harmonic-blueprint/profile.
+ * The raw audio blob is NEVER uploaded. FFT runs locally; only the derived
+ * profile JSON (± confirmed_gaps) is POSTed.
+ *
+ * Phase 2 (Eigenmode Tuning): the user's first-ever capture is stored as
+ * their `is_eigenmode` baseline. Subsequent captures compare against it in
+ * a "Review findings" step where the user selects which gaps feel relevant
+ * before the profile is saved. Any profile can later be promoted to become
+ * the new baseline via 'Set as new baseline'.
  */
 const MIN_SECONDS = 10;
 const MAX_SECONDS = 30;
 
 export default function HarmonicBlueprintSheet({ open, onClose }) {
-  const [existing, setExisting] = useState(null);   // saved profile or null
+  const [existing, setExisting] = useState(null);   // latest saved profile or null
+  const [eigenmode, setEigenmode] = useState(null); // baseline profile or null
   const [loading, setLoading] = useState(true);
-  const [step, setStep] = useState('intro');        // intro | capture | analysing | results | error
+  // intro | capture | analysing | review | eigenmodeSaved | results | error
+  const [step, setStep] = useState('intro');
   const [error, setError] = useState('');
   const [profile, setProfile] = useState(null);
+  // Phase 2: findings pending user confirmation. `selected` is a Set of finding keys.
+  const [pendingDerived, setPendingDerived] = useState(null);
+  const [pendingFindings, setPendingFindings] = useState([]);
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
+  const [savingReview, setSavingReview] = useState(false);
 
   // Recording state
   const [recording, setRecording] = useState(false);
@@ -37,7 +51,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
   const rafRef = useRef(null);
   const startedAtRef = useRef(0);
 
-  // Load any existing profile when the sheet opens.
+  // Load any existing profile + eigenmode baseline when the sheet opens.
   useEffect(() => {
     if (!open) return;
     let alive = true;
@@ -48,6 +62,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
         const { data } = await api.get('/harmonic-blueprint/profile');
         if (!alive) return;
         setExisting(data.profile || null);
+        setEigenmode(data.eigenmode || null);
         setProfile(data.profile || null);
         setStep(data.profile ? 'results' : 'intro');
       } catch (e) {
@@ -160,15 +175,77 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
       }
       const derived = analyseBuffer(buffer, { maxSeconds: MAX_SECONDS });
       try { ctx.close(); } catch (_) {}
-      // Persist server-side (Pro-only endpoint).
+      // Phase 2 branch: if the user already has an eigenmode baseline, route
+      // into the Review-Findings step. Otherwise this becomes their baseline
+      // and we save immediately.
+      if (eigenmode) {
+        const findings = compareToEigenmode(derived, eigenmode);
+        setPendingDerived(derived);
+        setPendingFindings(findings);
+        // Default: pre-select the top finding so users see the affordance;
+        // they can toggle any/all off before saving.
+        setSelectedKeys(new Set(findings.slice(0, 1).map((f) => f.key)));
+        setStep('review');
+        return;
+      }
+      // First-ever capture — this IS the eigenmode.
       const { data } = await api.post('/harmonic-blueprint/profile', derived);
       const saved = data.profile || derived;
       setProfile(saved);
       setExisting(saved);
-      setStep('results');
+      setEigenmode(saved);
+      setStep('eigenmodeSaved');
     } catch (e) {
       setError(formatApiError(e) || 'Could not analyse audio — please try again.');
       setStep('capture');
+    }
+  }
+
+  // Confirm the current review-findings selection and persist the profile
+  // to the server with `confirmed_gaps` populated.
+  async function confirmFindings() {
+    if (!pendingDerived) return;
+    setSavingReview(true);
+    try {
+      const confirmed_gaps = pendingFindings
+        .filter((f) => selectedKeys.has(f.key))
+        .map((f) => ({
+          key: f.key, label: f.label, description: f.description,
+          direction: f.direction, delta_db: f.delta_db, lo: f.lo, hi: f.hi,
+        }));
+      const payload = { ...pendingDerived, confirmed_gaps };
+      const { data } = await api.post('/harmonic-blueprint/profile', payload);
+      const saved = data.profile || payload;
+      setProfile(saved);
+      setExisting(saved);
+      setPendingDerived(null);
+      setPendingFindings([]);
+      setSelectedKeys(new Set());
+      setStep('results');
+    } catch (e) {
+      setError(formatApiError(e) || 'Could not save findings — please try again.');
+    } finally {
+      setSavingReview(false);
+    }
+  }
+
+  function toggleFinding(key) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  // Promote the current (latest) profile to become the user's new eigenmode
+  // baseline. Used by the "Set as new baseline" action on the results panel.
+  async function promoteCurrentAsEigenmode() {
+    if (!profile || !profile.id) return;
+    try {
+      const { data } = await api.post(`/harmonic-blueprint/eigenmode/promote/${profile.id}`);
+      setEigenmode(data.eigenmode || profile);
+    } catch (e) {
+      setError(formatApiError(e));
     }
   }
 
@@ -192,6 +269,10 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
       await api.delete('/harmonic-blueprint/profile');
       setExisting(null);
       setProfile(null);
+      setEigenmode(null);
+      setPendingDerived(null);
+      setPendingFindings([]);
+      setSelectedKeys(new Set());
       setStep('intro');
     } catch (e) {
       setError(formatApiError(e));
@@ -214,7 +295,10 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
                 <Sparkles size={12} /> Harmonic Blueprint
               </div>
               <h1 className="font-display text-4xl sm:text-5xl font-light tracking-tight text-[#E8E3D9]">
-                {step === 'results' ? 'Your resonance profile' : 'Discover your signature'}
+                {step === 'results' ? 'Your resonance profile'
+                  : step === 'review' ? 'Review your findings'
+                  : step === 'eigenmodeSaved' ? 'Your natural baseline is set'
+                  : 'Discover your signature'}
               </h1>
             </div>
             <button
@@ -233,6 +317,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
           {!loading && step === 'intro' && (
             <IntroPanel
               existing={existing}
+              hasEigenmode={!!eigenmode}
               onBegin={() => { setError(''); setStep('capture'); }}
             />
           )}
@@ -261,11 +346,32 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
             </div>
           )}
 
+          {!loading && step === 'review' && pendingDerived && (
+            <ReviewFindingsPanel
+              findings={pendingFindings}
+              selectedKeys={selectedKeys}
+              onToggle={toggleFinding}
+              onBack={() => setStep('capture')}
+              onConfirm={confirmFindings}
+              saving={savingReview}
+              error={error}
+            />
+          )}
+
+          {!loading && step === 'eigenmodeSaved' && profile && (
+            <EigenmodeCapturedPanel
+              profile={profile}
+              onContinue={() => setStep('results')}
+            />
+          )}
+
           {!loading && step === 'results' && profile && (
             <ResultsPanel
               profile={profile}
+              eigenmode={eigenmode}
               onRecordAgain={resetToCapture}
               onReset={clearProfile}
+              onPromoteBaseline={promoteCurrentAsEigenmode}
             />
           )}
 
@@ -292,7 +398,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
 
 // ---------- Sub-panels -------------------------------------------------------
 
-function IntroPanel({ existing, onBegin }) {
+function IntroPanel({ existing, hasEigenmode, onBegin }) {
   return (
     <div className="space-y-8" data-testid="harmonic-blueprint-intro">
       <div className="glass p-8 leading-relaxed">
@@ -318,6 +424,19 @@ function IntroPanel({ existing, onBegin }) {
         </div>
       </div>
 
+      {hasEigenmode && (
+        <div className="glass p-6 border border-[rgba(196,166,122,0.3)]" data-testid="harmonic-blueprint-eigenmode-note">
+          <div className="label-tiny mb-2 text-[#C4A67A] inline-flex items-center gap-2">
+            <Anchor size={12} /> Your natural baseline
+          </div>
+          <div className="text-[#8A9A92] text-sm leading-relaxed">
+            You've already captured your eigenmode baseline. This session will
+            compare your current signature against it and surface areas
+            inviting rebalancing.
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
         <button
           data-testid="harmonic-blueprint-begin-button"
@@ -327,7 +446,7 @@ function IntroPanel({ existing, onBegin }) {
         >
           {existing ? 'Record again' : 'Begin'}
         </button>
-        {existing && (
+        {existing && !hasEigenmode && (
           <span className="text-[#8A9A92] text-sm">
             You already have a saved profile — recording again will replace it.
           </span>
@@ -445,9 +564,65 @@ function CapturePanel({ recording, elapsed, level, error, onStart, onStop, onFil
   );
 }
 
-function ResultsPanel({ profile, onRecordAgain, onReset }) {
+function ResultsPanel({ profile, eigenmode, onRecordAgain, onReset, onPromoteBaseline }) {
+  const isEigenmode = !!(profile && profile.is_eigenmode);
+  const confirmedGaps = (profile && profile.confirmed_gaps) || [];
   return (
     <div className="space-y-6" data-testid="harmonic-blueprint-results">
+      {/* Baseline banner — the anchor / signal that Phase 2 is active. */}
+      <div
+        className={`glass p-5 flex items-center justify-between gap-4 ${isEigenmode ? 'border border-[rgba(196,166,122,0.35)]' : ''}`}
+        data-testid="harmonic-blueprint-baseline-banner"
+      >
+        <div className="flex items-center gap-3">
+          <Anchor size={16} className={isEigenmode ? 'text-[#C4A67A]' : 'text-[#72C2AC]'} />
+          <div>
+            <div className="label-tiny text-[#C4A67A]">
+              {isEigenmode ? 'This is your natural baseline' : 'Compared against your natural baseline'}
+            </div>
+            <div className="text-[#8A9A92] text-xs mt-1">
+              {isEigenmode
+                ? 'Future captures will be compared against this eigenmode profile.'
+                : eigenmode
+                  ? 'Findings below reflect drift from your first-ever capture.'
+                  : 'No baseline set — capture one to unlock drift analysis.'}
+            </div>
+          </div>
+        </div>
+        {!isEigenmode && eigenmode && (
+          <button
+            data-testid="harmonic-blueprint-promote-baseline-button"
+            type="button"
+            onClick={onPromoteBaseline}
+            className="text-xs tracking-widest text-[#C4A67A] hover:text-[#D6B98A] transition-colors uppercase"
+          >
+            Set as new baseline
+          </button>
+        )}
+      </div>
+
+      {confirmedGaps.length > 0 && (
+        <div
+          className="glass p-6"
+          data-testid="harmonic-blueprint-confirmed-gaps"
+        >
+          <div className="label-tiny text-[#C4A67A] mb-3 inline-flex items-center gap-2">
+            <Sparkles size={12} /> Areas you're inviting rebalancing
+          </div>
+          <ul className="space-y-3">
+            {confirmedGaps.map((g, i) => (
+              <li key={`${g.key}-${i}`} className="flex items-start gap-3">
+                <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#72C2AC] shrink-0" />
+                <div>
+                  <div className="text-[#E8E3D9] text-sm">{g.label} · {g.lo}–{g.hi} Hz</div>
+                  <div className="text-[#8A9A92] text-sm mt-1 leading-relaxed">{g.description}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <SpectrumMap profile={profile} />
       <BandGrid bands={profile.bands} />
       <div className="grid sm:grid-cols-2 gap-4">
@@ -497,9 +672,155 @@ function ResultsPanel({ profile, onRecordAgain, onReset }) {
           onClick={onReset}
           className="text-[#8A9A92] hover:text-[#D96C6C] text-sm transition-colors"
         >
-          Delete profile
+          Delete all data
         </button>
       </div>
+    </div>
+  );
+}
+
+function ReviewFindingsPanel({ findings, selectedKeys, onToggle, onBack, onConfirm, saving, error }) {
+  const nothingDrifted = findings.length === 0;
+  return (
+    <div className="space-y-6" data-testid="harmonic-blueprint-review">
+      <div className="glass p-6 leading-relaxed">
+        <div className="text-[#C6CDCA] text-base">
+          We compared your current signature to your{' '}
+          <span className="text-[#C4A67A]">natural baseline</span>. Review the
+          findings below and confirm which ones feel relevant to you right
+          now. Only what you affirm will be saved with this session.
+        </div>
+        <div className="text-[#8A9A92] text-sm mt-3">
+          These are supportive observations about drift — never diagnoses.
+        </div>
+      </div>
+
+      {nothingDrifted ? (
+        <div
+          className="glass p-8 text-center"
+          data-testid="harmonic-blueprint-review-empty"
+        >
+          <Anchor className="mx-auto text-[#72C2AC] mb-3" size={28} />
+          <div className="font-display text-xl text-[#E8E3D9]">
+            You're closely aligned with your natural baseline.
+          </div>
+          <div className="text-[#8A9A92] text-sm mt-3 leading-relaxed max-w-md mx-auto">
+            No band has drifted by more than a few decibels from your
+            eigenmode profile. Save this session to log the check-in.
+          </div>
+        </div>
+      ) : (
+        <ul
+          className="space-y-3"
+          data-testid="harmonic-blueprint-findings-list"
+        >
+          {findings.map((f) => {
+            const selected = selectedKeys.has(f.key);
+            return (
+              <li key={f.key}>
+                <button
+                  data-testid={`harmonic-blueprint-finding-${f.key}`}
+                  type="button"
+                  onClick={() => onToggle(f.key)}
+                  aria-pressed={selected}
+                  className={`w-full text-left glass p-5 transition-colors border ${
+                    selected
+                      ? 'border-[rgba(114,194,172,0.6)] bg-[rgba(114,194,172,0.05)]'
+                      : 'border-[rgba(114,194,172,0.15)]'
+                  }`}
+                >
+                  <div className="flex items-start gap-4">
+                    <div
+                      className={`mt-1 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors ${
+                        selected
+                          ? 'border-[#72C2AC] bg-[#72C2AC]/20'
+                          : 'border-[#3A4A45]'
+                      }`}
+                    >
+                      {selected && <Check size={11} className="text-[#72C2AC]" />}
+                    </div>
+                    <div className="flex-1">
+                      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                        <div className="text-[#E8E3D9] text-sm">
+                          {f.label}
+                          <span className="text-[#8A9A92] font-mono ml-2">
+                            {f.lo}–{f.hi} Hz
+                          </span>
+                        </div>
+                        <div className="text-[#5A6B65] text-xs font-mono">
+                          {f.delta_db > 0 ? '+' : ''}{f.delta_db.toFixed(1)} dB
+                        </div>
+                      </div>
+                      <div className="text-[#8A9A92] text-sm mt-2 leading-relaxed">
+                        {f.description}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {error && (
+        <div className="glass p-4 border border-[rgba(217,108,108,0.4)] text-[#D96C6C] text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+        <button
+          data-testid="harmonic-blueprint-review-back-button"
+          type="button"
+          onClick={onBack}
+          className="text-[#8A9A92] hover:text-[#E8E3D9] text-sm transition-colors"
+        >
+          ← Discard &amp; retake
+        </button>
+        <button
+          data-testid="harmonic-blueprint-review-save-button"
+          type="button"
+          onClick={onConfirm}
+          disabled={saving}
+          className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+        >
+          {saving ? 'Saving…' : nothingDrifted ? 'Save session' : `Save findings (${selectedKeys.size})`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function EigenmodeCapturedPanel({ profile, onContinue }) {
+  return (
+    <div className="space-y-6" data-testid="harmonic-blueprint-eigenmode-saved">
+      <div className="glass p-8 leading-relaxed border border-[rgba(196,166,122,0.35)]">
+        <div className="inline-flex items-center gap-2 label-tiny text-[#C4A67A]">
+          <Anchor size={12} /> Eigenmode profile saved
+        </div>
+        <div className="font-display text-2xl text-[#E8E3D9] mt-4">
+          This is your natural baseline.
+        </div>
+        <div className="text-[#C6CDCA] text-base mt-3">
+          We've saved this capture as your <span className="text-[#C4A67A]">eigenmode profile</span> —
+          the unique harmonic signature we'll compare against on every future
+          session. From now on, each new capture will surface any drift from
+          this natural tuning.
+        </div>
+        <div className="text-[#8A9A92] text-sm mt-3 leading-relaxed">
+          You can designate a future analysis as your new baseline at any
+          time from the results view.
+        </div>
+      </div>
+      <button
+        data-testid="harmonic-blueprint-eigenmode-continue-button"
+        type="button"
+        onClick={onContinue}
+        className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors"
+      >
+        View my resonance profile
+      </button>
     </div>
   );
 }

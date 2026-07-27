@@ -1163,21 +1163,62 @@ class HarmonicProfileIn(BaseModel):
     bands: list[HarmonicBandIn] = Field(default_factory=list, max_length=16)
     underrepresented: list[dict] = Field(default_factory=list, max_length=16)
     generated_at: Optional[str] = None
+    # Phase 2 — Eigenmode Tuning. When the client renders the Review-Findings
+    # step, it POSTs the gaps the user affirmed as personally resonant back to
+    # us. Free-form dicts so future finding shapes don't require a migration.
+    confirmed_gaps: list[dict] = Field(default_factory=list, max_length=16)
+
+
+async def _ensure_eigenmode(user_id: str) -> Optional[dict]:
+    """Return the user's eigenmode profile — a legacy-aware helper. Profiles
+    saved before Phase 2 have no `is_eigenmode` field; if the user has any
+    profiles but none flagged eigenmode, promote the OLDEST one so their very
+    first capture is preserved as their natural baseline (Phase 2 semantics)."""
+    eigen = await db.resonance_profiles.find_one(
+        {"user_id": user_id, "is_eigenmode": True}, {"_id": 0},
+    )
+    if eigen:
+        return eigen
+    oldest = await db.resonance_profiles.find_one(
+        {"user_id": user_id}, {"_id": 0},
+        sort=[("created_at", 1)],
+    )
+    if not oldest:
+        return None
+    await db.resonance_profiles.update_one(
+        {"id": oldest["id"]},
+        {"$set": {"is_eigenmode": True}},
+    )
+    oldest["is_eigenmode"] = True
+    return oldest
 
 
 @api.get("/harmonic-blueprint/profile")
 async def get_harmonic_profile(user: dict = Depends(get_current_user)):
-    """Return the user's most recent resonance profile, or `{profile: null}`
-    when they haven't recorded one yet. Pro-only feature — free users get a
-    401-ish (402) so the UI can route them to the paywall."""
+    """Return the user's most recent resonance profile alongside their
+    eigenmode baseline (which may be the same document if they've only ever
+    captured once). `{profile: null, eigenmode: null}` when they haven't
+    recorded anything yet. Pro-only feature — free users get a 402 so the
+    UI can route them to the paywall."""
     if not _is_pro(user):
         raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
-    doc = await db.resonance_profiles.find_one(
+    latest = await db.resonance_profiles.find_one(
         {"user_id": user["id"]},
         {"_id": 0},
         sort=[("created_at", -1)],
     )
-    return {"profile": doc}
+    eigen = await _ensure_eigenmode(user["id"])
+    return {"profile": latest, "eigenmode": eigen}
+
+
+@api.get("/harmonic-blueprint/eigenmode")
+async def get_eigenmode_profile(user: dict = Depends(get_current_user)):
+    """Return just the user's eigenmode (natural baseline) profile, or null
+    when they haven't captured one yet."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    eigen = await _ensure_eigenmode(user["id"])
+    return {"eigenmode": eigen}
 
 
 @api.post("/harmonic-blueprint/profile")
@@ -1186,17 +1227,19 @@ async def save_harmonic_profile(
     request: Request,
     user: dict = Depends(get_current_user),
 ):
-    """Persist the derived resonance profile. Free-tier users are blocked
-    with a 402 so the client can offer an upgrade path."""
+    """Persist the derived resonance profile. If the user has no eigenmode
+    baseline yet, this save becomes their eigenmode automatically (Phase 2
+    semantics: the very first capture is treated as their natural harmonic
+    signature). Free-tier users get 402 so the client can offer an upgrade."""
     if not _is_pro(user):
         raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
     ip = _client_ip(request)
-    # Cheap per-user throttle: users shouldn't need to re-analyse more than
-    # a handful of times per hour.
     _rate_limit_or_429(
         f"harmonic:{user['id']}:{ip}", capacity=6, refill_per_sec=1 / 600,
         label="blueprint save",
     )
+    existing_eigen = await _ensure_eigenmode(user["id"])
+    is_first_ever = existing_eigen is None
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1211,18 +1254,24 @@ async def save_harmonic_profile(
         "dips": [p.model_dump() for p in body.dips],
         "bands": [b.model_dump() for b in body.bands],
         "underrepresented": body.underrepresented,
+        "confirmed_gaps": body.confirmed_gaps,
         "generated_at": body.generated_at or now,
+        "is_eigenmode": is_first_ever,
     }
-    # Keep only the latest 5 profiles per user so history stays lightweight
-    # while still letting Phase 2 compare "before / after" journeys.
     await db.resonance_profiles.insert_one({**doc})
-    old_ids = await db.resonance_profiles.find(
+    # Retention: keep latest 5 profiles per user, PLUS the eigenmode even if
+    # older (Phase 2: the baseline must survive forever, or until the user
+    # explicitly resets it).
+    all_docs = await db.resonance_profiles.find(
         {"user_id": user["id"]},
-        {"id": 1, "_id": 0},
+        {"id": 1, "created_at": 1, "is_eigenmode": 1, "_id": 0},
         sort=[("created_at", -1)],
     ).to_list(1000)
-    keep = {r["id"] for r in old_ids[:5]}
-    if len(old_ids) > 5:
+    keep = {r["id"] for r in all_docs[:5]}
+    for r in all_docs:
+        if r.get("is_eigenmode"):
+            keep.add(r["id"])
+    if len(all_docs) > len(keep):
         await db.resonance_profiles.delete_many({
             "user_id": user["id"],
             "id": {"$nin": list(keep)},
@@ -1230,10 +1279,50 @@ async def save_harmonic_profile(
     await _audit(
         "harmonic.profile_saved", request,
         user_id=user["id"], user_email=user.get("email"),
-        metadata={"duration": body.duration, "dominant_count": len(body.dominant)},
+        metadata={
+            "duration": body.duration,
+            "dominant_count": len(body.dominant),
+            "is_eigenmode": is_first_ever,
+            "confirmed_gaps_count": len(body.confirmed_gaps),
+        },
     )
     doc.pop("_id", None)
-    return {"ok": True, "profile": doc}
+    return {"ok": True, "profile": doc, "is_eigenmode": is_first_ever}
+
+
+@api.post("/harmonic-blueprint/eigenmode/promote/{profile_id}")
+async def promote_eigenmode(
+    profile_id: str,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Promote an existing profile to be the user's new eigenmode baseline.
+    Used by the 'Set as new baseline' action on the results panel."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    target = await db.resonance_profiles.find_one(
+        {"id": profile_id, "user_id": user["id"]}, {"_id": 0},
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    # Atomic-ish swap: clear all, set target. Two writes so a crash between
+    # them leaves the user with zero eigenmodes — `_ensure_eigenmode` will
+    # self-heal on next fetch by promoting the oldest surviving doc.
+    await db.resonance_profiles.update_many(
+        {"user_id": user["id"]},
+        {"$set": {"is_eigenmode": False}},
+    )
+    await db.resonance_profiles.update_one(
+        {"id": profile_id},
+        {"$set": {"is_eigenmode": True}},
+    )
+    await _audit(
+        "harmonic.eigenmode_promoted", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"profile_id": profile_id},
+    )
+    target["is_eigenmode"] = True
+    return {"ok": True, "eigenmode": target}
 
 
 @api.delete("/harmonic-blueprint/profile")

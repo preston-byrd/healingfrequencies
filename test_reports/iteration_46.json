@@ -1,0 +1,60 @@
+{
+  "summary": "Harmonic Blueprint Phase 2 (Eigenmode Tuning) — both backend + frontend testing. Backend: 11/11 new pytest cases pass in /app/backend/tests/test_harmonic_blueprint_phase2.py covering fresh {profile:null,eigenmode:null}, first-save auto-eigenmode, second-save not-eigenmode, /eigenmode endpoint, /eigenmode/promote/{id} (200 + 404 + 402), confirmed_gaps persistence, retention keeps latest-5 + eigenmode (=6 docs), and legacy auto-promotion of oldest doc lacking is_eigenmode. Frontend E2E via Playwright: sheet opens for admin (Pro), banner correctly reads 'THIS IS YOUR NATURAL BASELINE' when latest IS eigenmode (no promote button); reads 'COMPARED AGAINST YOUR NATURAL BASELINE' with promote button visible when latest is NOT eigenmode. Confirmed-gaps section renders with the two seeded gaps and header 'AREAS YOU'RE INVITING REBALANCING'. Reset button label is 'Delete all data' and clicking it returns to intro with no eigenmode-note (as expected once nothing remains). Language audit on visible DOM of results/intro/capture panels — CLEAN of banned substrings. TWO issues found: (1) the review-findings panel copy contains 'never diagnoses' — the banned substring 'diagnos' violates the language audit; (2) clicking the promote-baseline button correctly hits POST /eigenmode/promote (verified via Mongo — the target doc becomes is_eigenmode:true and previous is cleared) but the UI does NOT optimistically update `profile.is_eigenmode`, so the banner still shows 'Compared against your natural baseline' and the promote button stays visible until the sheet is closed and re-opened.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "HarmonicBlueprintSheet › ResultsPanel promote flow",
+        "issue": "After clicking 'Set as new baseline', the banner and promote button do not refresh. Handler only calls setEigenmode() but never updates `profile.is_eigenmode` in local state. Server-side promotion works correctly; UI just doesn't reflect it until reload/reopen.",
+        "selector": "[data-testid=harmonic-blueprint-promote-baseline-button]",
+        "priority": "HIGH"
+      },
+      {
+        "component": "HarmonicBlueprintSheet › ReviewFindingsPanel",
+        "issue": "Review panel copy contains 'These are supportive observations about drift — never diagnoses.' The substring 'diagnos' is on the review-findings screen at line 694 of HarmonicBlueprintSheet.jsx. Even though the sentence is reassuring, the language-audit rule bans the substring anywhere in the sheet DOM. Reword e.g. 'These are supportive observations about drift — never conclusions.'",
+        "selector": "[data-testid=harmonic-blueprint-review]",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "HarmonicBlueprintSheet › IntroPanel eigenmode-note",
+        "issues": ["The intro-eigenmode-note ([data-testid=harmonic-blueprint-eigenmode-note]) is essentially unreachable in the current UI. On sheet open, the loader routes to `results` whenever a profile exists (line 67: setStep(data.profile ? 'results' : 'intro')). Because the eigenmode IS itself a profile row, having any eigenmode implies latest is non-null, so the intro step is never shown when eigenmode is present. The note wording is in place, but no user path leads there. Consider routing to intro when only the eigenmode exists (i.e., total docs == 1 and it is the eigenmode) or after a lightweight 'Record new capture' entry that clears local latest without deleting the eigenmode."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_harmonic_blueprint_phase2.py",
+    "/app/backend/tests/test_harmonic_blueprint.py",
+    "/app/test_reports/pytest/iter46_phase2.xml"
+  ],
+  "action_items": [
+    "Fix HarmonicBlueprintSheet.promoteCurrentAsEigenmode() — after `api.post('/harmonic-blueprint/eigenmode/promote/{id}')` returns, also do `setProfile(prev => prev ? {...prev, is_eigenmode: true} : prev)` so the banner and promote button reflect the new baseline immediately.",
+    "Reword the review-findings subtitle to remove the substring 'diagnos'. Suggested: 'These are supportive observations about drift — never conclusions.' (or 'never labels', 'never verdicts'). Applies to /app/frontend/src/components/HarmonicBlueprintSheet.jsx line 694.",
+    "(UX) Make the intro-eigenmode-note reachable — currently no user flow leads to intro while eigenmode remains. Options: route to intro when only the eigenmode doc exists and the user has never done a second capture, or expose a 'Record new capture' entry from Results that shows the intro-with-note before capture."
+  ],
+  "critical_code_review_comments": [
+    "promoteCurrentAsEigenmode (HarmonicBlueprintSheet.jsx:242-250) mutates only the `eigenmode` local state and never syncs `profile.is_eigenmode`, causing the results panel to lie about state until the sheet is re-opened. Fix scope is one line.",
+    "The 'never diagnoses' copy in ReviewFindingsPanel is well-meant but violates the Phase-2 non-diagnostic language rule (substring 'diagnos' banned). Language rules should ideally be enforced by a lint/test — add a Jest snapshot or grep-based CI check on rendered strings.",
+    "Retention block runs unconditionally after every insert; on 8-doc seed test the trim correctly retained 6 (5 newest + eigenmode). Note the concurrent-write caveat still applies from iter45 review.",
+    "_ensure_eigenmode auto-migrates on GET — works correctly. However it silently mutates DB on a read; consider logging or a distinct audit event so ops can see legacy migrations happen.",
+    "Intro-eigenmode-note is currently dead UI — either wire a state path that shows it, or remove the branch to keep the codebase honest."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_harmonic_blueprint_phase2.py (new — 11 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (11/11 Phase 2 tests pass; Phase 1 tests from iter 45 still pass)",
+    "frontend": "~85% — results banner + confirmed-gaps + reset-label + language audit on intro/capture/results all pass; promote-button UI refresh bug and 'never diagnoses' copy bug found; review-panel language couldn't be checked via live DOM (requires real audio upload flow) but source-code grep confirms 'diagnos' substring at line 694"
+  },
+  "test_credentials": "Admin from /app/memory/test_credentials.md: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8",
+  "seed_data_creation": "During E2E: seeded 2 resonance_profiles docs for admin via direct Mongo insert — one older eigenmode (is_eigenmode:true) and one newer non-eigenmode with two confirmed_gaps entries — to exercise the compare/promote/confirmed-gaps rendering without needing live mic capture. Cleaned up at end (delete_many for admin user_id).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend Phase-2 tests live at /app/backend/tests/test_harmonic_blueprint_phase2.py. To exercise the promote UI, seed admin with one eigenmode doc + one newer non-eigenmode doc via `db.resonance_profiles` (see the pattern in test_promote_makes_new_eigenmode_and_clears_previous). The sheet always routes to `results` when a latest profile exists — intro/eigenmode-note step is currently unreachable naturally. The ReviewFindingsPanel is reachable only via a real audio-capture upload that yields ≥4dB drift on some band; headless Playwright can't hit it without a fixture WAV that meets crest-factor ≥4dB SNR gate.",
+  "rca of the issue": "Bug 1 (promote UI stale): HarmonicBlueprintSheet.jsx:245-246 — the response from POST /eigenmode/promote is written into `eigenmode` state only. The ResultsPanel derives `isEigenmode` from `profile.is_eigenmode`, not from `eigenmode.id === profile.id`. Fix: after the promote call, also `setProfile(p => p ? { ...p, is_eigenmode: true } : p)`. Alternatively, derive isEigenmode as `eigenmode && profile && eigenmode.id === profile.id`. Bug 2 (language audit): HarmonicBlueprintSheet.jsx:694 hard-codes 'never diagnoses'. Word 'diagnoses' is explicitly banned per Phase-2 spec. Fix: replace with 'never conclusions' or similar. Both bugs are small, single-line edits."
+}

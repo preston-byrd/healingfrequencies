@@ -240,6 +240,97 @@ function decimate(points, target) {
   return out;
 }
 
+// --- Phase 2: Eigenmode drift comparison ---------------------------------
+// Given two profiles (current + eigenmode baseline), return supportive,
+// non-diagnostic "resonance gap" findings ranked by drift magnitude. All
+// copy here is intentionally non-medical — we describe drift toward or away
+// from the user's natural tuning, never as pathology.
+const BAND_MEANINGS = {
+  sub: {
+    label: 'Grounding & root',
+    quieter:
+      'Your lower grounding frequencies appear to have drifted quieter than your natural baseline — the deep resonance that anchors you.',
+    louder:
+      'Your lower grounding frequencies are currently more prominent than your natural baseline.',
+  },
+  low: {
+    label: 'Warmth & depth',
+    quieter:
+      'The warm, embodied depth in your voice has softened from its natural tuning.',
+    louder:
+      'The warm, embodied depth in your voice is amplified beyond your natural baseline.',
+  },
+  lowmid: {
+    label: 'Chest resonance',
+    quieter:
+      'Your chest-centred resonance has moved quieter than your natural baseline — an area inviting rebalancing.',
+    louder:
+      'Your chest-centred resonance is currently louder than your natural baseline.',
+  },
+  mid: {
+    label: 'Expressive core',
+    quieter:
+      'Your expressive core has quieted from your natural tuning.',
+    louder:
+      'Your expressive core is more prominent than your natural baseline.',
+  },
+  uppermid: {
+    label: 'Articulation & clarity',
+    quieter:
+      'Your articulation range has softened from its natural resonance — an area inviting rebalancing.',
+    louder:
+      'Your articulation range has moved louder than your natural baseline.',
+  },
+  presence: {
+    label: 'Brightness & openness',
+    quieter:
+      'The brightness in your voice has drifted quieter than your natural tuning.',
+    louder:
+      'The brightness in your voice is currently more amplified than your natural baseline.',
+  },
+};
+
+/**
+ * Compare a fresh analysis to the user's eigenmode baseline and produce
+ * ranked, non-diagnostic findings. Returns [] when either profile is
+ * missing bands, or when nothing has drifted significantly (|Δ| ≥ 4 dB).
+ *
+ * @param {object} current  profile produced by analyseBuffer (or fetched)
+ * @param {object} eigen    the user's saved eigenmode baseline
+ * @param {number} minDeltaDb  significance threshold (default 4 dB)
+ * @returns {Array<Finding>} ranked most-significant first, capped to 5
+ */
+export function compareToEigenmode(current, eigen, minDeltaDb = 4) {
+  if (!current || !eigen) return [];
+  const cur = new Map((current.bands || []).map((b) => [b.key, b]));
+  const eig = new Map((eigen.bands || []).map((b) => [b.key, b]));
+  const findings = [];
+  for (const [key, meta] of Object.entries(BAND_MEANINGS)) {
+    const c = cur.get(key);
+    const e = eig.get(key);
+    if (!c || !e) continue;
+    const delta = c.db - e.db;                       // + means current louder
+    const magnitude = Math.abs(delta);
+    if (magnitude < minDeltaDb) continue;
+    const direction = delta < 0 ? 'quieter' : 'louder';
+    findings.push({
+      key,
+      label: meta.label,
+      description: meta[direction],
+      direction,
+      delta_db: +delta.toFixed(2),
+      magnitude: +magnitude.toFixed(2),
+      lo: e.lo,
+      hi: e.hi,
+      current_db: c.db,
+      eigen_db: e.db,
+    });
+  }
+  // Rank by magnitude (most drifted first), then present at most 5.
+  findings.sort((a, b) => b.magnitude - a.magnitude);
+  return findings.slice(0, 5);
+}
+
 // --- Decode helpers --------------------------------------------------------
 export async function decodeBlobToBuffer(blob, ctx) {
   const arrayBuf = await blob.arrayBuffer();
