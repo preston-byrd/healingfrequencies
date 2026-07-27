@@ -243,7 +243,11 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
     if (!profile || !profile.id) return;
     try {
       const { data } = await api.post(`/harmonic-blueprint/eigenmode/promote/${profile.id}`);
-      setEigenmode(data.eigenmode || profile);
+      const newEigen = data.eigenmode || profile;
+      setEigenmode(newEigen);
+      // Also flip the flag on the local profile so the banner reflects the
+      // new baseline state immediately (server has already updated the doc).
+      setProfile((prev) => (prev && prev.id === newEigen.id ? { ...prev, is_eigenmode: true } : prev));
     } catch (e) {
       setError(formatApiError(e));
     }
@@ -317,7 +321,6 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
           {!loading && step === 'intro' && (
             <IntroPanel
               existing={existing}
-              hasEigenmode={!!eigenmode}
               onBegin={() => { setError(''); setStep('capture'); }}
             />
           )}
@@ -328,6 +331,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
               elapsed={elapsed}
               level={level}
               error={error}
+              hasEigenmode={!!eigenmode}
               onStart={beginRecording}
               onStop={finishRecording}
               onFile={onFilePicked}
@@ -398,7 +402,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
 
 // ---------- Sub-panels -------------------------------------------------------
 
-function IntroPanel({ existing, hasEigenmode, onBegin }) {
+function IntroPanel({ existing, onBegin }) {
   return (
     <div className="space-y-8" data-testid="harmonic-blueprint-intro">
       <div className="glass p-8 leading-relaxed">
@@ -424,19 +428,6 @@ function IntroPanel({ existing, hasEigenmode, onBegin }) {
         </div>
       </div>
 
-      {hasEigenmode && (
-        <div className="glass p-6 border border-[rgba(196,166,122,0.3)]" data-testid="harmonic-blueprint-eigenmode-note">
-          <div className="label-tiny mb-2 text-[#C4A67A] inline-flex items-center gap-2">
-            <Anchor size={12} /> Your natural baseline
-          </div>
-          <div className="text-[#8A9A92] text-sm leading-relaxed">
-            You've already captured your eigenmode baseline. This session will
-            compare your current signature against it and surface areas
-            inviting rebalancing.
-          </div>
-        </div>
-      )}
-
       <div className="flex flex-wrap items-center gap-3">
         <button
           data-testid="harmonic-blueprint-begin-button"
@@ -446,7 +437,7 @@ function IntroPanel({ existing, hasEigenmode, onBegin }) {
         >
           {existing ? 'Record again' : 'Begin'}
         </button>
-        {existing && !hasEigenmode && (
+        {existing && (
           <span className="text-[#8A9A92] text-sm">
             You already have a saved profile — recording again will replace it.
           </span>
@@ -456,11 +447,26 @@ function IntroPanel({ existing, hasEigenmode, onBegin }) {
   );
 }
 
-function CapturePanel({ recording, elapsed, level, error, onStart, onStop, onFile, onBack }) {
+function CapturePanel({ recording, elapsed, level, error, hasEigenmode, onStart, onStop, onFile, onBack }) {
   const secondsLeft = Math.max(0, MAX_SECONDS - elapsed);
   const readyToStop = elapsed >= MIN_SECONDS;
   return (
     <div className="space-y-6" data-testid="harmonic-blueprint-capture">
+      {hasEigenmode && (
+        <div
+          className="glass p-5 border border-[rgba(196,166,122,0.3)]"
+          data-testid="harmonic-blueprint-eigenmode-note"
+        >
+          <div className="label-tiny text-[#C4A67A] inline-flex items-center gap-2">
+            <Anchor size={12} /> Comparing against your baseline
+          </div>
+          <div className="text-[#8A9A92] text-sm mt-2 leading-relaxed">
+            This capture will be compared against your saved eigenmode profile
+            to surface areas inviting rebalancing. You'll review the findings
+            before anything is saved.
+          </div>
+        </div>
+      )}
       <div className="glass p-8">
         <div className="text-[#8A9A92] text-sm tracking-widest uppercase">Guided prompt</div>
         <div className="font-display text-3xl text-[#E8E3D9] mt-3 leading-tight">
@@ -691,7 +697,7 @@ function ReviewFindingsPanel({ findings, selectedKeys, onToggle, onBack, onConfi
           now. Only what you affirm will be saved with this session.
         </div>
         <div className="text-[#8A9A92] text-sm mt-3">
-          These are supportive observations about drift — never diagnoses.
+          These are supportive observations about drift — never conclusions.
         </div>
       </div>
 
