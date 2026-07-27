@@ -312,10 +312,9 @@ function IntroPanel({ existing, onBegin }) {
       <div className="glass p-6">
         <div className="label-tiny mb-3 text-[#C4A67A]">Privacy first</div>
         <div className="text-[#8A9A92] text-sm leading-relaxed">
-          When you continue, your browser will ask for microphone permission.
-          Your voice sample is processed <span className="text-[#E8E3D9]">locally
-          on your device</span> and never stored on our servers. Only your
-          resonance profile data is saved.
+          Your voice sample is <span className="text-[#E8E3D9]">processed locally</span> and
+          never stored on our servers. Only your resonance profile data is saved.
+          Your browser will ask for microphone permission when you continue.
         </div>
       </div>
 
@@ -509,7 +508,15 @@ function SpectrumMap({ profile }) {
   // Simple SVG spectrum plot. Y axis: 0 (peak) → -60 dB. X axis: bin index.
   const w = 720, h = 220, pad = 24;
   const pts = profile.spectrum || [];
-  if (!pts.length) return null;
+  // Guard: very sparse spectra (e.g. a stale seed doc) can't be plotted
+  // meaningfully — render a friendly empty state instead of a broken chart.
+  if (pts.length < 2) {
+    return (
+      <div className="glass p-6 text-[#8A9A92] text-sm" data-testid="harmonic-blueprint-spectrum">
+        Not enough spectral data yet — record a fresh sample to build the map.
+      </div>
+    );
+  }
   const minDb = -60, maxDb = 0;
   const xy = pts.map((p, i) => {
     const x = pad + (i / (pts.length - 1)) * (w - pad * 2);
@@ -528,6 +535,11 @@ function SpectrumMap({ profile }) {
     }
     return xy[best].x;
   };
+  // Fixed logarithmic-ish x-axis ticks so the axis reads sensibly across the
+  // 60 Hz – 4 kHz vocal band regardless of spectrum-array length.
+  const xTicks = [100, 250, 500, 1000, 2000, 4000].filter(
+    (hz) => hz >= pts[0].hz && hz <= pts[pts.length - 1].hz,
+  );
   return (
     <div className="glass p-6" data-testid="harmonic-blueprint-spectrum">
       <div className="flex items-center justify-between mb-4">
@@ -537,7 +549,7 @@ function SpectrumMap({ profile }) {
         </div>
         <div className="text-[#5A6B65] text-xs tracking-widest uppercase">FFT · {profile.fft_size}</div>
       </div>
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto">
+      <svg viewBox={`0 0 ${w} ${h + 18}`} className="w-full h-auto">
         <defs>
           <linearGradient id="hb-fill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#72C2AC" stopOpacity="0.55" />
@@ -567,7 +579,7 @@ function SpectrumMap({ profile }) {
               textAnchor="middle" fontSize="10"
               fill="#72C2AC" fontFamily="ui-monospace, monospace"
             >
-              {Math.round(p.hz)}Hz
+              {Math.round(p.hz)} Hz
             </text>
           </g>
         ))}
@@ -583,9 +595,20 @@ function SpectrumMap({ profile }) {
               textAnchor="middle" fontSize="10"
               fill="#C4A67A" fontFamily="ui-monospace, monospace"
             >
-              {Math.round(p.hz)}Hz
+              {Math.round(p.hz)} Hz
             </text>
           </g>
+        ))}
+        {/* Fixed x-axis frequency ticks (so the axis is always readable). */}
+        {xTicks.map((hz) => (
+          <text
+            key={`tick-${hz}`}
+            x={hzToX(hz)} y={h + 12}
+            textAnchor="middle" fontSize="9"
+            fill="#5A6B65" fontFamily="ui-monospace, monospace"
+          >
+            {hz >= 1000 ? `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)}k` : `${hz}`} Hz
+          </text>
         ))}
       </svg>
       <div className="flex items-center gap-6 text-xs text-[#8A9A92] mt-3">
