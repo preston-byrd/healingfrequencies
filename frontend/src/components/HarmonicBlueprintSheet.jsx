@@ -1002,8 +1002,11 @@ function EigenmodeCapturedPanel({ profile, onContinue }) {
 }
 
 function SpectrumMap({ profile }) {
-  // Simple SVG spectrum plot. Y axis: 0 (peak) → -60 dB. X axis: bin index.
-  const w = 720, h = 220, pad = 24;
+  // Log-scale SVG spectrum plot. Y axis: 0 (peak) → -60 dB. X axis: log10(Hz)
+  // spread from 60 Hz to 4 kHz — perceptually accurate for audio and prevents
+  // the low-band labels (100/250/500 Hz + most vocal dominants) from crowding
+  // into a narrow strip on the left.
+  const w = 720, h = 260, padL = 28, padR = 28, padT = 44, padB = 52;
   const pts = profile.spectrum || [];
   // Guard: very sparse spectra (e.g. a stale seed doc) can't be plotted
   // meaningfully — render a friendly empty state instead of a broken chart.
@@ -1015,28 +1018,58 @@ function SpectrumMap({ profile }) {
     );
   }
   const minDb = -60, maxDb = 0;
-  const xy = pts.map((p, i) => {
-    const x = pad + (i / (pts.length - 1)) * (w - pad * 2);
-    const y = pad + (1 - (Math.max(minDb, Math.min(maxDb, p.db)) - minDb) / (maxDb - minDb)) * (h - pad * 2);
-    return { x, y, hz: p.hz };
-  });
-  const line = xy.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-  const areaBottom = h - pad;
-  const area = `M${xy[0].x},${areaBottom} ${xy.map((p) => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} L${xy[xy.length - 1].x},${areaBottom} Z`;
+  const loHz = Math.max(pts[0].hz, 20);
+  const hiHz = Math.max(pts[pts.length - 1].hz, loHz * 2);
+  const logLo = Math.log10(loHz);
+  const logHi = Math.log10(hiHz);
+  const usableW = w - padL - padR;
+  const usableH = h - padT - padB;
   const hzToX = (hz) => {
-    // Nearest point search — cheap and accurate enough for annotations.
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < pts.length; i++) {
-      const d = Math.abs(pts[i].hz - hz);
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    return xy[best].x;
+    const clamped = Math.max(loHz, Math.min(hiHz, hz));
+    return padL + ((Math.log10(clamped) - logLo) / (logHi - logLo)) * usableW;
   };
-  // Fixed logarithmic-ish x-axis ticks so the axis reads sensibly across the
-  // 60 Hz – 4 kHz vocal band regardless of spectrum-array length.
+  const dbToY = (db) =>
+    padT + (1 - (Math.max(minDb, Math.min(maxDb, db)) - minDb) / (maxDb - minDb)) * usableH;
+  const xy = pts.map((p) => ({ x: hzToX(p.hz), y: dbToY(p.db), hz: p.hz }));
+  const line = xy.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const areaBottom = padT + usableH;
+  const area = `M${xy[0].x.toFixed(1)},${areaBottom} ${xy.map((p) => `L${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')} L${xy[xy.length - 1].x.toFixed(1)},${areaBottom} Z`;
+
+  // Collision-aware label placement. Given a list of {x, text}, assign each
+  // one a row index so labels that would overlap horizontally are pushed to
+  // a second (or third) row instead. Uses ~52px estimated label width.
+  const staggerRows = (items, minGap = 52) => {
+    const sorted = [...items].sort((a, b) => a.x - b.x);
+    const rowLastX = [];
+    const out = new Map();
+    for (const it of sorted) {
+      let row = 0;
+      while (row < rowLastX.length && it.x - rowLastX[row] < minGap) row++;
+      rowLastX[row] = it.x;
+      out.set(it.key, row);
+    }
+    return out;
+  };
+  const domItems = (profile.dominant || []).map((p, i) => ({
+    key: `d${i}`, x: hzToX(p.hz), hz: p.hz,
+  }));
+  const dipItems = (profile.dips || []).map((p, i) => ({
+    key: `p${i}`, x: hzToX(p.hz), hz: p.hz,
+  }));
+  const domRows = staggerRows(domItems);
+  const dipRows = staggerRows(dipItems);
+  // Fixed log-friendly x-axis ticks. All fall inside 60-4000 Hz.
   const xTicks = [100, 250, 500, 1000, 2000, 4000].filter(
-    (hz) => hz >= pts[0].hz && hz <= pts[pts.length - 1].hz,
+    (hz) => hz >= loHz && hz <= hiHz,
   );
+  const tickRows = staggerRows(
+    xTicks.map((hz, i) => ({ key: `t${i}`, x: hzToX(hz), hz })),
+    44,
+  );
+  const extraDomRows = Math.max(0, (domRows.size ? Math.max(...domRows.values()) : 0));
+  const extraDipRows = Math.max(0, (dipRows.size ? Math.max(...dipRows.values()) : 0));
+  const extraTickRows = Math.max(0, (tickRows.size ? Math.max(...tickRows.values()) : 0));
+  const svgH = h + (extraDipRows + extraTickRows) * 14 + extraDomRows * 4;
   return (
     <div className="glass p-6" data-testid="harmonic-blueprint-spectrum">
       <div className="flex items-center justify-between mb-4">
@@ -1046,67 +1079,87 @@ function SpectrumMap({ profile }) {
         </div>
         <div className="text-[#5A6B65] text-xs tracking-widest uppercase">FFT · {profile.fft_size}</div>
       </div>
-      <svg viewBox={`0 0 ${w} ${h + 18}`} className="w-full h-auto">
+      <svg viewBox={`0 0 ${w} ${svgH}`} className="w-full h-auto">
         <defs>
           <linearGradient id="hb-fill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#72C2AC" stopOpacity="0.55" />
             <stop offset="100%" stopColor="#72C2AC" stopOpacity="0" />
           </linearGradient>
         </defs>
-        {/* Grid */}
+        {/* Horizontal dB grid */}
         {[0, 0.25, 0.5, 0.75, 1].map((t) => (
           <line
             key={t}
-            x1={pad} x2={w - pad}
-            y1={pad + t * (h - pad * 2)} y2={pad + t * (h - pad * 2)}
+            x1={padL} x2={w - padR}
+            y1={padT + t * usableH} y2={padT + t * usableH}
             stroke="rgba(114,194,172,0.08)"
           />
         ))}
         <path d={area} fill="url(#hb-fill)" />
         <path d={line} fill="none" stroke="#72C2AC" strokeWidth="1.5" />
-        {/* Dominant markers */}
-        {profile.dominant && profile.dominant.map((p, i) => (
-          <g key={`dom-${i}`}>
-            <line
-              x1={hzToX(p.hz)} x2={hzToX(p.hz)} y1={pad} y2={h - pad}
-              stroke="rgba(114,194,172,0.35)" strokeDasharray="2 4"
-            />
+        {/* Dominant markers — vertical guide + label staggered above the chart.
+            NOTE: text content passed via the `children` prop as a pre-composed
+            string so the dev-tool AST transform doesn't wrap the numeric
+            expression in a <span> (which SVG can't render). */}
+        {domItems.map((it, i) => {
+          const row = domRows.get(it.key) || 0;
+          const labelY = padT - 10 - row * 14;
+          return (
+            <g key={`dom-${i}`}>
+              <line
+                x1={it.x} x2={it.x} y1={padT} y2={padT + usableH}
+                stroke="rgba(114,194,172,0.35)" strokeDasharray="2 4"
+              />
+              <text
+                x={it.x} y={labelY}
+                textAnchor="middle" fontSize="11"
+                fill="#72C2AC" fontFamily="ui-monospace, monospace"
+                fontWeight="500"
+                children={`${Math.round(it.hz)} Hz`}
+              />
+            </g>
+          );
+        })}
+        {/* Dip markers — vertical guide + label staggered below the chart. */}
+        {dipItems.map((it, i) => {
+          const row = dipRows.get(it.key) || 0;
+          const labelY = padT + usableH + 16 + row * 14;
+          return (
+            <g key={`dip-${i}`}>
+              <line
+                x1={it.x} x2={it.x} y1={padT} y2={padT + usableH}
+                stroke="rgba(196,166,122,0.4)" strokeDasharray="1 3"
+              />
+              <text
+                x={it.x} y={labelY}
+                textAnchor="middle" fontSize="11"
+                fill="#C4A67A" fontFamily="ui-monospace, monospace"
+                fontWeight="500"
+                children={`${Math.round(it.hz)} Hz`}
+              />
+            </g>
+          );
+        })}
+        {/* Fixed log-scaled x-axis ticks. Stagger onto a second row if two
+            adjacent ticks would otherwise collide horizontally. */}
+        {xTicks.map((hz, i) => {
+          const key = `t${i}`;
+          const row = tickRows.get(key) || 0;
+          const dipRowCount = extraDipRows + 1;
+          const labelY = padT + usableH + 16 + dipRowCount * 14 + 8 + row * 14;
+          const tickText = hz >= 1000
+            ? `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)}k Hz`
+            : `${hz} Hz`;
+          return (
             <text
-              x={hzToX(p.hz)} y={pad - 6}
+              key={`tick-${hz}`}
+              x={hzToX(hz)} y={labelY}
               textAnchor="middle" fontSize="10"
-              fill="#72C2AC" fontFamily="ui-monospace, monospace"
-            >
-              {Math.round(p.hz)} Hz
-            </text>
-          </g>
-        ))}
-        {/* Dip markers */}
-        {profile.dips && profile.dips.map((p, i) => (
-          <g key={`dip-${i}`}>
-            <line
-              x1={hzToX(p.hz)} x2={hzToX(p.hz)} y1={pad} y2={h - pad}
-              stroke="rgba(196,166,122,0.4)" strokeDasharray="1 3"
+              fill="#8A9A92" fontFamily="ui-monospace, monospace"
+              children={tickText}
             />
-            <text
-              x={hzToX(p.hz)} y={h - pad + 14}
-              textAnchor="middle" fontSize="10"
-              fill="#C4A67A" fontFamily="ui-monospace, monospace"
-            >
-              {Math.round(p.hz)} Hz
-            </text>
-          </g>
-        ))}
-        {/* Fixed x-axis frequency ticks (so the axis is always readable). */}
-        {xTicks.map((hz) => (
-          <text
-            key={`tick-${hz}`}
-            x={hzToX(hz)} y={h + 12}
-            textAnchor="middle" fontSize="9"
-            fill="#5A6B65" fontFamily="ui-monospace, monospace"
-          >
-            {hz >= 1000 ? `${(hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1)}k` : `${hz}`} Hz
-          </text>
-        ))}
+          );
+        })}
       </svg>
       <div className="flex items-center gap-6 text-xs text-[#8A9A92] mt-3">
         <span className="inline-flex items-center gap-2"><span className="w-3 h-0.5 bg-[#72C2AC]" /> Signal</span>
