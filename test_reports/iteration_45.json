@@ -1,0 +1,35 @@
+{
+  "summary": "Harmonic Blueprint Phase 1 — both backend + frontend testing. All 11 pytest cases pass (auth gating, 402 for free tier, admin CRUD, Pydantic caps for spectrum>512 & duration>60, retention keeps latest 5, rate-limit fires within 8 rapid calls). Frontend E2E via Playwright confirmed: card renders between FlowModePanel and Ambient Layers, admin (Pro) sees no PRO badge, free user sees PRO badge + click does NOT open the sheet, intro copy contains 'harmonic signature' + privacy statement, capture step shows exact 'Hum a comfortable, steady \"aahhh\" sound.' prompt, short-file upload (3s) shows too_short inline error 'Sample is 3.0s — please record at least 10 seconds.' and stays on capture, longer harmonically-rich upload analyses client-side and posts to server, results panel renders SpectrumMap + BandGrid + Dominant + Notable Dips + Underrepresented, captured badge appears after reload, record-again returns to capture, delete profile DELETEs server-side and returns to intro.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "HarmonicBlueprintSheet › SpectrumMap", "issues": ["Axis label placeholders show literal 'Hz' text near tick marks (left/right/bottom-right) without the actual numeric value — they read as bare 'Hz'/'Hz'/'Hz'. Screenshot shows two 'Hz' labels floating above the chart with no frequency number and one at the bottom-right corner. Cosmetic only, not blocking."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_harmonic_blueprint.py",
+    "/app/test_reports/pytest/iter45_harmonic.xml"
+  ],
+  "action_items": [
+    "(cosmetic) Fix SpectrumMap axis tick labels — the 'Hz' text appears without an accompanying frequency number (visible at top-left, top-mid and bottom-right of the spectrum SVG).",
+    "(spec vs impl copy mismatch, non-blocking) Privacy statement in HarmonicBlueprintSheet says 'Your voice sample is processed locally on your device and never stored on our servers.' The spec quoted 'processed locally and never stored on our servers.' The 'on your device' insertion is a benign clarification but breaks the exact substring match if a QA/analytics event ever asserts on the literal spec string.",
+    "(test-infra note for future testing agents) validateBuffer's crest-factor SNR check (peak-rms < 4 dB → 'noisy') rejects pure sine WAVs. Test WAVs must have harmonic content (fundamental + at least a couple of overtones + light noise) to produce crest ≥ 4 dB. The naive `220Hz sine` example in the review prompt fails this check."
+  ],
+  "critical_code_review_comments": [
+    "Rate-limit key uses `harmonic:{user_id}:{ip}` which means the same Pro user hitting the app from a different IP (VPN switch, mobile-off-wifi transition) gets a fresh bucket — probably intended but worth documenting.",
+    "The retention trim deletes docs by id AFTER an insert. If two concurrent POSTs land in the same tick, both insert then both trim on their own snapshot; in the worst case 6 could remain. Not a correctness issue for latest-5 semantics but worth a comment.",
+    "Server-side profile save endpoint stores every field the client sent (fft_size, sample_rate, spectrum bins…) unmodified into Mongo. Payload validation caps are generous (spectrum ≤ 512, bands ≤ 16) but there's no bound on individual spectrum item shape — a malicious client could stuff huge floats. Not exploitable, just noting."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_harmonic_blueprint.py (new — 11 tests)"
+  ],
+  "success_rate": { "backend": "100% (11/11)", "frontend": "100% of testable flows (mic-recording flow not exercised in headless Playwright — upload flow covers same code path)" },
+  "test_credentials": "Admin from /app/memory/test_credentials.md: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8",
+  "seed_data_creation": "During E2E: seeded one resonance_profiles doc for admin so results-panel could be verified without hitting server rate limit; cleaned up at end. Fresh free-tier user registered inline via /api/auth/register with TEST_ prefix.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend rate-limit bucket for admin's harmonic-blueprint endpoint refills at 1 token per 600s (10min). Any test that expects many rapid 200s from POST /api/harmonic-blueprint/profile as admin must either wait or seed docs directly in Mongo (`test_database.resonance_profiles`). WAV fixtures should be harmonically rich (fundamental + overtones + noise) — pure sines fail the crest-factor SNR gate in validateBuffer.",
+  "rca of the issue": "No functional bug found. Two minor observations: (a) SpectrumMap SVG shows 'Hz' tick labels without numeric values — likely axis-label rendering issue in SpectrumMap sub-component (should output e.g. '220 Hz' / '440 Hz'); (b) privacy copy slightly diverges from the exact string quoted in the review request but still communicates the same guarantee."
+}

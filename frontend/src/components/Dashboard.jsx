@@ -21,6 +21,8 @@ import OnboardingTransitionCard from '@/components/OnboardingTransitionCard';
 import detectHeadphones from '@/lib/detectHeadphones';
 import SoundBathPanel from '@/components/SoundBathPanel';
 import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
+import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
+import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -164,6 +166,24 @@ export default function Dashboard({ onOpenAccount }) {
   // opens the SessionUnlockCard upgrade prompt instead of loading. Data is
   // fully preserved so a Pro upgrade instantly restores access.
   const [sessionUnlockOpen, setSessionUnlockOpen] = useState(false);
+  // Harmonic Blueprint (Pro) — full-screen voice-signature capture / results.
+  const [hbOpen, setHbOpen] = useState(false);
+  const [hbHasProfile, setHbHasProfile] = useState(false);
+
+  // Best-effort probe on mount (and after sub changes) so the Dashboard card
+  // can show the "Captured" badge without opening the sheet. Silently no-ops
+  // for free users — the endpoint returns 402 and we treat it as "no profile".
+  useEffect(() => {
+    if (!isPro) { setHbHasProfile(false); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const { data } = await api.get('/harmonic-blueprint/profile');
+        if (alive) setHbHasProfile(!!(data && data.profile));
+      } catch (_) { if (alive) setHbHasProfile(false); }
+    })();
+    return () => { alive = false; };
+  }, [isPro, hbOpen]);
 
   const checkIn = async (minutes) => {
     try {
@@ -1823,6 +1843,16 @@ export default function Dashboard({ onOpenAccount }) {
             onUnlock={onOpenAccount}
           />
 
+          {/* Harmonic Blueprint — Pro-only voice signature capture. Sits
+              between Flow Mode and Ambient Layers to introduce a personal
+              "know thyself" moment before the sound-shaping tools. */}
+          <HarmonicBlueprintCard
+            isPro={isPro}
+            hasProfile={hbHasProfile}
+            onOpen={() => setHbOpen(true)}
+            onUnlock={onOpenAccount}
+          />
+
           {/* Ambient Mixer — Pro only */}
           <div className={`glass p-6 relative ${!isPro ? 'overflow-hidden' : ''}`} data-testid="ambient-section">
             <div className="flex items-center justify-between mb-4">
@@ -1969,6 +1999,9 @@ export default function Dashboard({ onOpenAccount }) {
       {/* Pulsing Haptics — optional vibration sync. Engine auto-attaches to
           audio playback on mount; this modal is just the toggle / pattern UI. */}
       <HapticsModal open={hapticsOpen} onClose={() => setHapticsOpen(false)} />
+
+      {/* Harmonic Blueprint — full-screen voice-signature capture + FFT map. */}
+      <HarmonicBlueprintSheet open={hbOpen} onClose={() => setHbOpen(false)} />
 
       {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus
           copyable deep-link URLs (/play?preset=…) for hands-free playback. */}

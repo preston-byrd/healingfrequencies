@@ -1132,6 +1132,124 @@ async def delete_hearing_profile(request: Request, user: dict = Depends(get_curr
     return {"ok": True}
 
 
+# --- Harmonic Blueprint (Pro) -----------------------------------------------
+# Users record or upload a short vocal sample; the browser runs an FFT locally
+# and posts ONLY the derived resonance profile here — the raw audio never
+# leaves the device. Payload shape is enforced loosely (bands + spectrum +
+# dominant/dips) so future frontend iterations can extend it without a schema
+# migration.
+
+class HarmonicBandIn(BaseModel):
+    key: str
+    label: str
+    lo: float
+    hi: float
+    db: float
+
+
+class HarmonicPeakIn(BaseModel):
+    hz: float
+    db: float
+
+
+class HarmonicProfileIn(BaseModel):
+    version: int = 1
+    sample_rate: float
+    duration: float = Field(gt=0, le=60)
+    fft_size: int = Field(gt=0, le=32768)
+    spectrum: list = Field(default_factory=list, max_length=512)
+    dominant: list[HarmonicPeakIn] = Field(default_factory=list, max_length=16)
+    dips: list[HarmonicPeakIn] = Field(default_factory=list, max_length=16)
+    bands: list[HarmonicBandIn] = Field(default_factory=list, max_length=16)
+    underrepresented: list[dict] = Field(default_factory=list, max_length=16)
+    generated_at: Optional[str] = None
+
+
+@api.get("/harmonic-blueprint/profile")
+async def get_harmonic_profile(user: dict = Depends(get_current_user)):
+    """Return the user's most recent resonance profile, or `{profile: null}`
+    when they haven't recorded one yet. Pro-only feature — free users get a
+    401-ish (402) so the UI can route them to the paywall."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    doc = await db.resonance_profiles.find_one(
+        {"user_id": user["id"]},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    return {"profile": doc}
+
+
+@api.post("/harmonic-blueprint/profile")
+async def save_harmonic_profile(
+    body: HarmonicProfileIn,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Persist the derived resonance profile. Free-tier users are blocked
+    with a 402 so the client can offer an upgrade path."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    ip = _client_ip(request)
+    # Cheap per-user throttle: users shouldn't need to re-analyse more than
+    # a handful of times per hour.
+    _rate_limit_or_429(
+        f"harmonic:{user['id']}:{ip}", capacity=6, refill_per_sec=1 / 600,
+        label="blueprint save",
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "created_at": now,
+        "version": body.version,
+        "sample_rate": body.sample_rate,
+        "duration": body.duration,
+        "fft_size": body.fft_size,
+        "spectrum": body.spectrum,
+        "dominant": [p.model_dump() for p in body.dominant],
+        "dips": [p.model_dump() for p in body.dips],
+        "bands": [b.model_dump() for b in body.bands],
+        "underrepresented": body.underrepresented,
+        "generated_at": body.generated_at or now,
+    }
+    # Keep only the latest 5 profiles per user so history stays lightweight
+    # while still letting Phase 2 compare "before / after" journeys.
+    await db.resonance_profiles.insert_one({**doc})
+    old_ids = await db.resonance_profiles.find(
+        {"user_id": user["id"]},
+        {"id": 1, "_id": 0},
+        sort=[("created_at", -1)],
+    ).to_list(1000)
+    keep = {r["id"] for r in old_ids[:5]}
+    if len(old_ids) > 5:
+        await db.resonance_profiles.delete_many({
+            "user_id": user["id"],
+            "id": {"$nin": list(keep)},
+        })
+    await _audit(
+        "harmonic.profile_saved", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"duration": body.duration, "dominant_count": len(body.dominant)},
+    )
+    doc.pop("_id", None)
+    return {"ok": True, "profile": doc}
+
+
+@api.delete("/harmonic-blueprint/profile")
+async def delete_harmonic_profile(request: Request, user: dict = Depends(get_current_user)):
+    """Full reset — used by the 'Record again' entry point when a user wants
+    a fresh baseline."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    await db.resonance_profiles.delete_many({"user_id": user["id"]})
+    await _audit(
+        "harmonic.profile_reset", request,
+        user_id=user["id"], user_email=user.get("email"),
+    )
+    return {"ok": True}
+
+
 # --- AI Frequency Recommendation (Pro) ---------------------------------------
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
 
