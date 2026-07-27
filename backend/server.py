@@ -1557,6 +1557,195 @@ async def get_latest_harmonic_journey(user: dict = Depends(get_current_user)):
     return {"journey": doc}
 
 
+# --- Phase 4: Account-view summary, drift history, gap CRUD -----------------
+# Progressive personalisation: the Account page shows everything the user has
+# accumulated (eigenmode, latest capture, current drift, confirmed points,
+# most recent journey). The same helpers feed the LLM prompts so every
+# subsequent Wellness Assistant / AI Prescription session gets richer.
+
+def _band_map(bands: list[dict]) -> dict:
+    return {b.get("key"): b for b in (bands or []) if b and b.get("key")}
+
+
+def _compute_drift(latest: dict, eigen: dict, min_delta_db: float = 4.0) -> list[dict]:
+    """Server-side twin of the frontend `compareToEigenmode`. Returns ranked
+    findings ≥ min_delta_db drift from eigenmode, top 5."""
+    if not latest or not eigen:
+        return []
+    cur = _band_map(latest.get("bands", []))
+    eig = _band_map(eigen.get("bands", []))
+    findings: list[dict] = []
+    for key, meta in _BAND_LABELS.items():
+        c = cur.get(key)
+        e = eig.get(key)
+        if not c or not e:
+            continue
+        delta = float(c.get("db", -60)) - float(e.get("db", -60))
+        magnitude = abs(delta)
+        if magnitude < min_delta_db:
+            continue
+        direction = "quieter" if delta < 0 else "louder"
+        findings.append({
+            "key": key,
+            "label": meta,
+            "direction": direction,
+            "delta_db": round(delta, 2),
+            "magnitude": round(magnitude, 2),
+            "lo": e.get("lo"),
+            "hi": e.get("hi"),
+        })
+    findings.sort(key=lambda f: -f["magnitude"])
+    return findings[:5]
+
+
+async def _harmonic_context_for_llm(user_id: str) -> str:
+    """Compact LLM-friendly snapshot of the user's Harmonic Blueprint state.
+    Injected into Wellness Assistant + AI Prescription prompts so every
+    recommendation gets progressively more personalised."""
+    try:
+        eigen = await _ensure_eigenmode(user_id)
+    except Exception:
+        return ""
+    if not eigen:
+        return ""
+    latest = await db.resonance_profiles.find_one(
+        {"user_id": user_id}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    parts = ["HARMONIC_BLUEPRINT (user's saved harmonic signature — use as an "
+             "extra personalisation input alongside their current mood/goals):"]
+    ebands = _band_map(eigen.get("bands", []))
+    if ebands:
+        parts.append(
+            "- eigenmode bands (dB): " + ", ".join(
+                f"{k}={round(float(ebands[k].get('db', -60)), 1)}"
+                for k in ("sub", "low", "lowmid", "mid", "uppermid", "presence")
+                if k in ebands
+            )
+        )
+    edom = eigen.get("dominant") or []
+    if edom:
+        parts.append(
+            "- baseline dominant frequencies: "
+            + ", ".join(f"{round(p['hz'])}Hz" for p in edom[:4])
+        )
+    confirmed = (latest or {}).get("confirmed_gaps") or []
+    if confirmed:
+        parts.append(
+            "- confirmed resonance points the user affirmed as personally "
+            "relevant (favour tracks/frequencies that address these):"
+        )
+        for g in confirmed[:5]:
+            parts.append(
+                f"  · {g.get('label', g.get('key'))} "
+                f"({g.get('lo')}-{g.get('hi')}Hz) — {g.get('direction')}"
+            )
+    if latest and latest.get("id") != eigen.get("id"):
+        drift = _compute_drift(latest, eigen)
+        if drift:
+            parts.append("- current drift from baseline:")
+            for f in drift[:3]:
+                parts.append(f"  · {f['label']}: {f['delta_db']:+.1f} dB")
+    parts.append(
+        "When appropriate, subtly weight your suggestions toward frequencies "
+        "and presets that support the affirmed resonance points and drift. "
+        "Never mention the raw numeric details unless the user asks."
+    )
+    return "\n".join(parts)
+
+
+@api.get("/harmonic-blueprint/summary")
+async def harmonic_blueprint_summary(user: dict = Depends(get_current_user)):
+    """One-shot payload for the Account → Harmonic Blueprint section."""
+    eigen = await _ensure_eigenmode(user["id"])
+    latest = await db.resonance_profiles.find_one(
+        {"user_id": user["id"]}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    journey = await db.harmonic_journeys.find_one(
+        {"user_id": user["id"]}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    drift = _compute_drift(latest, eigen) if (latest and eigen) else []
+    return {
+        "eigenmode": eigen,
+        "latest_profile": latest,
+        "current_drift": drift,
+        "confirmed_gaps": (latest or {}).get("confirmed_gaps") or [],
+        "latest_journey": journey,
+        "is_pro": _is_pro(user),
+    }
+
+
+@api.get("/harmonic-blueprint/history")
+async def harmonic_blueprint_history(user: dict = Depends(get_current_user)):
+    """Time-series drift view — every retained profile with per-band delta
+    from the eigenmode baseline. Powers the drift-over-time chart."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    eigen = await _ensure_eigenmode(user["id"])
+    if not eigen:
+        return {"history": [], "eigenmode_id": None}
+    docs = await db.resonance_profiles.find(
+        {"user_id": user["id"]}, {"_id": 0},
+        sort=[("created_at", 1)],
+    ).to_list(50)
+    ebands = _band_map(eigen.get("bands", []))
+    entries = []
+    for d in docs:
+        cur = _band_map(d.get("bands", []))
+        band_deltas = {
+            k: round(float(cur.get(k, {}).get("db", ebands.get(k, {}).get("db", -60)))
+                     - float(ebands.get(k, {}).get("db", -60)), 2)
+            for k in ("sub", "low", "lowmid", "mid", "uppermid", "presence")
+            if k in ebands
+        }
+        entries.append({
+            "id": d["id"],
+            "created_at": d.get("created_at"),
+            "is_eigenmode": bool(d.get("is_eigenmode")),
+            "duration": d.get("duration"),
+            "band_deltas": band_deltas,
+            "drift_score": round(sum(abs(v) for v in band_deltas.values()), 2),
+            "confirmed_gap_count": len(d.get("confirmed_gaps") or []),
+        })
+    return {"history": entries, "eigenmode_id": eigen.get("id")}
+
+
+class GapEditIn(BaseModel):
+    confirmed_gaps: list[dict] = Field(default_factory=list, max_length=16)
+
+
+@api.patch("/harmonic-blueprint/profile/{profile_id}/gaps")
+async def update_profile_gaps(
+    profile_id: str,
+    body: GapEditIn,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Replace the confirmed_gaps array on a profile. Used by the Account
+    section when a user removes / edits individual resonance points without
+    re-recording. Pro-only."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    target = await db.resonance_profiles.find_one(
+        {"id": profile_id, "user_id": user["id"]}, {"_id": 0},
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    await db.resonance_profiles.update_one(
+        {"id": profile_id},
+        {"$set": {"confirmed_gaps": body.confirmed_gaps}},
+    )
+    await _audit(
+        "harmonic.gaps_updated", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"profile_id": profile_id, "count": len(body.confirmed_gaps)},
+    )
+    return {"ok": True, "confirmed_gaps": body.confirmed_gaps}
+
+
+
 
 # --- AI Frequency Recommendation (Pro) ---------------------------------------
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
@@ -1696,6 +1885,11 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
         parts.append(f"Goal: {body.goal.strip()}")
     if body.duration_min:
         parts.append(f"Preferred duration: {body.duration_min} minutes")
+    # Phase 4: personalise with the user's saved Harmonic Blueprint signature.
+    # Silently no-ops when the user hasn't captured one yet — no extra tokens.
+    hb_ctx = await _harmonic_context_for_llm(user["id"])
+    if hb_ctx:
+        parts.append(hb_ctx)
     user_text = "\n".join(parts)
 
     chat = LlmChat(
@@ -1997,6 +2191,16 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
             )
     except Exception as exc:  # noqa: BLE001 — defensive: never let history lookup break chat
         logger.warning("[agent_chat] prior_insights lookup failed: %s", exc)
+
+    # Phase 4: inject the user's Harmonic Blueprint signature (eigenmode +
+    # confirmed resonance points + current drift). Silently no-ops when the
+    # user hasn't captured one yet, so free / new users aren't affected.
+    try:
+        hb_ctx = await _harmonic_context_for_llm(user["id"])
+        if hb_ctx:
+            parts.append(hb_ctx)
+    except Exception as exc:
+        logger.warning("[agent_chat] harmonic_context lookup failed: %s", exc)
 
     history = body.history or []
     for turn in history[-10:]:  # cap context window

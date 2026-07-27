@@ -1,0 +1,53 @@
+{
+  "summary": "Harmonic Blueprint Phase 4 (Save Eigenmode Profile + confirmed points to Account + LLM personalisation + drift history + gap CRUD) — backend 13/13 pytest cases PASS, frontend E2E PASS for both admin (Pro) and fresh free user. Backend covered: /summary shape (is_pro true, eigenmode+latest+journey present, current_drift=[] when latest==eigen, confirmed_gaps carried through); /history for Pro (oldest→newest, 6 band_deltas, drift_score, confirmed_gap_count, eigenmode entry has drift_score 0) and 402 for free; PATCH /profile/{id}/gaps atomic replace verified via subsequent GET /profile, 404 for nonexistent id, 402 for free user; _compute_drift unit test on synthetic ≥4dB deltas → sorted desc, capped 5, direction+delta_db+label from _BAND_LABELS correct, empty input tolerated; _harmonic_context_for_llm returns HARMONIC_BLUEPRINT block containing 'eigenmode bands' + confirmed points when admin has profile, empty '' when no eigenmode, banned-substring audit clean; /me/ai-recommend still returns non-5xx with HB context injected (regression smoke); Legacy migration: profiles with no is_eigenmode flag → oldest gets promoted on first /summary call and flag persisted to DB. Frontend covered: on Account view for admin with seeded eigenmode+latest+drift+2 confirmed_gaps+journey+2-entry history → HarmonicBlueprintSection renders with ALL sub-cards (eigenmode band bars + dominant chips 106/199/305/609/702 Hz, drift, points w/ trash buttons, journey, history sparkline, open button). Point removal: clicking trash on point-mid PATCHes /gaps and removes the row immediately (presence remains). Handoff: clicking open button sets sessionStorage 'solarisound:open_hb'='1', navigates to Dashboard, HB sheet auto-opens (data-testid=harmonic-blueprint-sheet visible), sessionStorage key cleared. Privacy copy 'never stored on our servers' verbatim present. Language audit clean of all 9 banned substrings. Fresh free user: section renders (not gated), shows 'Not captured yet' + Capture blueprint CTA + empty block; history/drift/points/eigen sub-cards all hidden; privacy copy present. Handoff to Dashboard from free view opens the HB sheet correctly. FIX APPLIED: AccountDashboard was passing isPro={sub.is_pro} but the subscription API returns `pro` not `is_pro`; without this fix, Pro admins would see NO trash buttons on confirmed points and NO drift-history sparkline. Changed to isPro={!!(sub.pro || sub.is_admin)} and verified both admin (trash + history now visible) and free (still correctly hidden).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Dashboard on load (all users)",
+        "issues": ["WELLNESS ASSISTANT AIAgent sheet still auto-opens and intercepts pointer events; automated tests remove it via DOM. Real users must dismiss it before finding the harmonic-blueprint-card or the Account link. Pre-existing from iter-47, still present."]
+      },
+      {
+        "screen": "HarmonicBlueprintSheet (opened via handoff)",
+        "issues": ["Journey tracks in the sheet's HarmonicJourneyPlayer render 'NaN:NaN' duration when the seeded/generated tracks lack duration_seconds. Progress bar also shows 'NaN:NaN' before play. Cosmetic — audio still plays, and this is pre-existing sheet behaviour, not new to Phase 4."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_harmonic_blueprint_phase4.py",
+    "/app/test_reports/pytest/iter48_phase4.xml"
+  ],
+  "action_items": [
+    "(Optional) The Wellness Assistant modal auto-open on Dashboard load continues to intercept clicks (carried from iter-47). Consider making it a floating trigger or gating auto-open behind a first-time flag.",
+    "(Optional) HarmonicJourneyPlayer shows 'NaN:NaN' when tracks lack duration_seconds — either default to 0 or hide the time meta while data is missing.",
+    "(Optional) Consider migrating remaining sub.is_pro usages to sub.pro across the codebase — grep shows AccountDashboard.jsx line 936 was the only place using the wrong key, but a lint rule would prevent recurrence."
+  ],
+  "critical_code_review_comments": [
+    "BUG (FIXED by testing agent): AccountDashboard.jsx:936 passed `isPro={sub.is_pro}` but /api/me/subscription returns the key `pro`, not `is_pro`. Effect: for a real Pro user, HarmonicBlueprintSection received `isPro=undefined`, hiding (a) all trash/remove buttons on confirmed resonance points — user could not remove points from Account without re-recording — and (b) the drift-over-time sparkline. Backend /summary correctly returns is_pro:true; the frontend was just reading the wrong key from the subscription context. Now reads `!!(sub.pro || sub.is_admin)`.",
+    "_compute_drift is defensively coded (returns [] for empty inputs, tolerates missing band keys via `_BAND_LABELS.items()` iteration). Good.",
+    "_harmonic_context_for_llm swallows exceptions on _ensure_eigenmode to return '' so a HB failure never breaks /me/ai-recommend or /me/agent/chat. Good defensive design.",
+    "PATCH /gaps enforces user_id scope in the find_one query so a Pro user cannot edit another user's profile. Good.",
+    "HarmonicBlueprintSection is 425 lines with 5 sub-components inline. Fine for now, but if more sub-cards are added, extract EigenmodeCard/DriftCard/etc into their own files.",
+    "Handoff pattern via sessionStorage is intentionally simple and one-shot (removeItem before setHbOpen). No cross-tab leakage risk. Documented inline. Good.",
+    "History endpoint caps at 50 profiles (to_list(50)); combined with the retention policy that trims to eigenmode+5 latest, this is safe."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_harmonic_blueprint_phase4.py (new — 13 tests)",
+    "/app/frontend/src/components/AccountDashboard.jsx (bug fix: sub.is_pro → !!(sub.pro || sub.is_admin) on line 936)"
+  ],
+  "success_rate": {
+    "backend": "100% (13/13 Phase 4 tests pass)",
+    "frontend": "100% — admin: all 5 sub-cards render + 5 dominant chips + trash buttons work + PATCH removes point + handoff opens sheet + sessionStorage cleared + privacy copy + language audit clean. Free: empty state + Capture CTA + history/drift/points/eigen correctly hidden + handoff to sheet works + language audit clean."
+  },
+  "test_credentials": "Admin from /app/memory/test_credentials.md: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8. Fresh free users registered dynamically via POST /api/auth/register with TEST_hb4_/TEST_hb4free_ prefix.",
+  "seed_data_creation": "For admin frontend E2E, seeded via pymongo directly: (a) an eigenmode profile (~14 days old, 6 bands, 5 dominant frequencies 106/199/305/609/702 Hz, no confirmed_gaps), (b) a latest non-eigenmode profile (mid=-22 dB → 8 dB drift, confirmed_gaps=[mid,presence]), (c) a harmonic_journeys doc with 4 tracks containing 'has been included' + expressive core + brightness and openness copy. Backend tests use their own seeded docs and clean up in fixtures.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 4 backend tests: /app/backend/tests/test_harmonic_blueprint_phase4.py — pass in isolation (13/13). Running the entire test_harmonic_blueprint* suite sequentially triggers login rate limits (429s cause 401/ERROR cascades) but that's a shared-fixture concern across suites, not a Phase 4 regression. AccountDashboard.jsx now uses `!!(sub.pro || sub.is_admin)` for the HarmonicBlueprintSection isPro prop — if you introduce more Pro-gated affordances in Account, use the same pattern (or better, extract a helper). Admin has seeded HB data (eigenmode + latest + journey + 2-entry history) — free to reuse; delete via `db.resonance_profiles.delete_many({user_id: <admin_id>})` if you need a clean slate. Dashboard AIAgentSheet still auto-opens and blocks the account menu — automated flows must strip role=dialog before clicking the sidebar Account button.",
+  "rca of the issue": "Bug: HarmonicBlueprintSection missing trash + history for Pro users on Account view. Reproduction: log in as admin, seed a HB profile+journey, navigate to Account, scroll to 'Your resonance profile' — no trash icons next to Mid/Presence points, no 'Drift over time' sparkline card, but drift + eigenmode + points still visible (because they don't check isPro). Root cause: AccountDashboard.jsx:936 read `sub.is_pro` from the subscription response, but /api/me/subscription returns `pro` as the boolean key (verified via curl: {\"plan\":\"admin\",\"pro\":true,\"is_admin\":true,...}). undefined coerces to false, so isPro was permanently off for the section. Mitigation applied: changed to `!!(sub.pro || sub.is_admin)` in-place (single line diff). Frontend hot-reload picked it up; re-running the E2E confirmed trash buttons + history sparkline both render for admin, and free-tier remains correctly gated (no trash, no history)."
+}

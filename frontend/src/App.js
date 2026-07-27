@@ -102,7 +102,18 @@ function Shell() {
     return <AuthScreen />;
   }
 
-  if (view === 'account') return <AccountDashboard onBack={() => setView('main')} />;
+  if (view === 'account') return (
+    <AccountDashboard
+      onBack={() => setView('main')}
+      onOpenHarmonicBlueprint={() => {
+        // Signal Dashboard to auto-open the HB sheet after we route back
+        // to the main view. Cheap cross-view handoff without adding a
+        // shared context just for this one action.
+        try { sessionStorage.setItem('solarisound:open_hb', '1'); } catch (_) {}
+        setView('main');
+      }}
+    />
+  );
   return <Dashboard onOpenAccount={() => setView('account')} />;
 }
 

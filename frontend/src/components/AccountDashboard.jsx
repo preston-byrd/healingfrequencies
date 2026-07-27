@@ -7,6 +7,7 @@ import PromoCodesSection from '@/components/PromoCodesSection';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
+import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
 
 function fmtDate(iso) {
@@ -20,7 +21,7 @@ function fmtMoney(amount, currency = 'usd') {
   catch (e) { console.warn('[AccountDashboard] fmtMoney failed', e); return `$${amount}`; }
 }
 
-export default function AccountDashboard({ onBack }) {
+export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
   const { user, setUserName } = useAuth();
   // Global subscription context — must be refreshed after any entitlement
   // change (promo redemption, Stripe checkout return) so Dashboard's isPro
@@ -926,6 +927,15 @@ export default function AccountDashboard({ onBack }) {
             </div>
           </div>
         )}
+
+        {/* Phase 4: Harmonic Blueprint — accumulated resonance profile,
+            confirmed points, latest journey, and drift-over-time chart.
+            Visible to all users; the section itself gracefully handles
+            free tier (Pro-only affordances hidden). */}
+        <HarmonicBlueprintSection
+          isPro={!!(sub.pro || sub.is_admin)}
+          onOpenSheet={onOpenHarmonicBlueprint}
+        />
 
         {/* Admin: Sound Lineage timeline */}
         {sub.is_admin && <SoundLineage />}

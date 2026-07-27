@@ -170,6 +170,18 @@ export default function Dashboard({ onOpenAccount }) {
   const [hbOpen, setHbOpen] = useState(false);
   const [hbHasProfile, setHbHasProfile] = useState(false);
 
+  // Phase 4 handoff: if the user clicked "Re-run analysis" from the Account
+  // Harmonic Blueprint section, sessionStorage carries a one-shot flag that
+  // auto-opens the sheet on this mount.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('solarisound:open_hb') === '1') {
+        sessionStorage.removeItem('solarisound:open_hb');
+        setHbOpen(true);
+      }
+    } catch (_) { /* graceful */ }
+  }, []);
+
   // Best-effort probe on mount (and after sub changes) so the Dashboard card
   // can show the "Captured" badge without opening the sheet. Silently no-ops
   // for free users — the endpoint returns 402 and we treat it as "no profile".
