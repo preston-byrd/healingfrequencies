@@ -13,11 +13,12 @@ import { Sparkles, Lock, Check } from 'lucide-react';
  *   onUnlock    — () => void, opens the paywall.
  */
 export default function HarmonicBlueprintCard({ isPro = false, hasProfile = false, onOpen, onUnlock }) {
-  const locked = !isPro;
+  // Phase 3 funnel: free users still click through to the sheet where they
+  // can preview a 2-track demo journey. The Pro badge stays as a soft cue.
   const handleClick = () => {
-    if (locked) { onUnlock && onUnlock(); return; }
     onOpen && onOpen();
   };
+  const locked = !isPro;
   return (
     <button
       data-testid="harmonic-blueprint-card"
@@ -57,7 +58,7 @@ export default function HarmonicBlueprintCard({ isPro = false, hasProfile = fals
       </div>
       <div className="mt-4 flex items-center justify-end">
         <span className="text-[#72C2AC] text-xs tracking-widest uppercase">
-          {locked ? 'Unlock' : hasProfile ? 'Open' : 'Begin'} →
+          {locked ? 'Preview' : hasProfile ? 'Open' : 'Begin'} →
         </span>
       </div>
     </button>

@@ -1339,6 +1339,225 @@ async def delete_harmonic_profile(request: Request, user: dict = Depends(get_cur
     return {"ok": True}
 
 
+# --- Phase 3: Eigenmode Journey generator -------------------------------------
+# A curated playlist assembled from Solarisound's existing catalog to guide the
+# user back toward their eigenmode baseline. Selection is deterministic and
+# rule-based: each confirmed_gap picks catalog entries whose `targets_bands`
+# overlap. Free users get a 2-track preview; Pro users get the full run.
+#
+# NOTE ON DATA SOURCE: this catalog mirrors the frontend content already
+# available to the audio engines (solfeggio frequencies, Sound Baths, Flow
+# journeys). Storing it server-side lets the client render each track's copy
+# verbatim from a single source of truth.
+
+HARMONIC_JOURNEY_CATALOG = [
+    # Solfeggio single-tone tracks — thin layer over audioEngine.play(freq).
+    {"id": "solf-174", "type": "solfeggio", "name": "174 Hz Foundation",
+     "freq": 174, "duration_seconds": 300, "targets_bands": ["sub"],
+     "tagline": "Pain relief · grounding root"},
+    {"id": "solf-285", "type": "solfeggio", "name": "285 Hz Healing",
+     "freq": 285, "duration_seconds": 300, "targets_bands": ["low"],
+     "tagline": "Tissue restore · warm depth"},
+    {"id": "solf-396", "type": "solfeggio", "name": "396 Hz Liberation",
+     "freq": 396, "duration_seconds": 300, "targets_bands": ["lowmid"],
+     "tagline": "Release fear · reopen chest"},
+    {"id": "solf-417", "type": "solfeggio", "name": "417 Hz Renewal",
+     "freq": 417, "duration_seconds": 300, "targets_bands": ["lowmid"],
+     "tagline": "Undo change · reset resonance"},
+    {"id": "solf-432", "type": "solfeggio", "name": "432 Hz Earth",
+     "freq": 432, "duration_seconds": 300, "targets_bands": ["lowmid", "mid"],
+     "tagline": "Natural tuning · settle the field"},
+    {"id": "solf-528", "type": "solfeggio", "name": "528 Hz Miracle",
+     "freq": 528, "duration_seconds": 300, "targets_bands": ["mid"],
+     "tagline": "DNA repair · love · expressive core"},
+    {"id": "solf-639", "type": "solfeggio", "name": "639 Hz Connection",
+     "freq": 639, "duration_seconds": 300, "targets_bands": ["mid"],
+     "tagline": "Relationship · heart-mid bridge"},
+    {"id": "solf-741", "type": "solfeggio", "name": "741 Hz Awakening",
+     "freq": 741, "duration_seconds": 300, "targets_bands": ["uppermid"],
+     "tagline": "Expression · unlock the throat"},
+    {"id": "solf-852", "type": "solfeggio", "name": "852 Hz Intuition",
+     "freq": 852, "duration_seconds": 300, "targets_bands": ["uppermid"],
+     "tagline": "Spiritual order · inner sight"},
+    {"id": "solf-963", "type": "solfeggio", "name": "963 Hz Unity",
+     "freq": 963, "duration_seconds": 300, "targets_bands": ["presence"],
+     "tagline": "Pure being · crown brightness"},
+    # Sound Baths — richer immersive textures (`ref` matches soundBathEngine.js).
+    {"id": "bath-grounding", "type": "soundbath", "name": "Grounding Bath",
+     "ref": "grounding", "freq": 174, "duration_seconds": 600,
+     "targets_bands": ["sub", "low"],
+     "tagline": "Deep-earth drone bath for anchoring"},
+    {"id": "bath-solfeggio", "type": "soundbath", "name": "Solfeggio Wash",
+     "ref": "solfeggio", "freq": 528, "duration_seconds": 600,
+     "targets_bands": ["mid", "lowmid"],
+     "tagline": "Layered solfeggio harmonics for the heart-mid range"},
+    {"id": "bath-aurora", "type": "soundbath", "name": "Aurora Bath",
+     "ref": "aurora", "freq": 741, "duration_seconds": 600,
+     "targets_bands": ["uppermid", "presence"],
+     "tagline": "Shimmering high-band aurora sweeps"},
+    # Flow Mode journeys — 3-stage guided crossfades (`ref` = JOURNEYS key).
+    {"id": "flow-deep_restore", "type": "flow", "name": "Flow · Deep Restore",
+     "ref": "deep_restore", "freq": 432, "duration_seconds": 900,
+     "targets_bands": ["lowmid", "mid"],
+     "tagline": "Liberation → Renewal → Earth"},
+    {"id": "flow-morning_rise", "type": "flow", "name": "Flow · Morning Rise",
+     "ref": "morning_rise", "freq": 528, "duration_seconds": 900,
+     "targets_bands": ["mid", "presence"],
+     "tagline": "Gamma → Miracle → Unity"},
+    {"id": "flow-night_drift", "type": "flow", "name": "Flow · Night Drift",
+     "ref": "night_drift", "freq": 174, "duration_seconds": 900,
+     "targets_bands": ["sub", "low"],
+     "tagline": "Foundation → Delta → Theta"},
+]
+
+# Human-readable band labels used in the personalised rationale copy. Kept in
+# sync with the frontend BAND_MEANINGS dictionary.
+_BAND_LABELS = {
+    "sub": "grounding root",
+    "low": "warm depth",
+    "lowmid": "chest resonance",
+    "mid": "expressive core",
+    "uppermid": "articulation range",
+    "presence": "brightness and openness",
+}
+
+
+def _rationale_for(track: dict, gap: dict) -> str:
+    """Build a plain-language rationale linking a track to a specific gap.
+    Copy stays supportive + non-diagnostic to match the Phase 2 language rules."""
+    label = _BAND_LABELS.get(gap.get("key", ""), gap.get("label", "range"))
+    direction = gap.get("direction", "quieter")
+    if direction == "quieter":
+        return (
+            f"{track['name']} has been included to support your "
+            f"{label} which has drifted from your natural tuning."
+        )
+    return (
+        f"{track['name']} has been included to help settle your "
+        f"{label}, currently more amplified than your baseline."
+    )
+
+
+def _demo_gaps() -> list[dict]:
+    """Fallback gap set for users with no confirmed_gaps yet (or free tier).
+    Sub + presence quieter is the most common casual-recording drift and
+    lets the demo journey feel meaningful even without a real capture."""
+    return [
+        {"key": "sub",      "label": "Grounding & root",       "direction": "quieter",
+         "delta_db": -6.0, "lo": 60,   "hi": 160},
+        {"key": "presence", "label": "Brightness & openness",  "direction": "quieter",
+         "delta_db": -5.0, "lo": 2400, "hi": 4000},
+    ]
+
+
+def _generate_journey_tracks(gaps: list[dict]) -> list[dict]:
+    """Match confirmed gaps to catalog entries. For each gap we pick up to two
+    tracks (a solfeggio single-tone + a richer bath/flow) whose targets_bands
+    include the gap's key. Preserve gap order (already ranked by magnitude in
+    Phase 2) and deduplicate by track id."""
+    picked: list[dict] = []
+    seen: set[str] = set()
+    for gap in gaps:
+        key = gap.get("key")
+        if not key:
+            continue
+        matches = [t for t in HARMONIC_JOURNEY_CATALOG if key in t["targets_bands"]]
+        matches.sort(key=lambda t: (t["type"] != "solfeggio", t["duration_seconds"]))
+        added = 0
+        for t in matches:
+            if t["id"] in seen:
+                continue
+            seen.add(t["id"])
+            entry = {**t, "rationale": _rationale_for(t, gap),
+                     "gap_key": key, "gap_label": gap.get("label", "")}
+            picked.append(entry)
+            added += 1
+            if added >= 2:
+                break
+    if not picked:
+        picked.append({
+            **next(t for t in HARMONIC_JOURNEY_CATALOG if t["id"] == "solf-432"),
+            "rationale": "432 Hz Earth · a universal centering tone included as a natural anchor.",
+            "gap_key": None, "gap_label": "",
+        })
+    return picked
+
+
+@api.post("/harmonic-blueprint/journey/generate")
+async def generate_harmonic_journey(request: Request, user: dict = Depends(get_current_user)):
+    """Generate the user's personalised Eigenmode Journey playlist. Pro users
+    receive the full curated playlist; free-tier users receive a 2-track
+    preview + upgrade metadata. This endpoint is intentionally NOT Pro-gated
+    so the funnel can be demonstrated to free users."""
+    is_pro = _is_pro(user)
+    ip = _client_ip(request)
+    _rate_limit_or_429(
+        f"journey:{user['id']}:{ip}", capacity=8, refill_per_sec=1 / 300,
+        label="journey generation",
+    )
+    latest = await db.resonance_profiles.find_one(
+        {"user_id": user["id"]}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    gaps: list[dict] = []
+    if latest and latest.get("confirmed_gaps"):
+        gaps = latest["confirmed_gaps"]
+    elif latest and latest.get("underrepresented"):
+        gaps = [
+            {"key": b.get("key"), "label": b.get("label", ""),
+             "direction": "quieter", "lo": b.get("lo"), "hi": b.get("hi")}
+            for b in latest["underrepresented"] if b.get("key")
+        ]
+    if not gaps:
+        gaps = _demo_gaps()
+    tracks = _generate_journey_tracks(gaps)
+    full_track_count = len(tracks)
+    if not is_pro:
+        tracks = tracks[:2]
+    journey = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "name": "Your Eigenmode Journey",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "profile_id": (latest or {}).get("id"),
+        "tier": "pro" if is_pro else "free",
+        "gaps_used": gaps,
+        "tracks": tracks,
+        "full_track_count": full_track_count,
+        "total_duration_seconds": sum(t["duration_seconds"] for t in tracks),
+        "upgrade_prompt": None if is_pro else "Unlock your full Eigenmode Journey with Pro.",
+    }
+    await db.harmonic_journeys.insert_one({**journey})
+    all_docs = await db.harmonic_journeys.find(
+        {"user_id": user["id"]}, {"id": 1, "created_at": 1, "_id": 0},
+        sort=[("created_at", -1)],
+    ).to_list(100)
+    keep = {r["id"] for r in all_docs[:3]}
+    if len(all_docs) > 3:
+        await db.harmonic_journeys.delete_many({
+            "user_id": user["id"], "id": {"$nin": list(keep)},
+        })
+    await _audit(
+        "harmonic.journey_generated", request,
+        user_id=user["id"], user_email=user.get("email"),
+        metadata={"tier": journey["tier"], "track_count": len(tracks)},
+    )
+    journey.pop("_id", None)
+    return journey
+
+
+@api.get("/harmonic-blueprint/journey")
+async def get_latest_harmonic_journey(user: dict = Depends(get_current_user)):
+    """Return the most recent journey for this user (or null). Not Pro-gated
+    so free users can pull their preview back on subsequent visits."""
+    doc = await db.harmonic_journeys.find_one(
+        {"user_id": user["id"]}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    return {"journey": doc}
+
+
+
 # --- AI Frequency Recommendation (Pro) ---------------------------------------
 EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
 

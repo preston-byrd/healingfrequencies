@@ -2001,7 +2001,12 @@ export default function Dashboard({ onOpenAccount }) {
       <HapticsModal open={hapticsOpen} onClose={() => setHapticsOpen(false)} />
 
       {/* Harmonic Blueprint — full-screen voice-signature capture + FFT map. */}
-      <HarmonicBlueprintSheet open={hbOpen} onClose={() => setHbOpen(false)} />
+      <HarmonicBlueprintSheet
+        open={hbOpen}
+        onClose={() => setHbOpen(false)}
+        isPro={isPro}
+        onOpenAccount={onOpenAccount}
+      />
 
       {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus
           copyable deep-link URLs (/play?preset=…) for hands-free playback. */}

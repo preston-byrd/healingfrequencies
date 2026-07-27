@@ -6,6 +6,7 @@ import {
   decodeBlobToBuffer, decodeFileToBuffer,
   compareToEigenmode,
 } from '@/lib/harmonicBlueprintEngine';
+import HarmonicJourneyPlayer from '@/components/HarmonicJourneyPlayer';
 
 /**
  * Full-screen Harmonic Blueprint experience — voice capture, FFT analysis,
@@ -25,7 +26,7 @@ import {
 const MIN_SECONDS = 10;
 const MAX_SECONDS = 30;
 
-export default function HarmonicBlueprintSheet({ open, onClose }) {
+export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, onOpenAccount }) {
   const [existing, setExisting] = useState(null);   // latest saved profile or null
   const [eigenmode, setEigenmode] = useState(null); // baseline profile or null
   const [loading, setLoading] = useState(true);
@@ -38,6 +39,10 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
   const [pendingFindings, setPendingFindings] = useState([]);
   const [selectedKeys, setSelectedKeys] = useState(() => new Set());
   const [savingReview, setSavingReview] = useState(false);
+  // Phase 3: Eigenmode Journey — server-generated personalised playlist.
+  const [journey, setJourney] = useState(null);
+  const [journeyLoading, setJourneyLoading] = useState(false);
+  const [journeyError, setJourneyError] = useState('');
 
   // Recording state
   const [recording, setRecording] = useState(false);
@@ -51,7 +56,10 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
   const rafRef = useRef(null);
   const startedAtRef = useRef(0);
 
-  // Load any existing profile + eigenmode baseline when the sheet opens.
+  // Load any existing profile + eigenmode baseline + latest journey when the
+  // sheet opens. Free-tier users get 402 on profile endpoints — we treat that
+  // as "no profile yet" so they can still preview a demo journey (Phase 3
+  // funnel).
   useEffect(() => {
     if (!open) return;
     let alive = true;
@@ -59,12 +67,27 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
     setError('');
     (async () => {
       try {
-        const { data } = await api.get('/harmonic-blueprint/profile');
+        let profileData = { profile: null, eigenmode: null };
+        try {
+          const { data } = await api.get('/harmonic-blueprint/profile');
+          profileData = data || profileData;
+        } catch (e) {
+          if (e && e.response && e.response.status === 402) {
+            profileData = { profile: null, eigenmode: null };
+          } else {
+            throw e;
+          }
+        }
         if (!alive) return;
-        setExisting(data.profile || null);
-        setEigenmode(data.eigenmode || null);
-        setProfile(data.profile || null);
-        setStep(data.profile ? 'results' : 'intro');
+        setExisting(profileData.profile || null);
+        setEigenmode(profileData.eigenmode || null);
+        setProfile(profileData.profile || null);
+        // Also pull latest journey (available to both tiers).
+        try {
+          const { data: j } = await api.get('/harmonic-blueprint/journey');
+          if (alive) setJourney(j && j.journey ? j.journey : null);
+        } catch (_) { /* non-blocking */ }
+        setStep(profileData.profile ? 'results' : 'intro');
       } catch (e) {
         if (!alive) return;
         setError(formatApiError(e));
@@ -75,6 +98,21 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
     })();
     return () => { alive = false; };
   }, [open]);
+
+  // Phase 3: request a fresh personalised journey for the current user.
+  // Works for both Pro (full playlist) and free (2-track preview + upgrade CTA).
+  const generateJourney = async () => {
+    setJourneyError('');
+    setJourneyLoading(true);
+    try {
+      const { data } = await api.post('/harmonic-blueprint/journey/generate');
+      setJourney(data);
+    } catch (e) {
+      setJourneyError(formatApiError(e));
+    } finally {
+      setJourneyLoading(false);
+    }
+  };
 
   useEffect(() => () => stopStream(), []);
   useEffect(() => { if (!open) stopStream(); }, [open]);
@@ -321,7 +359,26 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
           {!loading && step === 'intro' && (
             <IntroPanel
               existing={existing}
+              isPro={isPro}
               onBegin={() => { setError(''); setStep('capture'); }}
+              onPreviewJourney={async () => {
+                setError('');
+                await generateJourney();
+                setStep('freePreview');
+              }}
+              onUpgrade={onOpenAccount}
+            />
+          )}
+
+          {!loading && step === 'freePreview' && (
+            <FreePreviewPanel
+              journey={journey}
+              journeyLoading={journeyLoading}
+              journeyError={journeyError}
+              isPro={isPro}
+              onUpgrade={onOpenAccount}
+              onRegenerate={generateJourney}
+              onBack={() => setStep('intro')}
             />
           )}
 
@@ -373,6 +430,12 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
             <ResultsPanel
               profile={profile}
               eigenmode={eigenmode}
+              journey={journey}
+              journeyLoading={journeyLoading}
+              journeyError={journeyError}
+              isPro={isPro}
+              onGenerateJourney={generateJourney}
+              onOpenAccount={onOpenAccount}
               onRecordAgain={resetToCapture}
               onReset={clearProfile}
               onPromoteBaseline={promoteCurrentAsEigenmode}
@@ -402,7 +465,7 @@ export default function HarmonicBlueprintSheet({ open, onClose }) {
 
 // ---------- Sub-panels -------------------------------------------------------
 
-function IntroPanel({ existing, onBegin }) {
+function IntroPanel({ existing, isPro, onBegin, onPreviewJourney, onUpgrade }) {
   return (
     <div className="space-y-8" data-testid="harmonic-blueprint-intro">
       <div className="glass p-8 leading-relaxed">
@@ -428,21 +491,87 @@ function IntroPanel({ existing, onBegin }) {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          data-testid="harmonic-blueprint-begin-button"
-          type="button"
-          onClick={onBegin}
-          className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors"
+      {isPro ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            data-testid="harmonic-blueprint-begin-button"
+            type="button"
+            onClick={onBegin}
+            className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors"
+          >
+            {existing ? 'Record again' : 'Begin'}
+          </button>
+          {existing && (
+            <span className="text-[#8A9A92] text-sm">
+              You already have a saved profile — recording again will replace it.
+            </span>
+          )}
+        </div>
+      ) : (
+        <div
+          className="glass p-6 border border-[rgba(196,166,122,0.35)]"
+          data-testid="harmonic-blueprint-free-intro-block"
         >
-          {existing ? 'Record again' : 'Begin'}
-        </button>
-        {existing && (
-          <span className="text-[#8A9A92] text-sm">
-            You already have a saved profile — recording again will replace it.
-          </span>
-        )}
-      </div>
+          <div className="label-tiny mb-3 text-[#C4A67A] inline-flex items-center gap-2">
+            <Sparkles size={12} /> Pro-only voice capture
+          </div>
+          <div className="text-[#8A9A92] text-sm leading-relaxed">
+            Voice capture &amp; personalised analysis are Pro features. Meanwhile,
+            you can preview a two-track sample of the personalised
+            <span className="text-[#E8E3D9]"> Eigenmode Journey </span>
+            to hear how it feels.
+          </div>
+          <div className="flex flex-wrap items-center gap-3 mt-5">
+            <button
+              data-testid="harmonic-blueprint-preview-journey-button"
+              type="button"
+              onClick={onPreviewJourney}
+              className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors"
+            >
+              Preview a sample journey
+            </button>
+            <button
+              data-testid="harmonic-blueprint-intro-upgrade-button"
+              type="button"
+              onClick={onUpgrade}
+              className="px-5 py-2.5 rounded-full border border-[#C4A67A] text-[#C4A67A] hover:bg-[#C4A67A]/10 text-sm tracking-wide transition-colors"
+            >
+              Upgrade to Pro
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FreePreviewPanel({ journey, journeyLoading, journeyError, isPro, onUpgrade, onRegenerate, onBack }) {
+  return (
+    <div className="space-y-6" data-testid="harmonic-blueprint-free-preview">
+      <button
+        type="button"
+        onClick={onBack}
+        className="text-[#8A9A92] hover:text-[#E8E3D9] text-sm transition-colors"
+      >
+        ← Back
+      </button>
+      {journeyLoading && !journey && (
+        <div className="glass p-8 text-center">
+          <Waves className="mx-auto text-[#72C2AC] animate-pulse" size={28} />
+          <div className="text-[#8A9A92] text-sm mt-4">Composing your sample journey…</div>
+        </div>
+      )}
+      {journeyError && (
+        <div className="glass p-5 text-[#D96C6C] text-sm">{journeyError}</div>
+      )}
+      {journey && (
+        <HarmonicJourneyPlayer
+          journey={journey}
+          isPro={isPro}
+          onUpgrade={onUpgrade}
+          onRegenerate={onRegenerate}
+        />
+      )}
     </div>
   );
 }
@@ -570,7 +699,7 @@ function CapturePanel({ recording, elapsed, level, error, hasEigenmode, onStart,
   );
 }
 
-function ResultsPanel({ profile, eigenmode, onRecordAgain, onReset, onPromoteBaseline }) {
+function ResultsPanel({ profile, eigenmode, journey, journeyLoading, journeyError, isPro, onGenerateJourney, onOpenAccount, onRecordAgain, onReset, onPromoteBaseline }) {
   const isEigenmode = !!(profile && profile.is_eigenmode);
   const confirmedGaps = (profile && profile.confirmed_gaps) || [];
   return (
@@ -626,6 +755,47 @@ function ResultsPanel({ profile, eigenmode, onRecordAgain, onReset, onPromoteBas
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* Phase 3: Your Eigenmode Journey — personalised playlist generator +
+          player. If a journey already exists we render the player straight
+          away with a Regenerate affordance; otherwise a compact Generate CTA. */}
+      {journey ? (
+        <HarmonicJourneyPlayer
+          journey={journey}
+          isPro={isPro}
+          onUpgrade={onOpenAccount}
+          onRegenerate={onGenerateJourney}
+        />
+      ) : (
+        <div className="glass p-6" data-testid="harmonic-journey-cta">
+          <div className="label-tiny text-[#C4A67A] mb-2 inline-flex items-center gap-2">
+            <Sparkles size={12} /> Your Eigenmode Journey
+          </div>
+          <div className="text-[#C6CDCA] text-sm leading-relaxed">
+            Generate a personalised playlist drawing from Solfeggio presets,
+            Sound Baths and Flow Mode journeys — each track chosen to guide
+            you back toward your natural baseline.
+          </div>
+          {journeyError && (
+            <div
+              data-testid="harmonic-journey-error"
+              className="text-[#D96C6C] text-xs mt-3"
+            >
+              {journeyError}
+            </div>
+          )}
+          <button
+            data-testid="harmonic-journey-generate-button"
+            type="button"
+            onClick={onGenerateJourney}
+            disabled={journeyLoading}
+            className="mt-4 px-5 py-2.5 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] text-sm font-medium tracking-wide transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+          >
+            <Sparkles size={14} />
+            {journeyLoading ? 'Composing…' : 'Generate journey'}
+          </button>
         </div>
       )}
 

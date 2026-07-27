@@ -1,0 +1,45 @@
+{
+  "summary": "Harmonic Blueprint Phase 3 (Eigenmode Journey) — both backend + frontend testing PASSED. Backend: 10/10 new pytest cases pass in /app/backend/tests/test_harmonic_blueprint_phase3.py covering Pro-tier generate with full playlist + rationale copy ('has been included' + band labels + non-diagnostic language audit clean), sub/mid band-driven selection, free-tier preview (tier=free, exactly 2 tracks, upgrade_prompt exact string, full_track_count > 2, no 402), Pro fallback with no profile uses _demo_gaps, GET /journey returns latest doc (or null) for both Pro AND free users, retention keeps only 3 latest journeys, and per-user rate-limit returns 429 on the 9th consecutive call (first 8 = 200). Frontend E2E via Playwright: (1) Pro admin flow — seeded profile with confirmed_gaps=[mid,presence], opened sheet via card, ResultsPanel rendered with baseline banner + confirmed-gaps + Generate CTA (data-testid=harmonic-journey-cta + harmonic-journey-generate-button); clicked generate → player rendered 4 tracks with rationale copy containing 'has been included' + band labels ('expressive core', 'brightness and openness'). All controls present (play/prev/next/stop/progress/smart-fade/sleep-mode/regenerate). Smart-fade toggle default ON (checkbox.checked=True), Sleep-mode default OFF (checkbox.checked=False). Play advanced progress 00:00 → 00:02 in ~3s (audio engine reachable in headless). Stop reset progress to 00:00. Regenerate replaced the track list (4→4 fresh render, POST called). Language audit on entire sheet DOM CLEAN of all 9 banned substrings (diagnos/symptom/condition/illness/disease/treatment/therap/patient/medical) — the earlier iter-46 'never diagnoses' bug is now fixed. Phase 1+2 regression testids present (baseline-banner, confirmed-gaps, record-again-button, reset-button). (2) Free flow — registered fresh TEST_free_ user, dashboard card visible + clickable (no paywall redirect), sheet opens on IntroPanel with harmonic-blueprint-free-intro-block + preview-journey-button visible; clicking preview lands on harmonic-blueprint-free-preview panel with player showing exactly 2 tracks, PREVIEW badge, upgrade-prompt with 'Unlock your full Eigenmode Journey with Pro.' copy, and Upgrade-to-Pro button. Language audit on free sheet CLEAN. Minor cosmetic note: the WELLNESS ASSISTANT (AI Agent) sheet auto-opens on dashboard load for both Pro and Free users and intercepts pointer events; automated tests had to remove it via DOM before clicking the harmonic-blueprint-card. Not a Phase 3 regression (was present before), but flagging because real users may need to dismiss it before finding the card.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Dashboard on load (admin + free users)",
+        "issues": ["WELLNESS ASSISTANT AIAgentSheet auto-opens and covers the dashboard with a role=dialog backdrop that intercepts pointer events. Users must dismiss it before they can reach the harmonic-blueprint-card. This isn't new to Phase 3 but became more visible now that Phase 3 requires free users to actually reach the card. Consider making the AI agent a subtle floating trigger instead of a full backdrop modal on first load."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_harmonic_blueprint_phase3.py",
+    "/app/test_reports/pytest/iter47_phase3.xml"
+  ],
+  "action_items": [
+    "(Optional) The WELLNESS ASSISTANT modal blocks first-load interaction on the dashboard. Consider deferring auto-open or replacing the full backdrop with an inline / floating widget so the harmonic-blueprint-card (and other Dashboard entry points) stay reachable without dismissal.",
+    "(Optional) Consider a lint/CI grep test on the frontend to enforce the Phase 2+3 non-diagnostic language rules automatically going forward — the substring audit is currently manual."
+  ],
+  "critical_code_review_comments": [
+    "HARMONIC_JOURNEY_CATALOG lives inline in server.py (~60 lines). If it grows, extract to /app/backend/catalog_journeys.py for maintainability — but at 16 tracks it's still fine.",
+    "_generate_journey_tracks picks up to 2 tracks per gap, dedupes globally. Behaviour verified with sub/mid/no-profile inputs and produces 2–4 tracks per journey with sensible variety.",
+    "Rate-limit uses per-(user,ip) bucket with capacity=8, refill=1/300s. Verified via 9 rapid consecutive calls from the same session: first 8 return 200, 9th returns 429. Good.",
+    "Retention: server trims to latest 3 per user immediately after each insert — verified via seeded 4 old docs + 1 new generate → count == 3. No race guard, but same caveat as Phase 1/2.",
+    "HarmonicJourneyPlayer uses global audioEngine + soundBath singletons; stopEverything() on unmount ensures playback halts when the sheet closes. Verified programmatically. audioEngine.start() successfully triggers on headless Chromium (progress ticks).",
+    "Player active-track highlight is rendered via className string containing '#72C2AC' — regex-scanning it for '/border-\\[#/' failed because tailwind arbitrary values include '/40' etc.; the highlight IS visually present per screenshot. Non-issue, just a note for future automated selectors: consider adding a data-active='true' attribute on the active track for easier assertions."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_harmonic_blueprint_phase3.py (new — 10 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (10/10 Phase 3 tests pass; Phase 1+2 suites untouched)",
+    "frontend": "100% — Pro CTA→player, Free intro→preview→2-track player, all controls, toggle defaults (Smart Fade ON / Sleep Mode OFF), progress advances on Play, stop resets, regenerate re-renders, banned-substring audit clean everywhere, Phase-1+2 regression testids present"
+  },
+  "test_credentials": "Admin from /app/memory/test_credentials.md: admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 · Free users registered dynamically via POST /api/auth/register with TEST_free_* prefix.",
+  "seed_data_creation": "During E2E: for the Pro path we POST'd one resonance_profiles doc for admin with confirmed_gaps=[{key:'mid',direction:'quieter',delta_db:-6.0},{key:'presence',direction:'quieter',delta_db:-5.0}] so ResultsPanel rendered without needing a real mic capture. Backend tests wipe/reseed via pymongo directly (bypasses rate limit). All TEST_-prefixed users and admin's seeded docs are cleaned in the module-scope teardown fixture.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 3 tests live at /app/backend/tests/test_harmonic_blueprint_phase3.py. To reach the ResultsPanel with Generate CTA as admin without a real mic capture, POST to /api/harmonic-blueprint/profile with a valid payload containing confirmed_gaps. Dashboard WELLNESS ASSISTANT modal auto-opens on load and blocks clicks — dismiss it (Escape or remove DOM) before interacting with harmonic-blueprint-card. The `harmonic-journey-cta` container only renders when the user has NO existing journey; once one exists it's replaced by `harmonic-journey-player`. Free-user route: /api/harmonic-blueprint/profile returns 402 for them (expected) — the sheet's IntroPanel catches this gracefully and shows the free-intro-block."
+}
