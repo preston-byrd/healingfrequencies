@@ -29,6 +29,14 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
   const [sleepMode, setSleepMode] = useState(false);
   const tickRef = useRef(null);
   const fadeArmedRef = useRef(false);
+  // Single-shot guard so the tick can't schedule multiple auto-advances once
+  // it crosses `durationS` (the tick keeps firing at capped elapsed, which
+  // was previously stacking overlapping goTo() calls and mangling audio).
+  const advanceScheduledRef = useRef(false);
+  // Track the currently-active track type so we know whether to slide the
+  // audioEngine frequency (solfeggio → solfeggio) or full stop-and-start
+  // (any transition involving a Sound Bath / Flow).
+  const activeTrackRef = useRef(null);
 
   const tracks = (journey && journey.tracks) || [];
   const current = tracks[index] || null;
@@ -38,27 +46,43 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
   const stopEverything = useCallback(() => {
     try { getSoundBath(audioEngine).stop(); } catch (_) { /* graceful */ }
     try { audioEngine.stop(); } catch (_) { /* graceful */ }
+    activeTrackRef.current = null;
   }, []);
 
   // Kick off a specific track. Chosen engine depends on the track type.
+  // Optimisation: solfeggio → solfeggio transitions slide the fundamental
+  // via `audioEngine.setFrequency` (which uses setTargetAtTime for a smooth
+  // 50 ms glide) so we don't stop/restart the oscillator between tracks.
+  // Everything else does a clean stop+start with enough delay for the
+  // engine's 850 ms fade-out cleanup to release before the new nodes attach.
   const startTrack = useCallback(async (track) => {
     if (!track) return;
+    const prev = activeTrackRef.current;
+    const isSolfSlide =
+      prev && prev.type === 'solfeggio' &&
+      track.type === 'solfeggio' && audioEngine.playing;
+    if (isSolfSlide) {
+      // Smooth in-place transition — no gap, no click, no stop/start.
+      audioEngine.setFrequency(track.freq);
+      activeTrackRef.current = track;
+      return;
+    }
     stopEverything();
-    // Small delay so the previous engine has time to release its nodes;
-    // otherwise the sound-bath oscillator tail can bleed into the next track.
-    await new Promise((r) => setTimeout(r, 60));
+    // audioEngine.stop() schedules oscillator disconnect ~850 ms out; we need
+    // to wait past that (plus a small margin) so the new oscillator we spawn
+    // isn't clobbered by the trailing cleanup timeout.
+    await new Promise((r) => setTimeout(r, 900));
     try {
       if (track.type === 'soundbath' && track.ref) {
         await getSoundBath(audioEngine).start(track.ref);
-        return;
+      } else {
+        // Set the target frequency FIRST so audioEngine.start() picks it up
+        // when it creates the oscillator (osc reads `this.frequency`).
+        audioEngine.setFrequency(track.freq);
+        await audioEngine.start();
       }
-      // Flow-mode tracks are rendered as their fundamental frequency for
-      // Phase 3 MVP; the full 3-stage crossfade lives inside the Flow panel.
-      audioEngine.setFrequency(track.freq);
-      await audioEngine.start();
+      activeTrackRef.current = track;
     } catch (e) {
-      // audioEngine already logs; surface nothing to the user beyond the
-      // paused UI state (play button will simply not toggle to 'playing').
       setPlaying(false);
     }
   }, [stopEverything]);
@@ -80,8 +104,7 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
     setIndex(clamped);
     setElapsed(0);
     fadeArmedRef.current = false;
-    // If we were playing, seamlessly switch to the new track. Otherwise just
-    // preview it in the UI without starting playback.
+    advanceScheduledRef.current = false;
     if (playing) {
       await startTrack(tracks[clamped]);
     }
@@ -92,6 +115,7 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
     setPlaying(false);
     setElapsed(0);
     fadeArmedRef.current = false;
+    advanceScheduledRef.current = false;
   }, [stopEverything]);
 
   // Cleanup on unmount / journey change — halt audio and reset UI state.
@@ -99,6 +123,7 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
   useEffect(() => {
     setIndex(0); setElapsed(0); setPlaying(false);
     fadeArmedRef.current = false;
+    advanceScheduledRef.current = false;
     stopEverything();
   }, [journey && journey.id, stopEverything]);
 
@@ -120,8 +145,15 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
             fadeArmedRef.current = true;
           }
         }
-        if (next >= durationS) {
-          // Auto-advance or stop at end of playlist.
+        if (next >= durationS && !advanceScheduledRef.current) {
+          // Single-shot guard: without this, the tick keeps re-triggering
+          // once elapsed >= durationS and we end up firing multiple
+          // overlapping stop/start calls into audioEngine — the user
+          // experiences the second track as broken / needing a manual
+          // stop-and-restart. First tick past duration schedules the
+          // advance; every subsequent tick is a no-op until the next
+          // track's goTo() resets the guard.
+          advanceScheduledRef.current = true;
           if (isLastTrack) {
             setTimeout(() => { stopAll(); }, 200);
           } else {
@@ -129,7 +161,7 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
           }
           return durationS;
         }
-        return next;
+        return next >= durationS ? durationS : next;
       });
     }, 1000);
     return () => {
@@ -203,7 +235,9 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
                         {t.name}
                       </div>
                       <div className="text-[#5A6B65] text-xs font-mono inline-flex items-center gap-2">
-                        <Clock size={10} /> {Math.round(t.duration_seconds / 60)}m
+                        <Clock size={10} /> {Number.isFinite(t.duration_seconds)
+                          ? `${Math.round(t.duration_seconds / 60)}m`
+                          : '—'}
                       </div>
                     </div>
                     <div className="text-[#72C2AC] text-xs mt-1 tracking-wide">
