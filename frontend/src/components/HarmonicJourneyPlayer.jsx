@@ -340,6 +340,7 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
 }
 
 function formatMMSS(secs) {
+  if (!Number.isFinite(secs) || secs < 0) return '00:00';
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
