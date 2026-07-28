@@ -1160,6 +1160,16 @@ export default function Dashboard({ onOpenAccount }) {
             </p>
           </div>
 
+          {/* Harmonic Blueprint — Pro-only voice signature capture. Sits at
+              the top of the left column so the personal "know thyself"
+              moment introduces every other preset below it. */}
+          <HarmonicBlueprintCard
+            isPro={isPro}
+            hasProfile={hbHasProfile}
+            onOpen={() => setHbOpen(true)}
+            onUnlock={onOpenAccount}
+          />
+
           <div className="glass p-5">
             <div className="label-tiny mb-3">Solfeggio Presets</div>
             <div className="grid grid-cols-2 gap-2">
@@ -1335,21 +1345,6 @@ export default function Dashboard({ onOpenAccount }) {
               setRemaining(0);
               // Full silence — kill the audioEngine base oscillator too so
               // there's no residual "hum" after the bath fades out.
-              try { audioEngine.stop(); } catch (e) { /* graceful */ }
-            }}
-          />
-
-          {/* Meditation Sounds — Pro-only. Three tabs (Presets · Chakras ·
-              Breath) sit thematically between Sound Bath and Soundscapes.
-              Timer arms to a fixed 10-min contemplative window per tap; the
-              user can stop from the player transport or by re-tapping the
-              same tile. */}
-          <MeditationSoundsPanel
-            isPro={isPro}
-            onUnlock={onOpenAccount}
-            onSessionStart={() => { setRemaining(BATH_DEFAULT_MIN * 60); }}
-            onSessionStop={() => {
-              setRemaining(0);
               try { audioEngine.stop(); } catch (e) { /* graceful */ }
             }}
           />
@@ -1855,14 +1850,19 @@ export default function Dashboard({ onOpenAccount }) {
             onUnlock={onOpenAccount}
           />
 
-          {/* Harmonic Blueprint — Pro-only voice signature capture. Sits
-              between Flow Mode and Ambient Layers to introduce a personal
-              "know thyself" moment before the sound-shaping tools. */}
-          <HarmonicBlueprintCard
+          {/* Meditation Sounds — Pro-only. Three tabs (Presets · Chakras ·
+              Breath). Sits between Flow Mode and Ambient Layers in the
+              right column so contemplative tools cluster together. Timer
+              arms to a fixed 10-min contemplative window per tap; the user
+              can stop from the player transport or by re-tapping the tile. */}
+          <MeditationSoundsPanel
             isPro={isPro}
-            hasProfile={hbHasProfile}
-            onOpen={() => setHbOpen(true)}
             onUnlock={onOpenAccount}
+            onSessionStart={() => { setRemaining(BATH_DEFAULT_MIN * 60); }}
+            onSessionStop={() => {
+              setRemaining(0);
+              try { audioEngine.stop(); } catch (e) { /* graceful */ }
+            }}
           />
 
           {/* Ambient Mixer — Pro only */}
