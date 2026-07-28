@@ -169,6 +169,11 @@ export default function Dashboard({ onOpenAccount }) {
   // Harmonic Blueprint (Pro) — full-screen voice-signature capture / results.
   const [hbOpen, setHbOpen] = useState(false);
   const [hbHasProfile, setHbHasProfile] = useState(false);
+  // Phase 4 perf: cache the profile summary at the Dashboard level so the
+  // sheet can render its results panel instantly on open — no round-trip
+  // gate. The sheet still refreshes in the background to catch drift from
+  // other tabs / journey saves.
+  const [hbInitialData, setHbInitialData] = useState(null);
 
   // Phase 4 handoff: if the user clicked "Re-run analysis" from the Account
   // Harmonic Blueprint section, sessionStorage carries a one-shot flag that
@@ -183,16 +188,22 @@ export default function Dashboard({ onOpenAccount }) {
   }, []);
 
   // Best-effort probe on mount (and after sub changes) so the Dashboard card
-  // can show the "Captured" badge without opening the sheet. Silently no-ops
-  // for free users — the endpoint returns 402 and we treat it as "no profile".
+  // can show the "Captured" badge without opening the sheet — AND so the
+  // sheet can open with zero round-trip when tapped. Parallelises the two
+  // GETs the sheet needs (profile + latest journey). Silently no-ops for
+  // free users — the endpoint returns 402 and we treat it as "no profile".
   useEffect(() => {
-    if (!isPro) { setHbHasProfile(false); return; }
     let alive = true;
     (async () => {
-      try {
-        const { data } = await api.get('/harmonic-blueprint/profile');
-        if (alive) setHbHasProfile(!!(data && data.profile));
-      } catch (_) { if (alive) setHbHasProfile(false); }
+      const [pRes, jRes] = await Promise.allSettled([
+        api.get('/harmonic-blueprint/profile'),
+        api.get('/harmonic-blueprint/journey'),
+      ]);
+      if (!alive) return;
+      const profile = pRes.status === 'fulfilled' ? (pRes.value.data || null) : null;
+      const journey = jRes.status === 'fulfilled' ? ((jRes.value.data || {}).journey || null) : null;
+      setHbHasProfile(!!(profile && profile.profile));
+      setHbInitialData({ profile, journey });
     })();
     return () => { alive = false; };
   }, [isPro, hbOpen]);
@@ -2018,6 +2029,7 @@ export default function Dashboard({ onOpenAccount }) {
         onClose={() => setHbOpen(false)}
         isPro={isPro}
         onOpenAccount={onOpenAccount}
+        initialData={hbInitialData}
       />
 
       {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus

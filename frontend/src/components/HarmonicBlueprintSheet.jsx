@@ -26,21 +26,28 @@ import HarmonicJourneyPlayer from '@/components/HarmonicJourneyPlayer';
 const MIN_SECONDS = 10;
 const MAX_SECONDS = 30;
 
-export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, onOpenAccount }) {
-  const [existing, setExisting] = useState(null);   // latest saved profile or null
-  const [eigenmode, setEigenmode] = useState(null); // baseline profile or null
-  const [loading, setLoading] = useState(true);
+export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, onOpenAccount, initialData = null }) {
+  // Seed state from pre-fetched Dashboard cache so the sheet renders its
+  // final panel on the very first frame instead of gating on a loading
+  // spinner. A background refresh (see effect below) then quietly reconciles.
+  const seedProfile = initialData && initialData.profile ? initialData.profile.profile : null;
+  const seedEigen = initialData && initialData.profile ? initialData.profile.eigenmode : null;
+  const seedJourney = (initialData && initialData.journey) || null;
+
+  const [existing, setExisting] = useState(seedProfile);   // latest saved profile or null
+  const [eigenmode, setEigenmode] = useState(seedEigen);   // baseline profile or null
+  const [loading, setLoading] = useState(!initialData);
   // intro | capture | analysing | review | eigenmodeSaved | results | error
-  const [step, setStep] = useState('intro');
+  const [step, setStep] = useState(seedProfile ? 'results' : 'intro');
   const [error, setError] = useState('');
-  const [profile, setProfile] = useState(null);
+  const [profile, setProfile] = useState(seedProfile);
   // Phase 2: findings pending user confirmation. `selected` is a Set of finding keys.
   const [pendingDerived, setPendingDerived] = useState(null);
   const [pendingFindings, setPendingFindings] = useState([]);
   const [selectedKeys, setSelectedKeys] = useState(() => new Set());
   const [savingReview, setSavingReview] = useState(false);
   // Phase 3: Eigenmode Journey — server-generated personalised playlist.
-  const [journey, setJourney] = useState(null);
+  const [journey, setJourney] = useState(seedJourney);
   const [journeyLoading, setJourneyLoading] = useState(false);
   const [journeyError, setJourneyError] = useState('');
 
@@ -56,47 +63,55 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
   const rafRef = useRef(null);
   const startedAtRef = useRef(0);
 
-  // Load any existing profile + eigenmode baseline + latest journey when the
-  // sheet opens. Free-tier users get 402 on profile endpoints — we treat that
-  // as "no profile yet" so they can still preview a demo journey (Phase 3
-  // funnel).
+  // Background refresh whenever the sheet opens — parallelised so users
+  // never wait on two sequential round-trips. We only show the full-panel
+  // loading spinner on the FIRST-ever open before any cache exists; every
+  // subsequent open renders the last-known state immediately and reconciles
+  // in the background.
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    setLoading(true);
+    const hadSeed = !!(existing || eigenmode || journey);
+    if (!hadSeed) setLoading(true);
     setError('');
     (async () => {
       try {
-        let profileData = { profile: null, eigenmode: null };
-        try {
-          const { data } = await api.get('/harmonic-blueprint/profile');
-          profileData = data || profileData;
-        } catch (e) {
-          if (e && e.response && e.response.status === 402) {
-            profileData = { profile: null, eigenmode: null };
-          } else {
-            throw e;
-          }
-        }
+        const [pRes, jRes] = await Promise.allSettled([
+          api.get('/harmonic-blueprint/profile'),
+          api.get('/harmonic-blueprint/journey'),
+        ]);
         if (!alive) return;
+        let profileData = { profile: null, eigenmode: null };
+        if (pRes.status === 'fulfilled') {
+          profileData = pRes.value.data || profileData;
+        } else if (pRes.reason && pRes.reason.response && pRes.reason.response.status !== 402) {
+          throw pRes.reason;
+        }
         setExisting(profileData.profile || null);
         setEigenmode(profileData.eigenmode || null);
         setProfile(profileData.profile || null);
-        // Also pull latest journey (available to both tiers).
-        try {
-          const { data: j } = await api.get('/harmonic-blueprint/journey');
-          if (alive) setJourney(j && j.journey ? j.journey : null);
-        } catch (_) { /* non-blocking */ }
-        setStep(profileData.profile ? 'results' : 'intro');
+        if (jRes.status === 'fulfilled') {
+          setJourney((jRes.value.data && jRes.value.data.journey) || null);
+        }
+        // Only auto-flip the step if we're still on the initial intro/results
+        // choice — never yank the user out of review / eigenmodeSaved / etc.
+        setStep((cur) => {
+          if (cur !== 'intro' && cur !== 'results') return cur;
+          return profileData.profile ? 'results' : 'intro';
+        });
       } catch (e) {
         if (!alive) return;
-        setError(formatApiError(e));
-        setStep('error');
+        // Only escalate to the error step if we had no seed to fall back on.
+        if (!hadSeed) {
+          setError(formatApiError(e));
+          setStep('error');
+        }
       } finally {
         if (alive) setLoading(false);
       }
     })();
     return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Phase 3: request a fresh personalised journey for the current user.
