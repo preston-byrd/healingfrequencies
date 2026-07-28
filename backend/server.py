@@ -245,6 +245,22 @@ app = FastAPI()
 api = APIRouter(prefix="/api")
 
 
+# --- Kubernetes health probes -----------------------------------------------
+# Emergent's deployment platform hits GET /health (root path, no /api prefix)
+# from inside the pod for liveness / readiness. Without this, probes 404 and
+# Kubernetes rolls the pod back. Also expose /api/health for parity so any
+# external ingress-side check works too.
+@app.get("/health")
+@app.head("/health")
+async def _health_root():
+    return {"ok": True}
+
+
+@api.get("/health")
+async def _health_api():
+    return {"ok": True}
+
+
 # --- Auth helpers -------------------------------------------------------------
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
