@@ -2281,6 +2281,16 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     except Exception as exc:
         logger.warning("[agent_chat] mood_preference_hint failed: %s", exc)
 
+    # Phase 7: behavioural patterns detected across the user's journey.
+    # Compact block, top-3 non-dismissed patterns, with soft one-callback
+    # guidance so the LLM doesn't lecture.
+    try:
+        pat_block = await _user_patterns_prompt_block(user["id"])
+        if pat_block:
+            parts.append(pat_block)
+    except Exception as exc:
+        logger.warning("[agent_chat] user_patterns block failed: %s", exc)
+
     history = body.history or []
     for turn in history[-10:]:  # cap context window
         if not isinstance(turn, dict):
@@ -2732,6 +2742,312 @@ async def journey_reflection(
         {"$set": {"reflection": reflection}},
     )
     return {"ok": True, "reflection": reflection}
+
+
+# --- Behavioural pattern detection (Phase 7) ----------------------------------
+# Read-only scan of a user's wellness_journey rows. Returns a list of
+# pattern objects; each pattern requires ≥ 3 supporting rows before it
+# ever surfaces, so cold-start users see no proactive prompts.
+
+# Client-side ambient channel catalog. Kept here (rather than imported from
+# frontend) so pattern detection isn't coupled to frontend deploys. If the
+# frontend ever renames a channel, we just need to keep this list in sync.
+_AMBIENT_CATALOG = (
+    "rain", "ocean", "forest", "wind", "crickets", "bowls", "brown", "white",
+)
+_TOD_LABELS = ("morning", "afternoon", "evening", "night")
+_TOD_PHRASING = {
+    "morning": "in the morning",
+    "afternoon": "in the afternoon",
+    "evening": "in the evening",
+    "night": "late at night",
+}
+# Copy templates for the assistant greeting chip. Kept short and warm.
+_PATTERN_TEMPLATES = {
+    "top_frequency": "You've been gravitating toward {label} this week — shall we continue that journey?",
+    "preferred_time_of_day": "You usually tune in {when} — {label} has been your steady favourite.",
+    "extension_favorite": "You often extend {label} — want to start there and let it stretch?",
+    "unused_soundscapes": "You haven't tried {label} yet — could be a nice one to explore.",
+    "mood_at_time": "Around this time you often feel {mood}, and {label} has helped you settle before. Start there?",
+}
+
+
+def _pattern_key(kind: str, value: str) -> str:
+    """Stable dedupe key used both for the frontend chip and the user's
+    `dismissed_patterns` list."""
+    return f"{kind}:{value}"
+
+
+def _current_tod_utc() -> str:
+    """Coarse time-of-day bucket at CALL TIME. Used to weight `mood_at_time`
+    patterns so we prefer to surface the mood that matches "right now"."""
+    return _time_of_day_label(datetime.now(timezone.utc))
+
+
+async def _detect_wellness_patterns(user_id: str) -> list[dict]:
+    """Pure-Python pattern extraction over the last 30 wellness_journey rows.
+    No LLM calls, no per-request cost beyond the single Mongo read the
+    endpoint already needs.
+
+    Every returned pattern has:
+      { key, kind, label, count, message, cta? }
+    where `cta` (when present) is `{action, frequency?|preset_key?|soundscape?}`
+    the client can act on with one tap.
+    """
+    try:
+        cursor = db.wellness_journey.find(
+            {"user_id": user_id}, {"_id": 0}
+        ).sort("created_at", -1).limit(JOURNEY_MAX_PER_USER)
+        rows = await cursor.to_list(length=JOURNEY_MAX_PER_USER)
+    except Exception as exc:
+        logger.warning("[patterns] fetch failed for %s: %s", user_id, exc)
+        return []
+    total = len(rows)
+    if total < 3:
+        return []  # cold-start floor — never surface anything
+
+    patterns: list[dict] = []
+
+    # ── Pattern 1: top_frequency ──────────────────────────────────────────
+    # A single frequency played ≥ 3 times AND dominating ≥ 40 % of runs
+    # that carried a frequency. Presets don't count here — those show up
+    # as extension_favorite instead.
+    freq_counts: dict[int, int] = {}
+    for r in rows:
+        f = r.get("frequency")
+        if isinstance(f, (int, float)) and f > 0:
+            k = int(round(float(f)))
+            freq_counts[k] = freq_counts.get(k, 0) + 1
+    if freq_counts:
+        top_hz, top_n = max(freq_counts.items(), key=lambda x: x[1])
+        freq_total = sum(freq_counts.values())
+        if top_n >= 3 and (top_n / freq_total) >= 0.40:
+            patterns.append({
+                "key": _pattern_key("top_frequency", str(top_hz)),
+                "kind": "top_frequency",
+                "label": f"{top_hz} Hz",
+                "count": top_n,
+                "message": _PATTERN_TEMPLATES["top_frequency"].format(label=f"{top_hz} Hz"),
+                "cta": {"action": "arm_frequency", "frequency": float(top_hz)},
+            })
+
+    # ── Pattern 2: preferred_time_of_day ─────────────────────────────────
+    # A time-of-day bucket that owns ≥ 50 % of a user's ≥ 3 sessions.
+    tod_counts: dict[str, int] = {}
+    tod_labels: dict[str, dict[str, int]] = {}   # tod → {primary_label → count}
+    for r in rows:
+        tod = r.get("time_of_day")
+        if tod not in _TOD_LABELS:
+            continue
+        tod_counts[tod] = tod_counts.get(tod, 0) + 1
+        # What did the user actually play at that time? preset_label wins,
+        # else "<hz> Hz". We surface the most common one alongside the TOD.
+        lbl = r.get("preset_label") or (
+            f"{int(round(float(r['frequency'])))} Hz" if isinstance(r.get("frequency"), (int, float)) else None
+        )
+        if lbl:
+            bucket = tod_labels.setdefault(tod, {})
+            bucket[lbl] = bucket.get(lbl, 0) + 1
+    if tod_counts:
+        top_tod, top_tod_n = max(tod_counts.items(), key=lambda x: x[1])
+        if top_tod_n >= 3 and (top_tod_n / total) >= 0.50:
+            fav_at_tod = None
+            if top_tod in tod_labels and tod_labels[top_tod]:
+                fav_at_tod = max(tod_labels[top_tod].items(), key=lambda x: x[1])[0]
+            label = fav_at_tod or "your usual mix"
+            patterns.append({
+                "key": _pattern_key("preferred_time_of_day", top_tod),
+                "kind": "preferred_time_of_day",
+                "label": label,
+                "time_of_day": top_tod,
+                "count": top_tod_n,
+                "message": _PATTERN_TEMPLATES["preferred_time_of_day"].format(
+                    when=_TOD_PHRASING[top_tod], label=label,
+                ),
+            })
+
+    # ── Pattern 3: extension_favorite ────────────────────────────────────
+    # An item (preset_label OR "<hz> Hz") the user has extended ≥ 2 times
+    # AND has ≥ 3 total sessions of AND has never ended early. Until the
+    # Extend +5 chip ships (Task 3), all rows carry extended:false so this
+    # returns nothing — code path is future-proof.
+    ext_by_item: dict[str, dict] = {}  # label → {total, ext, early}
+    for r in rows:
+        lbl = r.get("preset_label") or (
+            f"{int(round(float(r['frequency'])))} Hz" if isinstance(r.get("frequency"), (int, float)) else None
+        )
+        if not lbl:
+            continue
+        st = ext_by_item.setdefault(lbl, {"total": 0, "ext": 0, "early": 0, "row": r})
+        st["total"] += 1
+        if r.get("extended"):
+            st["ext"] += 1
+        if r.get("ended_early"):
+            st["early"] += 1
+    for lbl, st in ext_by_item.items():
+        if st["total"] >= 3 and st["ext"] >= 2 and st["early"] == 0:
+            row = st["row"]
+            cta: Optional[dict] = None
+            if row.get("preset_key"):
+                cta = {"action": "arm_preset", "preset_key": row["preset_key"], "preset_label": lbl}
+            elif row.get("frequency"):
+                cta = {"action": "arm_frequency", "frequency": float(row["frequency"])}
+            patterns.append({
+                "key": _pattern_key("extension_favorite", lbl),
+                "kind": "extension_favorite",
+                "label": lbl,
+                "count": st["ext"],
+                "message": _PATTERN_TEMPLATES["extension_favorite"].format(label=lbl),
+                **({"cta": cta} if cta else {}),
+            })
+
+    # ── Pattern 4: unused_soundscapes ────────────────────────────────────
+    # Only surfaces once the user has ≥ 5 total sessions AND there's at
+    # least one catalog soundscape they've never touched (either as an
+    # `ambient` channel > 0 OR as the `soundscape` field). We pick one to
+    # nudge, favouring earlier-listed channels for a stable rotation.
+    if total >= 5:
+        used: set = set()
+        for r in rows:
+            if r.get("soundscape"):
+                used.add(str(r["soundscape"]))
+            amb = r.get("ambient")
+            if isinstance(amb, dict):
+                for k, v in amb.items():
+                    if isinstance(v, (int, float)) and float(v) > 0.01:
+                        used.add(str(k))
+        for cand in _AMBIENT_CATALOG:
+            if cand not in used:
+                patterns.append({
+                    "key": _pattern_key("unused_soundscapes", cand),
+                    "kind": "unused_soundscapes",
+                    "label": cand.capitalize(),
+                    "count": 0,
+                    "message": _PATTERN_TEMPLATES["unused_soundscapes"].format(label=cand.capitalize()),
+                    "cta": {"action": "arm_soundscape", "soundscape": cand},
+                })
+                break  # only nudge one at a time; the next will surface after this is dismissed
+
+    # ── Pattern 5: mood_at_time ──────────────────────────────────────────
+    # A (mood_bucket, tod) pair that recurs ≥ 3 times. We prefer to
+    # surface the one matching the CURRENT tod, so the chip lands as
+    # "around this time" rather than a random hour. Also carries a
+    # suggested label (the most common preset / freq the user picked in
+    # rows matching that bucket).
+    mood_at_time: dict[tuple, int] = {}
+    mood_at_time_labels: dict[tuple, dict[str, int]] = {}
+    for r in rows:
+        bucket = _mood_bucket(r.get("mood"))
+        tod = r.get("time_of_day")
+        if not bucket or tod not in _TOD_LABELS:
+            continue
+        key = (bucket, tod)
+        mood_at_time[key] = mood_at_time.get(key, 0) + 1
+        lbl = r.get("preset_label") or (
+            f"{int(round(float(r['frequency'])))} Hz" if isinstance(r.get("frequency"), (int, float)) else None
+        )
+        if lbl:
+            b = mood_at_time_labels.setdefault(key, {})
+            b[lbl] = b.get(lbl, 0) + 1
+    if mood_at_time:
+        current_tod = _current_tod_utc()
+        # Prefer pairs matching current_tod, else fall back to the strongest.
+        candidates = sorted(
+            mood_at_time.items(),
+            key=lambda kv: (kv[0][1] == current_tod, kv[1]),
+            reverse=True,
+        )
+        for (bucket, tod), n in candidates:
+            if n < 3:
+                continue
+            lbl_map = mood_at_time_labels.get((bucket, tod), {})
+            fav = max(lbl_map.items(), key=lambda x: x[1])[0] if lbl_map else "your usual mix"
+            patterns.append({
+                "key": _pattern_key("mood_at_time", f"{bucket}@{tod}"),
+                "kind": "mood_at_time",
+                "label": fav,
+                "mood": bucket,
+                "time_of_day": tod,
+                "count": n,
+                "message": _PATTERN_TEMPLATES["mood_at_time"].format(mood=bucket, label=fav),
+            })
+            break  # one is enough
+
+    return patterns
+
+
+def _pattern_priority(p: dict) -> int:
+    """Higher = shown first as the greeting chip. Contextual patterns
+    (mood_at_time) win over generic favourites, which win over nudges."""
+    order = {
+        "mood_at_time": 5,
+        "extension_favorite": 4,
+        "top_frequency": 3,
+        "preferred_time_of_day": 2,
+        "unused_soundscapes": 1,
+    }
+    return order.get(p.get("kind", ""), 0)
+
+
+async def _user_patterns_prompt_block(user_id: str) -> str:
+    """Assemble a compact `USER_PATTERNS` block for the agent_chat LLM
+    prompt. Only non-dismissed, top-3-by-priority patterns are included so
+    we don't drown the model in signals it already gets from journey rows."""
+    try:
+        user = await db.users.find_one({"id": user_id}, {"dismissed_patterns": 1})
+        dismissed = set((user or {}).get("dismissed_patterns") or [])
+        patterns = await _detect_wellness_patterns(user_id)
+    except Exception as exc:
+        logger.warning("[patterns] prompt build failed: %s", exc)
+        return ""
+    live = [p for p in patterns if p.get("key") not in dismissed]
+    if not live:
+        return ""
+    live.sort(key=_pattern_priority, reverse=True)
+    live = live[:3]
+    lines = ["USER_PATTERNS (recurring behaviours worth noticing):"]
+    for p in live:
+        lines.append(f"- ({p['kind']}) {p['message']}")
+    lines.append(
+        "You MAY reference one of these once, conversationally, if it fits "
+        "the user's current message. Do not enumerate all of them, do not "
+        "lecture — a single warm callback is plenty."
+    )
+    return "\n".join(lines)
+
+
+@api.get("/me/patterns")
+async def patterns_list(user: dict = Depends(get_current_user)):
+    """Return the user's currently-detected patterns, plus their dismissal
+    list. The client sorts / picks which chip to show."""
+    patterns = await _detect_wellness_patterns(user["id"])
+    doc = await db.users.find_one({"id": user["id"]}, {"dismissed_patterns": 1})
+    dismissed = list((doc or {}).get("dismissed_patterns") or [])
+    return {"patterns": patterns, "dismissed": dismissed}
+
+
+@api.post("/me/patterns/{pattern_key:path}/dismiss")
+async def pattern_dismiss(pattern_key: str, user: dict = Depends(get_current_user)):
+    """Mark a pattern key as dismissed for this user. Idempotent — repeats
+    are a no-op. `path` converter is used because keys contain ':' and '@'.
+    """
+    if not pattern_key or len(pattern_key) > 120:
+        raise HTTPException(status_code=400, detail="Invalid pattern key")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$addToSet": {"dismissed_patterns": pattern_key}},
+    )
+    return {"ok": True, "dismissed": pattern_key}
+
+
+@api.post("/me/patterns/clear")
+async def patterns_clear(user: dict = Depends(get_current_user)):
+    """Clear all dismissals so all currently-active patterns can re-surface."""
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"dismissed_patterns": []}},
+    )
+    return {"ok": True}
 
 
 # ---------- Stripe helper ----------

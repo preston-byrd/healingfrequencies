@@ -1,0 +1,24 @@
+{
+  "summary": "Iter 51 — Phase 7 behavioural pattern detection (backend + frontend). Added /app/backend/tests/test_patterns.py with 13 new pattern-detection tests covering cold-start floor, all 5 pattern kinds (top_frequency, preferred_time_of_day, mood_at_time, unused_soundscapes, extension_favorite), dominance/threshold negative cases, dismiss/clear idempotency, URL-encoded key path decoding, auth-gate on all 3 endpoints, and USER_PATTERNS+agent_chat integration. All 13 pass (13.7s). Frontend E2E verified via Playwright on the live preview URL: pattern-greeting-chip rendered with correct highest-priority message (mood_at_time), dismiss-X hides chip and persists to server, reload surfaces next-priority pattern (top_frequency 432 Hz with CTA), clicking Start there arms the frequency (NOW TUNING 528→432 Hz) and adds the key to dismissed. My Patterns section shows all 4 admin patterns with correct headings, occurrence counts, per-row Dismiss buttons; Clear all restores everything and empties dismissed list.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_patterns.py",
+    "/app/test_reports/pytest/iter51_patterns.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "PatternGreetingChip: dismissal is fire-and-forget (no error toast if the POST fails). Fine as design since the chip is a hint, but log the failure at least for observability.",
+    "unused_soundscapes pattern shows 'count: 0' in the API payload — MyPatternsSection correctly hides the '0 occurrences' badge for that row (nice). Consider omitting the field entirely on the backend to make the intent explicit (nudge vs. observed pattern).",
+    "mood_at_time carries no CTA even though we know a favourite label — the label is often a frequency (e.g. '432 Hz'). Since we know the freq from the label pattern, backend could attach an arm_frequency cta so the user can act on the chip's highest-priority pattern too. Currently the top-priority chip is the only one without a Start-there button.",
+    "Dashboard.jsx still >2100 lines (flagged iter 49/50). No regression this phase."
+  ],
+  "updated_files": ["/app/backend/tests/test_patterns.py"],
+  "success_rate": {"backend": "100% (13/13 new + 21/21 legacy still valid)", "frontend": "100% — all chip + section flows verified end-to-end"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (from /app/memory/test_credentials.md). Fresh test users registered per pattern with TEST_patterns_<uuid>@example.com; their journey rows + user docs are cleaned up in fixture teardown.",
+  "seed_data_creation": "Backend tests seed rows DIRECTLY into db.wellness_journey to control time_of_day (matching the pattern the existing prune-to-30 test uses). All seeded rows cleaned via _cleanup(user_id) at end of each test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 7 fully green. Note that on admin the top-priority chip (mood_at_time:anxious@morning) has no CTA button since the backend template doesn't attach one — click the X to dismiss and reload to see top_frequency (432 Hz) with the Start there button. The `pattern_key:path` FastAPI converter correctly decodes 'mood_at_time:anxious@morning' from urlencoded input. If you need to reset admin's dismissed list: POST /api/me/patterns/clear.",
+  "rca of the issue": "N/A — no issues surfaced this iteration."
+}

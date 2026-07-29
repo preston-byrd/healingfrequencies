@@ -9,6 +9,7 @@ import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
 import MyJourneySection from '@/components/MyJourneySection';
+import MyPatternsSection from '@/components/MyPatternsSection';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
 
 function fmtDate(iso) {
@@ -942,6 +943,11 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             Wellness Assistant references when it says "Last time you felt X,
             Y helped — want to start there?". Rendered for all users. */}
         <MyJourneySection />
+
+        {/* Detected behavioural patterns — the recurring behaviours the
+            Wellness Assistant may reference proactively on app open. User
+            can dismiss individual patterns or clear all dismissals. */}
+        <MyPatternsSection />
 
         {/* Admin: Sound Lineage timeline */}
         {sub.is_admin && <SoundLineage />}

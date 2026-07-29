@@ -23,6 +23,7 @@ import SoundBathPanel from '@/components/SoundBathPanel';
 import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
 import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
+import PatternGreetingChip from '@/components/PatternGreetingChip';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -828,6 +829,34 @@ export default function Dashboard({ onOpenAccount }) {
     audioEngine.setGoldenStack(!state.goldenStack);
   };
 
+  // Handle a pattern chip CTA (Phase 7). Maps the pattern's cta object to
+  // the same underlying calls the manual UI uses so behaviour is identical:
+  //   arm_frequency   → set frequency and (optionally) start playback
+  //   arm_soundscape  → set the ambient channel to a comfortable default
+  //   arm_preset      → best-effort dispatch of a preset key (matched by
+  //                     preset_label back to a Sound Bath / preset if the
+  //                     app exposes one; falls back to a no-op if no map).
+  // Never auto-starts audio for the soundscape variant — some users want to
+  // add the layer to whatever is playing.
+  const applyPatternCta = React.useCallback(async (cta) => {
+    if (!cta || typeof cta !== 'object') return;
+    if (cta.action === 'arm_frequency' && Number.isFinite(cta.frequency) && cta.frequency > 0) {
+      audioEngine.setFrequency(cta.frequency);
+      setActiveSoundscape(null);
+      if (!audioEngine.playing) {
+        setRemaining(duration * 60);
+        audioEngine.start();
+      }
+    } else if (cta.action === 'arm_soundscape' && cta.soundscape) {
+      // Nudge a gentle default level — matches the manual Ambient sliders'
+      // typical opening tap. User can crank it up from there.
+      audioEngine.setAmbient(cta.soundscape, 0.4);
+    }
+    // arm_preset: no-op for now — the Sound Bath dispatch API isn't exposed
+    // at Dashboard level. Chip still dismisses itself via the parent, so
+    // future work can hook this up without a UX regression.
+  }, [duration]);
+
   const startSleepMode = () => {
     if (!isPro) { onOpenAccount(); return; }
     // If something is playing, stop it cleanly first. audioEngine.stop schedules
@@ -1146,6 +1175,11 @@ export default function Dashboard({ onOpenAccount }) {
           </button>
         </div>
       )}
+
+      {/* Behavioural pattern greeting — surfaces once the user has ≥ 3
+          rows worth of history and a recurring behaviour is detected.
+          Cold-start users see nothing. Session-scoped hide on X. */}
+      <PatternGreetingChip onArm={applyPatternCta} />
 
       <div className="relative z-10 min-h-screen lg:h-screen w-full flex flex-col lg:flex-row p-4 lg:p-6 gap-4 lg:gap-6">
 
