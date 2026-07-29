@@ -332,3 +332,155 @@ def test_agent_chat_ok_with_patterns_present():
         assert isinstance(body.get("message"), str) and body["message"].strip()
     finally:
         _cleanup(s._uid)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.1 — Patterns cache (15-min TTL + invalidate-on-write)
+# ---------------------------------------------------------------------------
+
+def test_patterns_cache_written_after_first_call():
+    """First GET /me/patterns should populate patterns_cache on the user doc
+    with a computed_at + expires_at ≈ +15 min."""
+    s = _register_fresh()
+    try:
+        # Seed enough rows to trigger a top_frequency pattern.
+        for _ in range(4):
+            _insert_row(s._uid, frequency=432, mood="anxious", tod="morning")
+
+        # Precondition — no cache before first read.
+        u0 = _db.users.find_one({"id": s._uid}, {"patterns_cache": 1}) or {}
+        assert not u0.get("patterns_cache")
+
+        r = s.get(f"{API}/me/patterns", timeout=15)
+        assert r.status_code == 200
+        patterns_from_api = r.json()["patterns"]
+        assert len(patterns_from_api) >= 1
+
+        u1 = _db.users.find_one({"id": s._uid}, {"patterns_cache": 1}) or {}
+        pc = u1.get("patterns_cache") or {}
+        assert pc, "cache should be written after first call"
+        assert isinstance(pc.get("patterns"), list)
+        assert len(pc["patterns"]) == len(patterns_from_api)
+        assert pc.get("computed_at")
+        assert pc.get("expires_at")
+        # TTL ≈ 15 min ± 5 s.
+        delta = (pc["expires_at"] - pc["computed_at"]).total_seconds()
+        assert 15 * 60 - 5 <= delta <= 15 * 60 + 5
+    finally:
+        _cleanup(s._uid)
+
+
+def test_patterns_cache_served_on_second_call():
+    """Second GET should return the SAME payload even after we've mutated
+    journey rows directly (bypassing the invalidation)."""
+    s = _register_fresh()
+    try:
+        for _ in range(4):
+            _insert_row(s._uid, frequency=432, mood="anxious", tod="morning")
+
+        r1 = s.get(f"{API}/me/patterns", timeout=15).json()
+
+        # Directly insert a row that would produce a *different* pattern
+        # set — bypassing POST /me/journey/log so the cache is NOT
+        # invalidated. This proves the cache is actually being served.
+        for _ in range(4):
+            _insert_row(s._uid, frequency=528, mood="tired", tod="evening")
+
+        r2 = s.get(f"{API}/me/patterns", timeout=15).json()
+        assert r2["patterns"] == r1["patterns"], (
+            "cache should serve identical patterns until invalidated"
+        )
+    finally:
+        _cleanup(s._uid)
+
+
+def test_patterns_cache_invalidated_by_journey_log():
+    """POST /me/journey/log must clear the cache so the very next
+    /me/patterns read recomputes with the fresh row included."""
+    s = _register_fresh()
+    try:
+        for _ in range(4):
+            _insert_row(s._uid, frequency=432, mood="anxious", tod="morning")
+
+        _ = s.get(f"{API}/me/patterns", timeout=15).json()  # populate cache
+        assert (_db.users.find_one({"id": s._uid}, {"patterns_cache": 1}) or {}).get("patterns_cache")
+
+        # A fresh log via the endpoint must $unset the cache.
+        r = s.post(
+            f"{API}/me/journey/log",
+            json={
+                "frequency": 528,
+                "waveform": "sine",
+                "duration_planned_seconds": 300,
+                "duration_actual_seconds": 240,
+                "mood": "tired",
+            },
+            timeout=15,
+        )
+        assert r.status_code == 200, r.text
+        pc_after = (_db.users.find_one({"id": s._uid}, {"patterns_cache": 1}) or {}).get("patterns_cache")
+        assert not pc_after, "journey_log should invalidate patterns_cache"
+    finally:
+        _cleanup(s._uid)
+
+
+def test_patterns_cache_invalidated_by_reflection():
+    """POST /me/journey/{id}/reflection must also invalidate — reflections
+    feed the mood-preference boost which is closely tied to pattern shape."""
+    s = _register_fresh()
+    try:
+        for _ in range(4):
+            _insert_row(s._uid, frequency=432, mood="anxious", tod="morning")
+        _ = s.get(f"{API}/me/patterns", timeout=15).json()  # populate cache
+
+        # Insert a real row via POST (invalidates once), then re-read to
+        # repopulate the cache so we can assert the reflection kills it.
+        r = s.post(
+            f"{API}/me/journey/log",
+            json={"frequency": 432, "duration_actual_seconds": 180, "mood": "anxious"},
+            timeout=15,
+        )
+        assert r.status_code == 200
+        entry_id = r.json()["entry"]["id"]
+
+        _ = s.get(f"{API}/me/patterns", timeout=15).json()  # repopulate
+        assert (_db.users.find_one({"id": s._uid}, {"patterns_cache": 1}) or {}).get("patterns_cache")
+
+        rf = s.post(
+            f"{API}/me/journey/{entry_id}/reflection",
+            json={"question": "Did that feel right?", "response": "Yes very calming"},
+            timeout=15,
+        )
+        assert rf.status_code == 200, rf.text
+        pc_after = (_db.users.find_one({"id": s._uid}, {"patterns_cache": 1}) or {}).get("patterns_cache")
+        assert not pc_after, "reflection write should invalidate patterns_cache"
+    finally:
+        _cleanup(s._uid)
+
+
+def test_patterns_cache_expired_ttl_recomputes():
+    """If we manually rewind expires_at to the past, the next call must
+    treat it as a miss and recompute (writing a fresh entry)."""
+    s = _register_fresh()
+    try:
+        for _ in range(4):
+            _insert_row(s._uid, frequency=432, mood="anxious", tod="morning")
+        _ = s.get(f"{API}/me/patterns", timeout=15).json()
+
+        # Rewind the cache to 1 hour in the past.
+        _db.users.update_one(
+            {"id": s._uid},
+            {"$set": {
+                "patterns_cache.expires_at": datetime.now(timezone.utc) - timedelta(hours=1),
+                "patterns_cache.patterns": [],  # sentinel — recompute should overwrite
+            }},
+        )
+
+        r = s.get(f"{API}/me/patterns", timeout=15).json()
+        assert len(r["patterns"]) >= 1, "expired cache should have been recomputed"
+
+        pc = _db.users.find_one({"id": s._uid}, {"patterns_cache": 1})["patterns_cache"]
+        # Mongo returns tz-naive datetimes — compare against a naive `now`.
+        assert pc["expires_at"] > datetime.utcnow()
+    finally:
+        _cleanup(s._uid)

@@ -2816,6 +2816,10 @@ async def journey_log(body: JourneyLogIn, user: dict = Depends(get_current_user)
     except Exception as exc:  # noqa: BLE001 — defensive housekeeping
         logger.warning("[journey_log] prune failed: %s", exc)
     doc.pop("_id", None)
+    # Invalidate the patterns cache — a new row can materially change
+    # detected patterns (unlocking a top_frequency, shifting a mood_at_time,
+    # etc.). Cheap $unset on the user doc.
+    await _invalidate_patterns_cache(user["id"])
     return {"ok": True, "entry": doc}
 
 
@@ -2856,6 +2860,9 @@ async def journey_reflection(
         {"id": entry_id, "user_id": user["id"]},
         {"$set": {"reflection": reflection}},
     )
+    # A new reflection can affect USER_PREFERENCE_HINT + patterns downstream;
+    # kill the cache so the next /me/patterns read recomputes fresh.
+    await _invalidate_patterns_cache(user["id"])
     return {"ok": True, "reflection": reflection}
 
 
@@ -3119,7 +3126,7 @@ async def _user_patterns_prompt_block(user_id: str) -> str:
     try:
         user = await db.users.find_one({"id": user_id}, {"dismissed_patterns": 1})
         dismissed = set((user or {}).get("dismissed_patterns") or [])
-        patterns = await _detect_wellness_patterns(user_id)
+        patterns = await _cached_detect_wellness_patterns(user_id)
     except Exception as exc:
         logger.warning("[patterns] prompt build failed: %s", exc)
         return ""
@@ -3139,11 +3146,73 @@ async def _user_patterns_prompt_block(user_id: str) -> str:
     return "\n".join(lines)
 
 
+# --- Pattern cache (Phase 7.1) ------------------------------------------------
+# The pattern detector is cheap (bounded at 30 rows) but /me/patterns is on
+# the Dashboard mount critical path, and the greeting chip has to feel
+# instant on slow mobile networks. We cache the computed patterns on the
+# user doc with a 15-minute TTL, invalidated on every journey_log /
+# journey_reflection write. Dismissals are read separately so they don't
+# touch the cache.
+PATTERNS_CACHE_TTL_SECONDS = 15 * 60
+
+
+async def _cached_detect_wellness_patterns(user_id: str) -> list[dict]:
+    """Return the user's detected patterns, using a 15-min cache on the
+    user doc when fresh. Falls through to a full recompute + cache-write
+    on miss. Any exception during the cache read or write path is
+    swallowed and we return the freshly-computed patterns — cache is a
+    perf optimisation, never a correctness dependency."""
+    now = datetime.now(timezone.utc)
+    try:
+        doc = await db.users.find_one({"id": user_id}, {"patterns_cache": 1}) or {}
+        cached = doc.get("patterns_cache") or None
+        if cached and isinstance(cached, dict):
+            expires_at = cached.get("expires_at")
+            if isinstance(expires_at, datetime):
+                # BSON datetimes come back tz-naive; treat them as UTC so
+                # the comparison against a tz-aware `now` doesn't raise.
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if expires_at > now:
+                    patterns = cached.get("patterns")
+                    if isinstance(patterns, list):
+                        return patterns
+    except Exception as exc:  # noqa: BLE001 — cache read never blocks
+        logger.warning("[patterns_cache] read failed for %s: %s", user_id, exc)
+
+    patterns = await _detect_wellness_patterns(user_id)
+    try:
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"patterns_cache": {
+                "patterns": patterns,
+                "computed_at": now,
+                "expires_at": now + timedelta(seconds=PATTERNS_CACHE_TTL_SECONDS),
+            }}},
+        )
+    except Exception as exc:  # noqa: BLE001 — cache write never blocks
+        logger.warning("[patterns_cache] write failed for %s: %s", user_id, exc)
+    return patterns
+
+
+async def _invalidate_patterns_cache(user_id: str) -> None:
+    """Drop the patterns cache for a user. Called from any endpoint that
+    materially changes journey rows (log write, reflection attach) so the
+    next /me/patterns read recomputes fresh."""
+    try:
+        await db.users.update_one(
+            {"id": user_id}, {"$unset": {"patterns_cache": ""}}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[patterns_cache] invalidate failed for %s: %s", user_id, exc)
+
+
 @api.get("/me/patterns")
 async def patterns_list(user: dict = Depends(get_current_user)):
     """Return the user's currently-detected patterns, plus their dismissal
-    list. The client sorts / picks which chip to show."""
-    patterns = await _detect_wellness_patterns(user["id"])
+    list. The client sorts / picks which chip to show. Uses the 15-min
+    patterns_cache to keep the greeting chip snappy on mobile."""
+    patterns = await _cached_detect_wellness_patterns(user["id"])
     doc = await db.users.find_one({"id": user["id"]}, {"dismissed_patterns": 1})
     dismissed = list((doc or {}).get("dismissed_patterns") or [])
     return {"patterns": patterns, "dismissed": dismissed}
