@@ -20,6 +20,7 @@ import haptic from '@/lib/hapticEngine';
 export default function AIAgentSheet({
   open,
   greeting,
+  initialSuggestion,
   isPro,
   onClose,
   onOpenAccount,

@@ -24,7 +24,12 @@ export default function HarmonicBlueprintCard({ isPro = false, hasProfile = fals
       data-testid="harmonic-blueprint-card"
       type="button"
       onClick={handleClick}
-      className="glass p-5 relative text-left w-full transition-transform duration-200 hover:-translate-y-0.5 hover:shadow-[0_8px_32px_rgba(114,194,172,0.15)]"
+      /* touch-manipulation kills iOS's ~300ms double-tap-zoom wait so the
+         first tap opens the sheet immediately. active: gives the tap a
+         visible landing state on mobile even when the hover: translate
+         doesn't fire on touch devices. */
+      style={{ WebkitTapHighlightColor: 'transparent' }}
+      className="glass p-5 relative text-left w-full touch-manipulation transition-transform duration-200 hover:-translate-y-0.5 active:scale-[0.985] active:opacity-95 hover:shadow-[0_8px_32px_rgba(114,194,172,0.15)]"
     >
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-2">

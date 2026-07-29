@@ -23,7 +23,6 @@ import SoundBathPanel from '@/components/SoundBathPanel';
 import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
 import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
-import PatternGreetingChip from '@/components/PatternGreetingChip';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -107,6 +106,37 @@ function formatTime(secs) {
   const s = Math.floor(secs % 60).toString().padStart(2, '0');
   return `${m}:${s}`;
 }
+
+/**
+ * Map a pattern's `cta` object to the suggestion shape the AIAgentSheet
+ * knows how to render as a Start-there card in its first assistant message.
+ * Returns null for CTAs we can't yet render (arm_preset — until the preset
+ * dispatch API is exposed at Dashboard level).
+ */
+function _patternCtaToSuggestion(cta) {
+  if (!cta || typeof cta !== 'object') return null;
+  if (cta.action === 'arm_frequency' && Number.isFinite(cta.frequency) && cta.frequency > 0) {
+    return {
+      kind: 'preset',
+      label: `${Math.round(cta.frequency)} Hz — start where you left off`,
+      frequency: Math.round(cta.frequency),
+      waveform: 'sine',
+      duration_min: 15,
+      pro_only: false,
+    };
+  }
+  if (cta.action === 'arm_soundscape' && cta.soundscape) {
+    return {
+      kind: 'soundscape',
+      label: `${String(cta.soundscape).charAt(0).toUpperCase()}${String(cta.soundscape).slice(1)} — a soft layer you haven't tried`,
+      soundscape: cta.soundscape,
+      pro_only: false,
+    };
+  }
+  return null;
+}
+
+
 
 export default function Dashboard({ onOpenAccount }) {
   const { user, logout } = useAuth();
@@ -472,39 +502,91 @@ export default function Dashboard({ onOpenAccount }) {
   // Manual open via the "Wellness Assistant" header button uses a neutral
   // "How can I help you?" greeting instead.
   //
-  // The auto-greet fires once per BROWSER SESSION — not per mount. Using
-  // sessionStorage means:
-  //   • refreshing the page → no re-greet (flag persists across reloads)
-  //   • navigating to Account / Harmonic Blueprint and back → no re-greet
-  //     (Dashboard remounts but sessionStorage survives)
-  //   • closing the tab and returning fresh → greet again (flag cleared)
-  // Additional guard: never auto-open when audio is already playing, so
-  // returning to Dashboard mid-session stays silent. A short stagger delay
-  // lets the mount animation settle before the sheet slides in.
-  const AUTO_GREETED_KEY = 'solar:hasGreetedThisSession';
+  // Auto-greet — one soft "hello" per calendar day per user. Combines what
+  // used to be two surfaces:
+  //   1. the tiny top-of-page PatternGreetingChip (removed — was clipped by
+  //      mobile Safari's URL bar and truncated its own message)
+  //   2. the generic "How are you feeling right now?" greeting.
+  //
+  // When a live pattern exists, the pattern's warm callback becomes the
+  // greeting text and its CTA (if any) surfaces as a Start-there suggestion
+  // inside the sheet. When no pattern is present we fall back to the
+  // generic greeting. Skipped entirely while audio is playing.
+  //
+  // localStorage key `solar:lastGreetedYmd:<userId>` records the last date
+  // (YYYY-MM-DD) we greeted this user on THIS browser. Same day → skip.
+  // Different day OR no entry → greet + record. Manual open via the header
+  // button always uses the neutral "How can I help you?" greeting.
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentGreeting, setAgentGreeting] = useState('');
+  const [agentInitialSuggestion, setAgentInitialSuggestion] = useState(null);
   useEffect(() => {
     if (!user) return;
-    let alreadyGreeted = false;
-    try { alreadyGreeted = sessionStorage.getItem(AUTO_GREETED_KEY) === '1'; } catch (_) { /* graceful */ }
-    if (alreadyGreeted) return;
-    if (state.playing) return;   // don't intercept an active session
+    if (state.playing) return;
+    const key = `solar:lastGreetedYmd:${user.id || user.email || 'anon'}`;
+    const today = new Date().toISOString().slice(0, 10);
+    let lastYmd = null;
+    try { lastYmd = localStorage.getItem(key); } catch (_) { /* graceful */ }
+    if (lastYmd === today) return;
     const name = (user.name || '').trim();
-    const t = setTimeout(() => {
-      // Re-check playing state at fire time in case audio started during
-      // the stagger delay (auto-resume from PWA, etc.).
-      if (audioEngine.playing) return;
-      try { sessionStorage.setItem(AUTO_GREETED_KEY, '1'); } catch (_) { /* graceful */ }
-      setAgentGreeting(
-        name ? `Hello ${name}, how are you feeling right now?` : 'Hello, how are you feeling right now?'
-      );
+    // Fetch patterns first — pick the top undismissed one to shape the
+    // greeting. Failure falls through to the generic version. Fire-and-
+    // forget within a 900ms cap so mobile users never wait on an idle
+    // network before the sheet appears.
+    let cancelled = false;
+    const stagger = setTimeout(async () => {
+      if (audioEngine.playing) return;   // re-check at fire time
+      let patternMsg = null;
+      let patternCta = null;
+      let patternKey = null;
+      try {
+        const pRes = await Promise.race([
+          api.get('/me/patterns'),
+          new Promise((resolve) => setTimeout(() => resolve(null), 900)),
+        ]);
+        if (pRes && pRes.data) {
+          const dismissed = new Set(pRes.data.dismissed || []);
+          const PRIORITY = { mood_at_time: 5, extension_favorite: 4, top_frequency: 3, preferred_time_of_day: 2, unused_soundscapes: 1 };
+          const top = (pRes.data.patterns || [])
+            .filter((p) => !dismissed.has(p.key))
+            .sort((a, b) => (PRIORITY[b.kind] || 0) - (PRIORITY[a.kind] || 0))[0];
+          if (top) {
+            patternMsg = top.message;
+            patternCta = top.cta || null;
+            patternKey = top.key;
+          }
+        }
+      } catch (_) { /* graceful — fall back to generic greeting */ }
+      if (cancelled) return;
+      try { localStorage.setItem(key, today); } catch (_) { /* graceful */ }
+      // Compose the greeting. Pattern callbacks always start with the
+      // user's name so it feels personal, not systemic.
+      if (patternMsg) {
+        setAgentGreeting(name ? `Hi ${name} — ${patternMsg}` : patternMsg);
+      } else {
+        setAgentGreeting(name ? `Hi ${name}, how are you feeling right now?` : 'Hi, how are you feeling right now?');
+      }
+      // If the pattern carried a CTA that maps to something the sheet knows
+      // how to render (preset / soundscape / frequency), attach it as a
+      // one-tap suggestion inside the first assistant message.
+      if (patternCta) {
+        const s = _patternCtaToSuggestion(patternCta);
+        setAgentInitialSuggestion(s);
+      } else {
+        setAgentInitialSuggestion(null);
+      }
+      // If we surfaced a pattern, mark it dismissed server-side so it doesn't
+      // reappear in another surface tomorrow — the greeting IS the surface.
+      if (patternKey) {
+        api.post(`/me/patterns/${encodeURIComponent(patternKey)}/dismiss`).catch(() => {});
+      }
       setAgentOpen(true);
     }, 1200);
-    return () => clearTimeout(t);
+    return () => { cancelled = true; clearTimeout(stagger); };
   }, [user, state.playing]);
   const openCompanion = useCallback(() => {
     setAgentGreeting('How can I help you?');
+    setAgentInitialSuggestion(null);
     setAgentOpen(true);
   }, []);
 
@@ -848,33 +930,12 @@ export default function Dashboard({ onOpenAccount }) {
     audioEngine.setGoldenStack(!state.goldenStack);
   };
 
-  // Handle a pattern chip CTA (Phase 7). Maps the pattern's cta object to
-  // the same underlying calls the manual UI uses so behaviour is identical:
-  //   arm_frequency   → set frequency and (optionally) start playback
-  //   arm_soundscape  → set the ambient channel to a comfortable default
-  //   arm_preset      → best-effort dispatch of a preset key (matched by
-  //                     preset_label back to a Sound Bath / preset if the
-  //                     app exposes one; falls back to a no-op if no map).
-  // Never auto-starts audio for the soundscape variant — some users want to
-  // add the layer to whatever is playing.
-  const applyPatternCta = React.useCallback(async (cta) => {
-    if (!cta || typeof cta !== 'object') return;
-    if (cta.action === 'arm_frequency' && Number.isFinite(cta.frequency) && cta.frequency > 0) {
-      audioEngine.setFrequency(cta.frequency);
-      setActiveSoundscape(null);
-      if (!audioEngine.playing) {
-        setRemaining(duration * 60);
-        audioEngine.start();
-      }
-    } else if (cta.action === 'arm_soundscape' && cta.soundscape) {
-      // Nudge a gentle default level — matches the manual Ambient sliders'
-      // typical opening tap. User can crank it up from there.
-      audioEngine.setAmbient(cta.soundscape, 0.4);
-    }
-    // arm_preset: no-op for now — the Sound Bath dispatch API isn't exposed
-    // at Dashboard level. Chip still dismisses itself via the parent, so
-    // future work can hook this up without a UX regression.
-  }, [duration]);
+  // (Pattern-CTA arming used to live here for the removed
+  // PatternGreetingChip. The pattern-driven greeting now surfaces
+  // inside the AIAgentSheet where suggestions are applied via
+  // applySuggestion — so this Dashboard-level handler is no longer
+  // needed. If a future surface reintroduces the CTA elsewhere, mirror
+  // the same logic used by AIAgentSheet.applySuggestion.)
 
   const startSleepMode = () => {
     if (!isPro) { onOpenAccount(); return; }
@@ -1194,11 +1255,6 @@ export default function Dashboard({ onOpenAccount }) {
           </button>
         </div>
       )}
-
-      {/* Behavioural pattern greeting — surfaces once the user has ≥ 3
-          rows worth of history and a recurring behaviour is detected.
-          Cold-start users see nothing. Session-scoped hide on X. */}
-      <PatternGreetingChip onArm={applyPatternCta} />
 
       <div className="relative z-10 min-h-screen lg:h-screen w-full flex flex-col lg:flex-row p-4 lg:p-6 gap-4 lg:gap-6">
 
@@ -2146,6 +2202,7 @@ export default function Dashboard({ onOpenAccount }) {
       <AIAgentSheet
         open={agentOpen}
         greeting={agentGreeting}
+        initialSuggestion={agentInitialSuggestion}
         isPro={isPro}
         onClose={() => setAgentOpen(false)}
         onOpenAccount={onOpenAccount}
