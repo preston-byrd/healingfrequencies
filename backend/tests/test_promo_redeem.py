@@ -119,6 +119,35 @@ def test_double_redemption_blocked(fresh_user):
     assert "already redeemed" in r2.json().get("detail", "").lower()
 
 
+def test_concurrent_redemption_only_one_succeeds(fresh_user):
+    """Post-audit: two SIMULTANEOUS redeem calls should yield exactly one
+    200 and one 400 — never two 200s. The atomic `$ne` guard in
+    `promo_redeem` prevents the old check-then-act race from stacking
+    extra Pro days on the user."""
+    import concurrent.futures as _cf
+    s, _, _ = fresh_user
+
+    def _fire():
+        return s.post(f"{BASE_URL}/api/promo/redeem", json={"code": "WELCOME30"})
+
+    # Fire 5 in parallel to give the race the best possible chance of
+    # slipping through.
+    with _cf.ThreadPoolExecutor(max_workers=5) as ex:
+        results = list(ex.map(lambda _: _fire(), range(5)))
+
+    codes = [r.status_code for r in results]
+    successes = [c for c in codes if c == 200]
+    rejects = [c for c in codes if c == 400]
+    assert len(successes) == 1, f"expected exactly 1 success across concurrent taps, got {codes}"
+    # Every other call must have been rejected as double-redeem.
+    assert len(rejects) == 4, f"expected 4 rejections, got {codes}"
+
+    # Sanity: user's Pro-until should reflect ONE 30-day grant, not two.
+    r_sub = s.get(f"{BASE_URL}/api/me/subscription")
+    assert r_sub.status_code == 200
+    assert 28 <= r_sub.json()["days_left"] <= 31
+
+
 def test_free_session_cap_lifted_after_redemption(fresh_user):
     s, _, _ = fresh_user
     # First save 3 as free — 4th should 402

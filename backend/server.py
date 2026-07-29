@@ -2048,7 +2048,7 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
         raise
     except Exception as exc:
         logger.exception("AI recommend failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"AI recommendation failed: {exc}")
+        raise HTTPException(status_code=502, detail="AI recommendation temporarily unavailable. Please try again in a moment.")
 
 
 # --- Conversational AI Agent (check-in companion) ---------------------------
@@ -2452,7 +2452,7 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
         raise
     except Exception as exc:
         logger.exception("agent_chat failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Agent chat failed: {exc}")
+        raise HTTPException(status_code=502, detail="Wellness Assistant is temporarily unavailable. Please try again in a moment.")
 
 
 @api.post("/me/agent/checkin")
@@ -3395,9 +3395,12 @@ async def create_checkout(body: CheckoutIn, request: Request, user: dict = Depen
         raise
     except Exception as e:
         logger.exception("[checkout rid=%s] unexpected error for user=%s plan=%s", rid, user.get("email"), getattr(body, "plan", "?"))
+        # Generic message for the client; full detail is in server logs.
+        # Reference id lets support look up the exact trace without
+        # leaking internal exception shapes.
         raise HTTPException(
             status_code=502,
-            detail=f"Checkout failed unexpectedly (rid={rid}): {type(e).__name__}: {str(e)[:200]}",
+            detail=f"Checkout failed. Please try again in a moment (ref {rid}).",
         )
 
 
@@ -3405,7 +3408,9 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
     if body.plan not in ("monthly", "annual"):
         raise HTTPException(status_code=400, detail="Invalid plan")
     if not STRIPE_API_KEY:
-        raise HTTPException(status_code=500, detail="Payments not configured — STRIPE_API_KEY is missing in backend .env")
+        # Log the operator diagnostic; give the client a generic message.
+        logger.error("[checkout] STRIPE_API_KEY missing in backend .env")
+        raise HTTPException(status_code=503, detail="Payments are temporarily unavailable.")
 
     cfg = await _get_plan_config()
     pkg = cfg[body.plan]
@@ -3543,9 +3548,12 @@ async def _create_checkout_impl(body: CheckoutIn, request: Request, user: dict, 
         raise
     except Exception as e:
         logger.exception("[checkout] Stripe call failed for user=%s plan=%s", user.get("email"), body.plan)
+        # Do NOT echo the Stripe error text or config hints to the client —
+        # both leak information (API key status, enabled currencies, etc.).
+        # Operator guidance stays in the log line above.
         raise HTTPException(
             status_code=502,
-            detail=f"Stripe checkout failed: {str(e)}. Verify STRIPE_API_KEY is valid and recurring USD payments are enabled in your Stripe Dashboard.",
+            detail="Checkout is temporarily unavailable. Please try again in a moment.",
         )
 
     if not getattr(session, "url", None):
@@ -4396,12 +4404,10 @@ async def promo_redeem(body: PromoRedeemIn, user: dict = Depends(get_current_use
         raise HTTPException(status_code=400, detail="Discount codes are applied at checkout, not redeemed here.")
 
     # Guard against double-redemption per user (comp only — referral can be
-    # re-tagged if the user restarted their signup flow).
-    if doc["type"] == "comp":
-        already = any(entry.get("user_id") == user["id"] for entry in doc.get("redemption_log", []))
-        if already:
-            raise HTTPException(status_code=400, detail="You've already redeemed this code.")
-
+    # re-tagged if the user restarted their signup flow). We use an ATOMIC
+    # conditional update so two concurrent taps can't both pass the check
+    # and stack the entitlement. The update only succeeds when the
+    # redemption_log does NOT already contain this user_id.
     log_entry = {
         "user_id": user["id"],
         "user_email": user.get("email"),
@@ -4409,8 +4415,22 @@ async def promo_redeem(body: PromoRedeemIn, user: dict = Depends(get_current_use
         "plan": "comp_pro" if doc["type"] == "comp" else "referral_signup",
         "redeemed_at": datetime.now(timezone.utc).isoformat(),
     }
-    updates = {"$inc": {"redemptions": 1}, "$push": {"redemption_log": log_entry}}
-    await db.promo_codes.update_one({"code": code}, updates)
+    if doc["type"] == "comp":
+        result = await db.promo_codes.update_one(
+            {"code": code, "redemption_log.user_id": {"$ne": user["id"]}},
+            {"$inc": {"redemptions": 1}, "$push": {"redemption_log": log_entry}},
+        )
+        if result.modified_count == 0:
+            # Either the code no longer exists (unlikely — we just read it)
+            # or the user is already in redemption_log. Either way, refuse.
+            raise HTTPException(status_code=400, detail="You've already redeemed this code.")
+    else:
+        # Referral code — atomic append is fine (idempotent-ish; log entry
+        # duplication is OK because we don't grant entitlement here).
+        await db.promo_codes.update_one(
+            {"code": code},
+            {"$inc": {"redemptions": 1}, "$push": {"redemption_log": log_entry}},
+        )
 
     if doc["type"] == "comp":
         # Grant Pro for duration_days. Writes to the canonical `pro_until`

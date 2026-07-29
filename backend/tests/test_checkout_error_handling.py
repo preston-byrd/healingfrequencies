@@ -4,8 +4,12 @@ Covers the new behavior in /api/me/checkout:
   - Happy path with sk_test_emergent still returns 200 with `url` + `session_id`
   - Invalid plan -> 400
   - Missing auth -> 401
-  - Bad Stripe key -> 502 with detail starting with "Stripe checkout failed:"
-  - Missing STRIPE_API_KEY -> 500 with "Payments not configured" message
+  - Bad Stripe key -> 502 with a GENERIC message (no raw Stripe details leaked)
+  - Missing STRIPE_API_KEY -> 503 with a GENERIC message (no config hint leaked)
+
+Both error-detail assertions were updated in Feb 2026 to match the security
+audit fix that removed raw Stripe error text and STRIPE_API_KEY hints from
+client-facing responses — full context still lives in server logs.
 """
 import os
 import sys
@@ -132,11 +136,16 @@ def test_checkout_bad_stripe_key_returns_502(monkeypatch):
     status, body = _run_async(_go)
     assert status == 502, f"expected 502, got {status}: {body}"
     detail = body.get("detail", "")
-    assert detail.startswith("Stripe checkout failed:"), (
-        f"detail should start with 'Stripe checkout failed:', got {detail!r}")
+    # Post-audit: response must be a generic "temporarily unavailable" style
+    # message. Explicitly assert we did NOT leak Stripe internals to the client.
+    assert "temporarily unavailable" in detail.lower(), (
+        f"detail should be a generic 'temporarily unavailable' message, got {detail!r}")
+    assert "sk_" not in detail
+    assert "stripe_" not in detail.lower() or "stripe" in detail.lower() and "temporarily" in detail.lower()
+    assert "invalid_key" not in detail.lower()
 
 
-def test_checkout_missing_stripe_key_returns_500(monkeypatch):
+def test_checkout_missing_stripe_key_returns_503(monkeypatch):
     monkeypatch.setattr(server_mod, "STRIPE_API_KEY", "")
 
     async def _go():
@@ -148,10 +157,14 @@ def test_checkout_missing_stripe_key_returns_500(monkeypatch):
                              json={"plan": "monthly", "origin_url": "https://x.test"})
             return r.status_code, r.json()
     status, body = _run_async(_go)
-    assert status == 500, f"expected 500, got {status}: {body}"
+    # Post-audit: 503 (temporarily unavailable) instead of 500, and the
+    # detail must NOT mention STRIPE_API_KEY / .env / any config hint.
+    assert status == 503, f"expected 503, got {status}: {body}"
     detail = body.get("detail", "")
-    assert "Payments not configured" in detail
-    assert "STRIPE_API_KEY" in detail
+    assert "temporarily unavailable" in detail.lower(), (
+        f"detail should be a generic 'temporarily unavailable' message, got {detail!r}")
+    assert "STRIPE_API_KEY" not in detail
+    assert ".env" not in detail
 
 
 if __name__ == "__main__":
