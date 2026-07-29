@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Sparkles, Send, X, Lock, Play, HeartPulse } from 'lucide-react';
+import { Sparkles, Send, X, Lock, Play, HeartPulse, Settings } from 'lucide-react';
 import api from '@/lib/api';
 import audioEngine from '@/lib/audioEngine';
 import haptic from '@/lib/hapticEngine';
@@ -29,6 +29,11 @@ export default function AIAgentSheet({
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
+  // Phase 8 — assistant settings (Harmonic Blueprint influence on/off).
+  // Loaded once on sheet open; changes are optimistic + persisted server-side.
+  const [settings, setSettings] = useState({ harmonic_influence_enabled: true });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const scrollRef = useRef(null);
   const sessionIdRef = useRef(`agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
 
@@ -48,8 +53,32 @@ export default function AIAgentSheet({
     setMessages([{ id: mkId(), role: 'assistant', text: greeting || 'How can I help you?', suggestions: [] }]);
     setInput('');
     setErr('');
+    setSettingsOpen(false);
     sessionIdRef.current = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Fetch current assistant settings — cheap idempotent call. Ignored
+    // failures leave the local optimistic default (HB on) in place.
+    (async () => {
+      try {
+        const { data } = await api.get('/me/settings');
+        if (data && typeof data === 'object') setSettings(data);
+      } catch (_) { /* graceful */ }
+    })();
   }, [open, greeting]);
+
+  const toggleHarmonicInfluence = async () => {
+    const next = !settings.harmonic_influence_enabled;
+    setSettings((prev) => ({ ...prev, harmonic_influence_enabled: next }));
+    setSettingsSaving(true);
+    try {
+      const { data } = await api.post('/me/settings', { harmonic_influence_enabled: next });
+      if (data && typeof data === 'object') setSettings(data);
+    } catch (_) {
+      // Revert on failure so the toggle reflects real server state.
+      setSettings((prev) => ({ ...prev, harmonic_influence_enabled: !next }));
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
 
   // Autoscroll to the latest message.
   useEffect(() => {
@@ -215,15 +244,66 @@ export default function AIAgentSheet({
             <Sparkles size={14} className="text-[#C4A67A]" />
             <div className="label-tiny text-[#C4A67A]">Wellness Assistant</div>
           </div>
-          <button
-            data-testid="ai-agent-close"
-            onClick={close}
-            className="text-[#8A9A92] hover:text-[#E8E3D9] p-1"
-            aria-label="Close"
-          >
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              data-testid="ai-agent-settings-toggle"
+              onClick={() => setSettingsOpen((v) => !v)}
+              aria-label={settingsOpen ? 'Close settings' : 'Open settings'}
+              aria-expanded={settingsOpen}
+              className={`p-1.5 rounded-md transition-colors ${
+                settingsOpen ? 'text-[#C4A67A] bg-[#C4A67A]/12' : 'text-[#8A9A92] hover:text-[#E8E3D9]'
+              }`}
+            >
+              <Settings size={15} />
+            </button>
+            <button
+              data-testid="ai-agent-close"
+              onClick={close}
+              className="text-[#8A9A92] hover:text-[#E8E3D9] p-1"
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          </div>
         </div>
+
+        {/* Collapsible settings panel */}
+        {settingsOpen && (
+          <div
+            className="border-b border-[#5C9E8C]/15 px-5 py-3 bg-black/25"
+            data-testid="ai-agent-settings-panel"
+          >
+            <label className="flex items-start justify-between gap-4 cursor-pointer group">
+              <div className="min-w-0">
+                <div className="text-[13px] text-[#E8E3D9] font-medium">Harmonic Blueprint influence</div>
+                <div className="text-[11px] text-[#8A9A92] leading-relaxed mt-0.5">
+                  Weight suggestions by your saved resonance profile. Turn off for
+                  neutral suggestions.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!settings.harmonic_influence_enabled}
+                onClick={toggleHarmonicInfluence}
+                disabled={settingsSaving}
+                data-testid="ai-agent-toggle-harmonic-influence"
+                className={`shrink-0 relative inline-flex h-5 w-9 rounded-full border transition-colors ${
+                  settings.harmonic_influence_enabled
+                    ? 'bg-[#5C9E8C]/50 border-[#72C2AC]'
+                    : 'bg-black/40 border-[#5C9E8C]/25'
+                } ${settingsSaving ? 'opacity-60' : ''}`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`inline-block h-3.5 w-3.5 my-[2px] rounded-full bg-[#E8E3D9] shadow transform transition-transform ${
+                    settings.harmonic_influence_enabled ? 'translate-x-[18px]' : 'translate-x-[2px]'
+                  }`}
+                />
+              </button>
+            </label>
+          </div>
+        )}
 
         {/* Messages */}
         <div
@@ -276,6 +356,14 @@ export default function AIAgentSheet({
                             </>
                           )}
                         </div>
+                        {s.harmonic_note && (
+                          <div
+                            className="mt-1 text-[11px] leading-snug italic text-[#98C1B0]"
+                            data-testid="agent-suggestion-harmonic-note"
+                          >
+                            {s.harmonic_note}
+                          </div>
+                        )}
                       </div>
                       {s.pro_only && !isPro && (
                         <span className="flex items-center gap-1 text-[10px] text-[#C4A67A] font-mono">

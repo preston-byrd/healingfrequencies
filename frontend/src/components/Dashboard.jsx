@@ -471,19 +471,38 @@ export default function Dashboard({ onOpenAccount }) {
   //
   // Manual open via the "Wellness Assistant" header button uses a neutral
   // "How can I help you?" greeting instead.
+  //
+  // The auto-greet fires once per BROWSER SESSION — not per mount. Using
+  // sessionStorage means:
+  //   • refreshing the page → no re-greet (flag persists across reloads)
+  //   • navigating to Account / Harmonic Blueprint and back → no re-greet
+  //     (Dashboard remounts but sessionStorage survives)
+  //   • closing the tab and returning fresh → greet again (flag cleared)
+  // Additional guard: never auto-open when audio is already playing, so
+  // returning to Dashboard mid-session stays silent. A short stagger delay
+  // lets the mount animation settle before the sheet slides in.
+  const AUTO_GREETED_KEY = 'solar:hasGreetedThisSession';
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentGreeting, setAgentGreeting] = useState('');
-  const greetedRef = React.useRef(false);
   useEffect(() => {
     if (!user) return;
-    if (greetedRef.current) return;
-    greetedRef.current = true;
+    let alreadyGreeted = false;
+    try { alreadyGreeted = sessionStorage.getItem(AUTO_GREETED_KEY) === '1'; } catch (_) { /* graceful */ }
+    if (alreadyGreeted) return;
+    if (state.playing) return;   // don't intercept an active session
     const name = (user.name || '').trim();
-    setAgentGreeting(
-      name ? `Hello ${name}, how are you feeling right now?` : 'Hello, how are you feeling right now?'
-    );
-    setAgentOpen(true);
-  }, [user]);
+    const t = setTimeout(() => {
+      // Re-check playing state at fire time in case audio started during
+      // the stagger delay (auto-resume from PWA, etc.).
+      if (audioEngine.playing) return;
+      try { sessionStorage.setItem(AUTO_GREETED_KEY, '1'); } catch (_) { /* graceful */ }
+      setAgentGreeting(
+        name ? `Hello ${name}, how are you feeling right now?` : 'Hello, how are you feeling right now?'
+      );
+      setAgentOpen(true);
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [user, state.playing]);
   const openCompanion = useCallback(() => {
     setAgentGreeting('How can I help you?');
     setAgentOpen(true);
@@ -1831,6 +1850,14 @@ export default function Dashboard({ onOpenAccount }) {
                       {aiResult.isochronic > 0 ? ` · iso ${aiResult.isochronic}Hz` : ''}
                       {aiResult.golden_stack ? ' · φ' : ''}
                     </div>
+                    {aiResult.harmonic_note && (
+                      <div
+                        data-testid="ai-result-harmonic-note"
+                        className="mt-2 text-[11px] leading-snug italic text-[#98C1B0]"
+                      >
+                        {aiResult.harmonic_note}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

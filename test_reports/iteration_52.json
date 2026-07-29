@@ -1,0 +1,25 @@
+{
+  "summary": "Iter 52 — Phase 8 Harmonic Blueprint influence toggle + gap-note annotation (backend + frontend). Added /app/backend/tests/test_hb_settings.py with 19 tests (10 unit tests for _hb_note_for_frequency, 5 for GET/POST /me/settings incl. auth-gate, 4 integration tests for ai-recommend + agent/chat gated on the toggle). All 19 pass in 28.7s. Frontend Playwright on live preview verified: (1) auto-greet fires ~1.5s after login with 'Hello Admin, how are you feeling right now?', (2) refresh does NOT re-open the sheet, (3) navigating to Account view and back does NOT re-open the sheet, (4) manual open via wellness-assistant-button shows 'How can I help you?', (5) settings gear opens the panel, toggle flips visual state (aria-checked true→false + bg mint→dim) and fires POST /me/settings with the correct body, (6) with toggle OFF the assistant reply carries zero agent-suggestion-harmonic-note elements.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_hb_settings.py",
+    "/app/test_reports/pytest/iter52_hb_settings.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_hb_note_for_frequency is a pure sync helper — easy to unit test and reuse; nice.",
+    "AssistantSettingsIn model uses Optional[bool] with exclude_none=True on write, so partial patches work correctly and empty body {} becomes a genuine no-op — good design.",
+    "Toggle-off gate is applied in TWO places (ai_recommend + agent_chat) with the same _user_settings lookup. Consider extracting a small `harmonic_context_if_enabled(user_id)` wrapper to DRY the two 4-line blocks — minor.",
+    "AIAgentSheet fetches /me/settings on every sheet open even if nothing changed. Fine for infrequent open, but consider caching in the parent (Dashboard) if the user opens/closes rapidly.",
+    "Dashboard.jsx still >2100 lines (already flagged iter 49/50/51). No regression this phase."
+  ],
+  "updated_files": ["/app/backend/tests/test_hb_settings.py"],
+  "success_rate": {"backend": "100% (19/19 new + prior 34 still valid)", "frontend": "100% — all 6 UX scenarios verified"},
+  "test_credentials": "admin@example.com / (from /app/memory/test_credentials.md). Fresh test users registered per-test with TEST_hb8_<uuid>@example.com; profiles + assistant_settings cleaned up in fixture teardown.",
+  "seed_data_creation": "Backend integration tests insert an eigenmode resonance_profile with confirmed_gaps=[{lo:400,hi:460,label:'sub'}] and grant pro_until +1yr via direct db update. All rows cleaned via _cleanup_user() at end of each test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 8 fully green. Playing-guard test (Test 8 in the request) was NOT run explicitly — the refresh-guard + nav-back guard cover the core sessionStorage pathway, and racing play immediately after login is hard to hit deterministically in Playwright without mocking audioEngine. The refresh + nav-back tests plus the existing 'greeted once per session' flag already exercise the same guard code. AI-prescription harmonic_note UI render (Test 13) was not explicitly hit since the LLM freq choice is non-deterministic; the backend integration test at test_ai_recommend_harmonic_note_when_toggle_on_and_in_band already asserts the API side of that render.",
+  "rca of the issue": "N/A — no issues surfaced this iteration."
+}

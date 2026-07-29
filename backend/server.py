@@ -1614,6 +1614,84 @@ def _compute_drift(latest: dict, eigen: dict, min_delta_db: float = 4.0) -> list
     return findings[:5]
 
 
+async def _user_settings(user_id: str) -> dict:
+    """Return the user's assistant settings, filling in defaults. Kept small
+    so we can extend it (mute chip, dark mode preference, etc.) without a
+    migration. All settings default to the pre-existing behaviour so an
+    empty document is fully backward-compatible.
+    """
+    doc = await db.users.find_one(
+        {"id": user_id},
+        {"assistant_settings": 1},
+    ) or {}
+    s = (doc.get("assistant_settings") or {})
+    return {
+        "harmonic_influence_enabled": bool(s.get("harmonic_influence_enabled", True)),
+    }
+
+
+def _hb_note_for_frequency(hz: float, confirmed_gaps: list, drift: list) -> Optional[str]:
+    """Deterministic, non-LLM annotation. Returns a soft one-liner when the
+    given `hz` falls inside a confirmed resonance gap band OR a strong
+    current-drift band (≥ 3 dB deviation). Returns None otherwise.
+
+    Kept intentionally brief and non-clinical — the goal is background
+    intelligence, not a lecture.
+    """
+    if not isinstance(hz, (int, float)) or hz <= 0:
+        return None
+    hz_f = float(hz)
+    for g in (confirmed_gaps or [])[:8]:
+        try:
+            lo = float(g.get("lo"))
+            hi = float(g.get("hi"))
+        except (TypeError, ValueError):
+            continue
+        if lo <= hz_f <= hi:
+            label = g.get("label") or g.get("key") or "your resonance points"
+            return (
+                "Also aligns with your Harmonic Blueprint — targets the "
+                f"{label} range you've affirmed as personally relevant."
+            )
+    for f in (drift or [])[:6]:
+        try:
+            lo = float(f.get("lo"))
+            hi = float(f.get("hi"))
+            delta = float(f.get("delta_db", 0))
+        except (TypeError, ValueError):
+            continue
+        if abs(delta) >= 3.0 and lo <= hz_f <= hi:
+            return (
+                "Also aligns with your Harmonic Blueprint — targets a range "
+                "where your natural tuning currently shows some drift."
+            )
+    return None
+
+
+async def _hb_notes_context(user_id: str) -> tuple[list, list]:
+    """Fetch (confirmed_gaps, drift) once so a whole batch of suggestions
+    can be annotated without repeated Mongo hits. Returns ([], []) when
+    the user has no HB profile."""
+    try:
+        eigen = await _ensure_eigenmode(user_id)
+    except Exception:
+        return [], []
+    if not eigen:
+        return [], []
+    latest = await db.resonance_profiles.find_one(
+        {"user_id": user_id}, {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    confirmed = (latest or {}).get("confirmed_gaps") or []
+    drift: list = []
+    if latest and latest.get("id") != eigen.get("id"):
+        try:
+            drift = _compute_drift(latest, eigen) or []
+        except Exception:
+            drift = []
+    return confirmed, drift
+
+
 async def _harmonic_context_for_llm(user_id: str) -> str:
     """Compact LLM-friendly snapshot of the user's Harmonic Blueprint state.
     Injected into Wellness Assistant + AI Prescription prompts so every
@@ -1903,9 +1981,14 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
         parts.append(f"Preferred duration: {body.duration_min} minutes")
     # Phase 4: personalise with the user's saved Harmonic Blueprint signature.
     # Silently no-ops when the user hasn't captured one yet — no extra tokens.
-    hb_ctx = await _harmonic_context_for_llm(user["id"])
-    if hb_ctx:
-        parts.append(hb_ctx)
+    # Also gate on the user's assistant setting so opt-outs get a fully
+    # HB-free recommendation.
+    settings = await _user_settings(user["id"])
+    hb_enabled = settings.get("harmonic_influence_enabled", True)
+    if hb_enabled:
+        hb_ctx = await _harmonic_context_for_llm(user["id"])
+        if hb_ctx:
+            parts.append(hb_ctx)
     # Phase 6: preference boost from post-session reflections. When the user
     # has consistently rated a frequency positively for this mood in the past,
     # surface a soft hint the LLM can lean on. Silently no-ops on cold-start.
@@ -1948,6 +2031,18 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
             raise HTTPException(status_code=502, detail="AI returned an empty response")
         raw = _extract_json(text)
         reco = _validate_reco(raw)
+        # Phase 8: attach a soft "aligns with your Harmonic Blueprint" note
+        # when the returned frequency falls inside a confirmed resonance
+        # gap OR a strong current-drift band. Skipped entirely when the
+        # user has toggled HB influence off — settings resolved above.
+        if hb_enabled:
+            try:
+                gaps, drift = await _hb_notes_context(user["id"])
+                note = _hb_note_for_frequency(reco.get("frequency"), gaps, drift)
+                if note:
+                    reco["harmonic_note"] = note
+            except Exception as exc:
+                logger.warning("[ai_recommend] hb_note annotation failed: %s", exc)
         return reco
     except HTTPException:
         raise
@@ -2253,12 +2348,17 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     # Phase 4: inject the user's Harmonic Blueprint signature (eigenmode +
     # confirmed resonance points + current drift). Silently no-ops when the
     # user hasn't captured one yet, so free / new users aren't affected.
-    try:
-        hb_ctx = await _harmonic_context_for_llm(user["id"])
-        if hb_ctx:
-            parts.append(hb_ctx)
-    except Exception as exc:
-        logger.warning("[agent_chat] harmonic_context lookup failed: %s", exc)
+    # Phase 8: gated by the user's assistant setting so opt-outs get a
+    # fully HB-free experience.
+    hb_settings = await _user_settings(user["id"])
+    hb_enabled = hb_settings.get("harmonic_influence_enabled", True)
+    if hb_enabled:
+        try:
+            hb_ctx = await _harmonic_context_for_llm(user["id"])
+            if hb_ctx:
+                parts.append(hb_ctx)
+        except Exception as exc:
+            logger.warning("[agent_chat] harmonic_context lookup failed: %s", exc)
 
     # Longitudinal wellness memory — recent completed sessions (last 8 of 30).
     # Lets the assistant say "Last time you felt anxious, 432 Hz Earth helped
@@ -2332,6 +2432,21 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
             raise HTTPException(status_code=502, detail="AI returned empty response")
         raw = _extract_json(text)
         reply = _validate_agent_reply(raw, is_pro)
+        # Phase 8: annotate each suggestion carrying a `frequency` with a
+        # soft HB alignment note when applicable. Skipped when the user
+        # has toggled HB influence off.
+        if hb_enabled and reply.get("suggestions"):
+            try:
+                gaps, drift = await _hb_notes_context(user["id"])
+                if gaps or drift:
+                    for s in reply["suggestions"]:
+                        f = s.get("frequency")
+                        if isinstance(f, (int, float)) and f > 0:
+                            note = _hb_note_for_frequency(f, gaps, drift)
+                            if note:
+                                s["harmonic_note"] = note
+            except Exception as exc:
+                logger.warning("[agent_chat] hb_note annotation failed: %s", exc)
         return reply
     except HTTPException:
         raise
@@ -3056,6 +3171,35 @@ async def patterns_clear(user: dict = Depends(get_current_user)):
         {"$set": {"dismissed_patterns": []}},
     )
     return {"ok": True}
+
+
+# --- Assistant settings (Phase 8) ---------------------------------------------
+class AssistantSettingsIn(BaseModel):
+    """Editable Wellness Assistant preferences. Kept minimal — extend here
+    as new toggles arrive. `None` on a field means "no change" so the
+    frontend can PATCH-style update a single toggle without echoing state
+    it doesn't own."""
+    harmonic_influence_enabled: Optional[bool] = None
+
+
+@api.get("/me/settings")
+async def get_settings(user: dict = Depends(get_current_user)):
+    """Return the user's Wellness Assistant settings, filled with defaults."""
+    return await _user_settings(user["id"])
+
+
+@api.post("/me/settings")
+async def update_settings(
+    body: AssistantSettingsIn,
+    user: dict = Depends(get_current_user),
+):
+    """Update one or more settings fields. Only fields the caller sent
+    are written — omitted fields leave prior values intact."""
+    payload = body.model_dump(exclude_none=True)
+    if payload:
+        update = {f"assistant_settings.{k}": v for k, v in payload.items()}
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+    return await _user_settings(user["id"])
 
 
 # ---------- Stripe helper ----------
