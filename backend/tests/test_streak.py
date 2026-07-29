@@ -102,3 +102,43 @@ def test_session_crud(fresh_user):
     d = requests.delete(f"{API}/sessions/{sid}", headers=fresh_user["headers"])
     assert d.status_code == 200
     assert d.json().get("ok") is True
+
+
+
+# --- Concurrent first-ever check-in must not 500 (Feb 2026 code review fix) ---
+def test_concurrent_first_checkin_no_500():
+    """Two simultaneous check-in requests from a brand-new user (no
+    prior `streaks` document) previously raced on the unique
+    `streaks.user_id` index — the loser hit DuplicateKeyError and
+    returned HTTP 500. The fix catches DuplicateKeyError and falls
+    through to the existing-doc update branch so both callers get a
+    valid check-in response.
+    """
+    import concurrent.futures as _cf
+    # Register a fresh user with no prior streak
+    email = f"TEST_streak_race_{uuid.uuid4().hex[:10]}@example.com"
+    r = requests.post(f"{API}/auth/register", json={
+        "email": email, "password": "testpass123", "name": "Race",
+    })
+    assert r.status_code == 200, r.text
+    headers = {"Authorization": f"Bearer {r.json()['token']}"}
+
+    def _fire():
+        return requests.post(
+            f"{API}/streak/checkin", json={"minutes": 1.0}, headers=headers, timeout=10,
+        )
+
+    with _cf.ThreadPoolExecutor(max_workers=4) as ex:
+        results = list(ex.map(lambda _: _fire(), range(4)))
+
+    codes = [r.status_code for r in results]
+    # Every call must return 200 — none should have hit the unhandled
+    # DuplicateKeyError → 500.
+    assert all(c == 200 for c in codes), (
+        f"expected every concurrent first check-in to return 200, "
+        f"got {codes}"
+    )
+    # And the final state should be a single streak doc with current_streak=1.
+    g = requests.get(f"{API}/streak", headers=headers, timeout=10)
+    assert g.status_code == 200
+    assert g.json().get("current_streak") == 1

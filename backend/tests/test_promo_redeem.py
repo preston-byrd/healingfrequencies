@@ -312,3 +312,67 @@ def test_admin_redemption_count_increments(admin_session):
     r1 = admin_session.get(f"{BASE_URL}/api/admin/promo")
     welcome1 = next(c for c in r1.json() if c["code"] == "WELCOME30")
     assert welcome1["redemptions"] == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Cross-user max_uses cap race (Feb 2026 code-review fix)
+# ---------------------------------------------------------------------------
+
+def test_concurrent_cross_user_redemption_respects_cap(admin_session):
+    """Two DIFFERENT users redeeming the same capped comp code
+    concurrently must not both slip through when redemptions == cap - 1.
+
+    Fix: the atomic promo update filter now includes
+        `redemptions: {"$lt": max_uses}`
+    so exactly one of the two update_ones modifies.
+
+    Strategy:
+    1. Admin creates a comp code with max_uses=1 (the tightest possible cap).
+    2. Register 2 fresh users.
+    3. Fire both /promo/redeem calls in parallel threads.
+    4. Assert exactly 1 × 200 + 1 × 400 with detail mentioning the cap.
+    """
+    import concurrent.futures as _cf
+
+    # Create a fresh capped comp code (endpoint: POST /api/admin/promo)
+    code = f"CAPRACE{uuid.uuid4().hex[:6].upper()}"
+    r_create = admin_session.post(
+        f"{BASE_URL}/api/admin/promo",
+        json={
+            "code": code,
+            "type": "comp",
+            "duration_days": 30,
+            "max_uses": 1,
+            "active": True,
+        },
+    )
+    assert r_create.status_code in (200, 201), r_create.text
+
+    # Register two fresh users, one session each
+    s1 = requests.Session()
+    s2 = requests.Session()
+    _register(s1)
+    _register(s2)
+
+    def _fire(sess):
+        return sess.post(f"{BASE_URL}/api/promo/redeem", json={"code": code})
+
+    with _cf.ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(_fire, s1)
+        f2 = ex.submit(_fire, s2)
+        r1, r2 = f1.result(), f2.result()
+
+    codes = sorted([r1.status_code, r2.status_code])
+    assert codes == [200, 400], (
+        f"expected exactly one 200 + one 400 (cap enforced atomically), "
+        f"got {codes}. Bodies: {r1.text} | {r2.text}"
+    )
+    # The 400 body should mention the cap, not double-redeem (both users
+    # are distinct — the atomic filter's cap clause is what blocked us).
+    loser_body = r1.text if r1.status_code == 400 else r2.text
+    assert "limit" in loser_body.lower() or "cap" in loser_body.lower(), (
+        f"loser detail should mention cap, got: {loser_body}"
+    )
+
+    # Cleanup: delete the code
+    admin_session.delete(f"{BASE_URL}/api/admin/promo/{code}")

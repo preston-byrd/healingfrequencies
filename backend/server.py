@@ -16,6 +16,7 @@ from typing import Dict, Optional
 from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, Field, EmailStr
 from emergentintegrations.payments.stripe.checkout import (
     StripeCheckout,
@@ -737,10 +738,18 @@ async def checkin(body: CheckinIn, user: dict = Depends(get_current_user)):
             "total_sessions": 1,
             "total_minutes": minutes,
         }
-        await db.streaks.insert_one(doc)
-        doc.pop("_id", None)
-        doc["checked_in_today"] = True
-        return doc
+        try:
+            await db.streaks.insert_one(doc)
+        except DuplicateKeyError:
+            # Race: two concurrent first-ever check-ins hit the unique
+            # streaks.user_id index simultaneously. The loser falls
+            # through to the update-existing branch below so both
+            # requests still register a valid check-in for today.
+            existing = await db.streaks.find_one({"user_id": user["id"]})
+        else:
+            doc.pop("_id", None)
+            doc["checked_in_today"] = True
+            return doc
 
     last = existing.get("last_check_in")
     current = int(existing.get("current_streak", 0))
@@ -3678,7 +3687,7 @@ async def payment_status(session_id: str, request: Request, user: dict = Depends
         raise
     except Exception as e:
         logger.exception("[status] retrieve failed for sid=%s", session_id)
-        raise HTTPException(status_code=502, detail=f"Stripe status lookup failed: {e}")
+        raise HTTPException(status_code=502, detail="Payment status lookup is temporarily unavailable.")
 
     update = {
         "status": session.status,
@@ -3856,13 +3865,12 @@ async def billing_portal(request: Request, user: dict = Depends(get_current_user
         raise
     except Exception as e:
         logger.exception("[billing-portal] create failed for user=%s", user.get("email"))
+        # Client message stays generic — the "activate Customer Portal in
+        # Stripe Dashboard" hint is an operator diagnostic and lives in the
+        # log line above.
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"Could not open Customer Portal: {e}. "
-                "Make sure the Stripe Customer Portal is activated at "
-                "Dashboard → Settings → Billing → Customer portal."
-            ),
+            detail="The billing portal is temporarily unavailable. Please try again in a moment.",
         )
     return {"url": portal.url}
 
@@ -3891,7 +3899,7 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
         raise
     except Exception as e:
         logger.exception("[cancel] failed for user=%s", user.get("email"))
-        raise HTTPException(status_code=502, detail=f"Could not cancel subscription: {e}")
+        raise HTTPException(status_code=502, detail="Subscription cancellation is temporarily unavailable. Please try again in a moment.")
     await _sync_subscription_to_user(user["id"], sub)
     return {"ok": True, "cancel_at_period_end": True}
 
@@ -4426,14 +4434,28 @@ async def promo_redeem(body: PromoRedeemIn, user: dict = Depends(get_current_use
         "redeemed_at": datetime.now(timezone.utc).isoformat(),
     }
     if doc["type"] == "comp":
+        # Atomic filter also enforces the max_uses cap so two DIFFERENT
+        # users can't both slip through at redemptions == max_uses - 1.
+        # If max_uses is unlimited (None), we skip that clause entirely.
+        max_uses = doc.get("max_uses")
+        filter_ = {"code": code, "redemption_log.user_id": {"$ne": user["id"]}}
+        if max_uses is not None:
+            filter_["redemptions"] = {"$lt": int(max_uses)}
         result = await db.promo_codes.update_one(
-            {"code": code, "redemption_log.user_id": {"$ne": user["id"]}},
+            filter_,
             {"$inc": {"redemptions": 1}, "$push": {"redemption_log": log_entry}},
         )
         if result.modified_count == 0:
-            # Either the code no longer exists (unlikely — we just read it)
-            # or the user is already in redemption_log. Either way, refuse.
-            raise HTTPException(status_code=400, detail="You've already redeemed this code.")
+            # Either the user already redeemed OR the cap was reached by
+            # a concurrent redeemer. Re-read to disambiguate the message.
+            fresh = await db.promo_codes.find_one({"code": code}, {"redemption_log": 1, "redemptions": 1, "max_uses": 1})
+            already = any(
+                (e or {}).get("user_id") == user["id"]
+                for e in ((fresh or {}).get("redemption_log") or [])
+            )
+            if already:
+                raise HTTPException(status_code=400, detail="You've already redeemed this code.")
+            raise HTTPException(status_code=400, detail="This code has reached its redemption limit.")
     else:
         # Referral code — atomic append is fine (idempotent-ish; log entry
         # duplication is OK because we don't grant entitlement here).

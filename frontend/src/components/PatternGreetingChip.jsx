@@ -80,7 +80,11 @@ export default function PatternGreetingChip({ onArm }) {
     setBusy(true);
     try {
       if (chosen.cta && typeof onArm === 'function') {
-        await onArm(chosen.cta);
+        // Guard against a throwing / rejecting onArm — otherwise it
+        // becomes an unhandled promise rejection when React invokes
+        // the async handler. The chip should still dismiss even if the
+        // parent's CTA application fails, so the user isn't stuck.
+        try { await onArm(chosen.cta); } catch (e) { console.warn('[PatternGreetingChip] onArm failed', e); }
       }
       // Once acted on, the chip has served its purpose — dismiss it so the
       // next pattern in line gets a turn on the next open.
