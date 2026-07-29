@@ -309,6 +309,8 @@
   - **Toggle behaviour** — reconfirmed: tapping the same active preset stops the bath (1.5 s note-tail fade); tapping a different preset hard-cancels the current bath and launches a new arrangement.
   - Testing iteration 39 report — **backend 3/3, frontend 100% (all 11 checkpoints)** on desktop 1920x1080 + mobile 390x800.
 
+- **Service Worker update lifecycle (Feb 2026)**: `/app/frontend/src/index.js` now attaches an `updatefound` listener to the SW registration, watches `installing.statechange`, sends `SKIP_WAITING` to the new worker once it reaches `installed` while an old controller is still active, and reloads the tab exactly once on `controllerchange`. Also calls `reg.update()` proactively on load so returning PWA users pick up new builds on their next visit. `public/sw.js` already handled the `SKIP_WAITING` message — no change required there. Smoke-tested via Playwright: 1 SW registration active with correct scope, no console errors, app boots normally.
+
 ## Backlog (P1 → P2)
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
