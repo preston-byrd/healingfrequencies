@@ -2962,6 +2962,13 @@ async def _detect_wellness_patterns(user_id: str) -> list[dict]:
                 continue
             lbl_map = mood_at_time_labels.get((bucket, tod), {})
             fav = max(lbl_map.items(), key=lambda x: x[1])[0] if lbl_map else "your usual mix"
+            # Try to attach a CTA when the favourite is a raw frequency label
+            # (e.g. "432 Hz"). Preset labels are left CTA-less for now
+            # because the client-side preset arm dispatch isn't wired yet.
+            cta: Optional[dict] = None
+            m = re.fullmatch(r"(\d+)\s*Hz", fav)
+            if m:
+                cta = {"action": "arm_frequency", "frequency": float(m.group(1))}
             patterns.append({
                 "key": _pattern_key("mood_at_time", f"{bucket}@{tod}"),
                 "kind": "mood_at_time",
@@ -2970,6 +2977,7 @@ async def _detect_wellness_patterns(user_id: str) -> list[dict]:
                 "time_of_day": tod,
                 "count": n,
                 "message": _PATTERN_TEMPLATES["mood_at_time"].format(mood=bucket, label=fav),
+                **({"cta": cta} if cta else {}),
             })
             break  # one is enough
 
