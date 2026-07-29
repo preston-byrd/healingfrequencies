@@ -3603,8 +3603,23 @@ async def _fulfill_payment(tx: dict):
 
     For one-time PAYMENT mode (legacy txs only): just extends pro_until by the
     package's `days` count.
+
+    RACE HARDENING (Feb 2026): Stripe retries `checkout.session.completed`
+    up to ~3× per event. Under load two retries can arrive concurrently and
+    both read `fulfilled: false`. To guarantee exactly-once fulfilment we
+    ATOMICALLY claim the tx first — any concurrent caller sees
+    `modified_count == 0` and returns immediately. Prevents silent
+    double-granting of pro_until in one-time mode; also removes redundant
+    Stripe API calls in subscription mode.
     """
-    if tx.get("fulfilled"):
+    now = datetime.now(timezone.utc)
+    claim = await db.payment_transactions.update_one(
+        {"session_id": tx["session_id"], "fulfilled": {"$ne": True}},
+        {"$set": {"fulfilled": True, "fulfilled_at": now.isoformat()}},
+    )
+    if claim.modified_count == 0:
+        # Another concurrent webhook (or a prior retry) already fulfilled
+        # this session. Silent no-op — the earlier caller applied the plan.
         return
     user_id = tx["user_id"]
     is_sub = tx.get("mode") == "subscription"
@@ -3619,7 +3634,6 @@ async def _fulfill_payment(tx: dict):
     else:
         days = int(tx.get("days", 30))
         full = await db.users.find_one({"id": user_id}) or {}
-        now = datetime.now(timezone.utc)
         current_until = None
         pu = full.get("pro_until")
         if pu:
@@ -3633,10 +3647,6 @@ async def _fulfill_payment(tx: dict):
             {"id": user_id},
             {"$set": {"plan": "pro", "pro_until": new_until.isoformat()}},
         )
-    await db.payment_transactions.update_one(
-        {"session_id": tx["session_id"]},
-        {"$set": {"fulfilled": True, "fulfilled_at": datetime.now(timezone.utc).isoformat()}},
-    )
     # Audit: canonical "user just became Pro / activated trial" event for the
     # Sound Lineage timeline. Skipped if request context is unavailable (this
     # is also called from the webhook handler — no Request object there).
