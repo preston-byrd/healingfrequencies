@@ -2498,7 +2498,7 @@ _POSITIVE_TOKENS = {
     "calm", "calmer", "better", "settled", "grounded", "centered", "centred",
     "great", "amazing", "wonderful", "beautiful", "lovely", "loved", "love",
     "deep", "deeper", "relaxed", "relaxing", "relief", "released", "release",
-    "shift", "shifted", "resonant", "resonated", "resonance",
+    "resonant", "resonated", "resonance",
     "right", "helped", "helping", "helpful", "peaceful", "peace", "quiet",
     "focused", "clear", "clearer", "open", "opened", "spacious", "soft",
     "renewed", "restored", "warm", "warmer", "melted", "held", "safe",
