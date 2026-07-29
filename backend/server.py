@@ -1906,6 +1906,15 @@ async def ai_recommend(body: AIRecommendIn, user: dict = Depends(get_current_use
     hb_ctx = await _harmonic_context_for_llm(user["id"])
     if hb_ctx:
         parts.append(hb_ctx)
+    # Phase 6: preference boost from post-session reflections. When the user
+    # has consistently rated a frequency positively for this mood in the past,
+    # surface a soft hint the LLM can lean on. Silently no-ops on cold-start.
+    try:
+        pref_hint = await _mood_preference_hint(user["id"], body.mood)
+        if pref_hint:
+            parts.append(pref_hint)
+    except Exception as exc:
+        logger.warning("[ai_recommend] mood_preference_hint failed: %s", exc)
     user_text = "\n".join(parts)
 
     chat = LlmChat(
@@ -2050,6 +2059,16 @@ class JourneyLogIn(BaseModel):
     extended: bool = False
     ended_early: bool = False
     agent_initiated: bool = False
+
+
+class JourneyReflectionIn(BaseModel):
+    """One post-session emotional reflection. Attached to an existing
+    wellness_journey entry via `POST /api/me/journey/{entry_id}/reflection`.
+    Server derives `sentiment` from a lightweight keyword classifier so we
+    can bias future frequency suggestions without an LLM round-trip.
+    """
+    question: str = Field(min_length=1, max_length=200)
+    response: str = Field(min_length=1, max_length=500)
 
 
 def _summarise_suggestion(s: dict) -> str:
@@ -2251,6 +2270,17 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     except Exception as exc:
         logger.warning("[agent_chat] wellness_journey lookup failed: %s", exc)
 
+    # Phase 6: mood-preference boost from post-session reflections. When the
+    # current message echoes a mood the user has previously reflected on
+    # positively for a specific frequency, we surface a soft hint so the LLM
+    # can naturally lean toward the same suggestion.
+    try:
+        pref_hint = await _mood_preference_hint(user["id"], body.message)
+        if pref_hint:
+            parts.append(pref_hint)
+    except Exception as exc:
+        logger.warning("[agent_chat] mood_preference_hint failed: %s", exc)
+
     history = body.history or []
     for turn in history[-10:]:  # cap context window
         if not isinstance(turn, dict):
@@ -2418,7 +2448,7 @@ def _time_of_day_label(dt: datetime) -> str:
 
 def _summarise_journey_entry(row: dict) -> str:
     """Compact one-line summary for embedding in the agent_chat LLM prompt.
-    Kept short (≤ ~140 chars) so 8 rows fit comfortably in the token budget."""
+    Kept short (≤ ~200 chars) so 8 rows fit comfortably in the token budget."""
     when = str(row.get("created_at") or "")[:19]  # YYYY-MM-DDTHH:MM:SS
     tod = row.get("time_of_day") or ""
     mood = str(row.get("mood") or "").strip()[:80]
@@ -2440,14 +2470,163 @@ def _summarise_journey_entry(row: dict) -> str:
         tags.append("extended")
     if row.get("agent_initiated"):
         tags.append("assistant-led")
+    # Reflection tail — appended when the user answered the post-session
+    # follow-up question. Sentiment is derived on write via _classify_sentiment.
+    refl = row.get("reflection") or None
+    refl_tail = ""
+    if isinstance(refl, dict) and refl.get("response"):
+        r_txt = str(refl["response"]).strip()[:80]
+        sent = str(refl.get("sentiment") or "neutral")
+        refl_tail = f'reflected "{r_txt}" ({sent})'
     payload = " · ".join(x for x in [
         f"{when} ({tod})" if tod else when,
         f'mood "{mood}"' if mood else "",
         " ".join(bits) if bits else "session",
         f"{dur_min} min",
         ", ".join(tags),
+        refl_tail,
     ] if x)
     return "- " + payload
+
+
+# --- Sentiment (keyword-based, deterministic) ---------------------------------
+# Deliberately tiny. If we later need nuance (sarcasm, mixed sentiment) we can
+# swap in an LLM classifier here — the rest of the code only cares about the
+# 3-way "positive|neutral|negative" return.
+_POSITIVE_TOKENS = {
+    "yes", "yeah", "yep", "yup", "definitely", "absolutely", "totally",
+    "calm", "calmer", "better", "settled", "grounded", "centered", "centred",
+    "great", "amazing", "wonderful", "beautiful", "lovely", "loved", "love",
+    "deep", "deeper", "relaxed", "relaxing", "relief", "released", "release",
+    "shift", "shifted", "resonant", "resonated", "resonance",
+    "right", "helped", "helping", "helpful", "peaceful", "peace", "quiet",
+    "focused", "clear", "clearer", "open", "opened", "spacious", "soft",
+    "renewed", "restored", "warm", "warmer", "melted", "held", "safe",
+    "good", "positive", "nice", "gentle", "sweet", "meditative", "healing",
+}
+_NEGATIVE_TOKENS = {
+    "no", "nope", "not really", "didn't", "did not", "didnt",
+    "nothing", "none", "worse", "harder", "off", "wrong", "meh",
+    "agitated", "restless", "anxious", "distracted", "tense", "irritated",
+    "angry", "annoyed", "boring", "bored", "flat", "empty", "numb",
+    "couldn't", "couldnt", "unable", "can't", "cant",
+    "uncomfortable", "disturbed", "unsettled", "harsh",
+    "bad", "negative", "hate", "hated", "awful", "terrible",
+}
+# Compact negation cue — if any of these appear, we downgrade a positive
+# token that follows them within ~4 tokens ("did NOT feel calm").
+_NEGATORS = {"not", "no", "never", "hardly", "barely", "didn't", "didnt",
+             "wasn't", "wasnt", "isn't", "isnt", "don't", "dont"}
+
+
+def _classify_sentiment(text: str) -> str:
+    """Return one of 'positive' | 'neutral' | 'negative'. Deterministic.
+
+    Rules:
+      1. Tokenise on non-word chars, lowercase, strip.
+      2. Count positive / negative tokens; a negator within 4 tokens flips
+         the polarity of the token that follows it.
+      3. Ties or empty text → 'neutral'.
+    """
+    import re as _re
+    if not text:
+        return "neutral"
+    tokens = [t for t in _re.split(r"[^A-Za-z']+", text.lower()) if t]
+    pos = 0
+    neg = 0
+    for i, tok in enumerate(tokens):
+        # Check for a negator up to 3 tokens back.
+        negated = any(tokens[j] in _NEGATORS for j in range(max(0, i - 3), i))
+        if tok in _POSITIVE_TOKENS:
+            if negated:
+                neg += 1
+            else:
+                pos += 1
+        elif tok in _NEGATIVE_TOKENS:
+            if negated:
+                pos += 1
+            else:
+                neg += 1
+    if pos == 0 and neg == 0:
+        return "neutral"
+    if pos > neg:
+        return "positive"
+    if neg > pos:
+        return "negative"
+    return "neutral"
+
+
+# --- Mood-preference boost for AI prescription --------------------------------
+def _mood_bucket(text: Optional[str]) -> Optional[str]:
+    """Reduce a free-form mood string to a coarse bucket so we can match
+    "I'm feeling really anxious right now" against a prior "anxious" reflection.
+    Returns the first matching bucket or None for unbucketable input."""
+    if not text:
+        return None
+    lc = text.lower()
+    buckets = {
+        "anxious":  ["anxious", "anxiety", "panic", "on edge", "nervous", "worried"],
+        "stressed": ["stressed", "stress", "overwhelmed", "burned out", "burnout"],
+        "tired":    ["tired", "exhausted", "drained", "sleepy", "wiped"],
+        "sad":      ["sad", "down", "low", "blue", "grief", "grieving", "heavy"],
+        "restless": ["restless", "agitated", "wound up", "cant sit", "can't sit"],
+        "angry":    ["angry", "furious", "irritated", "frustrated", "mad"],
+        "focused":  ["focus", "focused", "study", "studying", "work", "flow"],
+        "grounding":["grounding", "grounded", "root", "settle"],
+        "sleep":    ["sleep", "insomnia", "cant sleep", "can't sleep", "falling asleep"],
+        "calm":     ["calm", "peaceful", "quiet", "still"],
+    }
+    for bucket, cues in buckets.items():
+        for cue in cues:
+            if cue in lc:
+                return bucket
+    return None
+
+
+async def _mood_preference_hint(user_id: str, current_mood: Optional[str]) -> str:
+    """Build a USER_PREFERENCE_HINT string for the AI prescription prompt when
+    the current mood echoes one the user has previously reflected positively
+    on. Returns "" when there's no confident preference.
+
+    A preference is defined as: ≥ 1 journey row with (mood_bucket == current
+    bucket) AND (reflection.sentiment == 'positive') AND a frequency or
+    preset_label attached to the row. We surface the top-3 most recent hits.
+    """
+    bucket = _mood_bucket(current_mood)
+    if not bucket:
+        return ""
+    try:
+        cursor = db.wellness_journey.find(
+            {"user_id": user_id, "reflection.sentiment": "positive"},
+            {"_id": 0},
+        ).sort("created_at", -1).limit(30)
+        rows = await cursor.to_list(length=30)
+    except Exception as exc:
+        logger.warning("[mood_preference] lookup failed: %s", exc)
+        return ""
+    hits: list = []
+    for row in rows:
+        if _mood_bucket(row.get("mood")) != bucket:
+            continue
+        label = row.get("preset_label") or (
+            f"{float(row['frequency']):.0f} Hz" if row.get("frequency") else None
+        )
+        if not label:
+            continue
+        hits.append(label)
+        if len(hits) >= 3:
+            break
+    if not hits:
+        return ""
+    # Dedupe while preserving order.
+    seen = set()
+    uniq = [h for h in hits if not (h in seen or seen.add(h))]
+    return (
+        "USER_PREFERENCE_HINT: "
+        f'when this user reports moods like "{bucket}", they have '
+        f"responded positively to {', '.join(uniq)}. Favour these if they fit "
+        "the request, but you are not required to pick them."
+    )
 
 
 async def _wellness_journey_for_llm(user_id: str, limit: int = 8) -> str:
@@ -2524,6 +2703,35 @@ async def journey_list(user: dict = Depends(get_current_user)):
     ).sort("created_at", -1).limit(JOURNEY_MAX_PER_USER)
     rows = await cursor.to_list(length=JOURNEY_MAX_PER_USER)
     return {"entries": rows}
+
+
+@api.post("/me/journey/{entry_id}/reflection")
+async def journey_reflection(
+    entry_id: str,
+    body: JourneyReflectionIn,
+    user: dict = Depends(get_current_user),
+):
+    """Attach the user's post-session emotional reflection to an existing
+    journey row. The server derives `sentiment` from a deterministic keyword
+    classifier so we can bias future frequency suggestions without an extra
+    LLM call. Idempotent per entry — a re-submission replaces the previous
+    reflection wholesale (users may re-answer if they choose)."""
+    row = await db.wellness_journey.find_one(
+        {"id": entry_id, "user_id": user["id"]}, {"_id": 0}
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Journey entry not found")
+    reflection = {
+        "question": body.question.strip(),
+        "response": body.response.strip(),
+        "sentiment": _classify_sentiment(body.response),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.wellness_journey.update_one(
+        {"id": entry_id, "user_id": user["id"]},
+        {"$set": {"reflection": reflection}},
+    )
+    return {"ok": True, "reflection": reflection}
 
 
 # ---------- Stripe helper ----------

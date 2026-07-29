@@ -1,0 +1,38 @@
+{
+  "summary": "Iter 50 — Phase 6 post-session reflection + preference boost. Extended /app/backend/tests/test_wellness_journey.py from 7 → 21 tests (14 new). 20/21 pass. One real classifier gap surfaced: 'nothing shifted' classifies as NEUTRAL when the spec/tests expect NEGATIVE (nothing→neg + shifted→pos → 1-1 tie → neutral). Frontend rendering of MyJourneySection reflections + all three sentiment chips verified via seeded rows on the admin account. Preference-boost end-to-end verified in the live app: fresh user seeded with 2× (432 Hz, anxious, positive-reflection) rows → agent_chat({message:'I feel anxious tonight, what should I try?'}) returned 432 Hz as suggestion #1 AND surfaced the sentence 'Last time you felt anxious, 432 Hz helped you settle beautifully' — the _mood_preference_hint fires end-to-end. Skip-does-not-save also verified (GET /me/journey confirms no reflection object on rows never reflected). WellnessCheckinCard live UI flow (natural Smart-Fade timer expiry) NOT executed — component source reviewed & all 11 required testids present + reflection POST endpoint E2E-proven — see context_for_next_testing_agent for the one thing left to click-through if desired.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/me/journey/{entry_id}/reflection", "issue": "_classify_sentiment('nothing shifted') → 'neutral' (expected 'negative' per spec test 5). Root cause: 'nothing' is in _NEGATIVE_TOKENS (+1 neg) but 'shifted' is in _POSITIVE_TOKENS (+1 pos), producing a 1-1 tie → neutral. Fix options: (a) drop 'shift/shifted' from _POSITIVE_TOKENS since it's ambiguous without positive framing, or (b) require a preceding negator to flip the whole phrase, or (c) add 'nothing shifted' / 'no shift' as compound negative phrases handled before the token loop."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_wellness_journey.py",
+    "/app/test_reports/pytest/iter50_reflection.xml",
+    "/app/test_reports/pytest/my_journey_reflections.png"
+  ],
+  "action_items": [
+    "Fix classifier: 'nothing shifted' must return 'negative' (see minor issue above for 3 possible fixes — dropping 'shift/shifted' from _POSITIVE_TOKENS is the cheapest and most correct — 'shift' is only ever positive in phrases like 'felt a shift', which is a stretch of a signal anyway)."
+  ],
+  "critical_code_review_comments": [
+    "_classify_sentiment: 'shift/shifted' being unconditionally positive is fragile — 'no shift', 'nothing shifted', 'didn't shift' are all classified sub-optimally by the negator-window heuristic because the window looks back for a NEGATOR word, but 'nothing' is not in _NEGATORS (it's in _NEGATIVE_TOKENS). Either add 'nothing/none' to _NEGATORS (semantically defensible) or remove 'shift/shifted' from positive tokens.",
+    "WellnessCheckinCard.jsx pickQuestion uses useMemo with [open, journeyEntryId] deps — a random pick tied to memoisation deps that only fire on open toggle is fine, but if the user re-opens the same card within the same journeyEntryId (e.g. after error), they'll see the same question. Consider adding a mount-counter dep, or use useState + useEffect on open transition for stronger 'fresh every open' semantics.",
+    "REFLECTION_QUESTIONS live-inline in the component file — for A/B testing rotation strategy later, extract to /app/frontend/src/config/reflectionQuestions.js.",
+    "Dashboard.jsx still 2121+ lines (flagged in iter 49) — no regression, no action for this phase."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_wellness_journey.py"
+  ],
+  "success_rate": {"backend": "95% (20/21) — the 1 failure is a genuine product bug the tests correctly caught", "frontend": "100% (rendering + integration verified)"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (from /app/memory/test_credentials.md).",
+  "seed_data_creation": "Admin account gained ~6 new rows this run: 432 Hz+anxious (positive), 852 Hz+tired (negative), 396 Hz+skip-test (no reflection), plus parametrised sentiment probes (396 Hz+test w/ 'It was okay I guess', 'nothing shifted', 'not calm', 'calm and grounded'). Two throwaway users TEST_prefboost_* and TEST_bucket_* also created (2 rows + reflections each) — these are used to prove the preference-boost hint fires cleanly on a new user without cross-contamination from admin history.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "One deferred verification: the live WellnessCheckinCard two-step UI flow (start audio → wait for Smart-Fade timer expiry → step1 done → step2 rotating question → save/skip). I didn't wait 15+ min for a natural timer expiry. Component source has been read & all required testids exist (wellness-checkin, wellness-checkin-step1, wellness-checkin-step2, wellness-checkin-continue, wellness-checkin-done, wellness-checkin-save, wellness-checkin-skip, wellness-checkin-question, wellness-checkin-response, wellness-checkin-dismiss, wellness-checkin-error). Reflection POST endpoint is E2E-proven from real API calls. If needed, the fastest way to exercise the card is: (a) set Timer to 15 min (smallest preset), start playback via [data-testid='play-pause-button'], stop at ~65s via the transport stop button so logJourneyEntry fires, then either wait for the smartfade completion event or trigger it synthetically. The Wellness Assistant sheet DOES intercept the play button — you MUST dismiss via [data-testid='ai-agent-close'] first (Escape does not close it). Also note: /account is NOT a route — it's a view toggled by clicking [data-testid='account-button'] then the 'Account' menuitem in the dropdown.",
+  "rca of the issue": "Classifier tie for 'nothing shifted': _classify_sentiment walks tokens; 'nothing' matches _NEGATIVE_TOKENS (neg+=1) and 'shifted' matches _POSITIVE_TOKENS (pos+=1); no negator preceded 'shifted' within the 3-token window (only 'nothing' did, and 'nothing' is not in _NEGATORS), so both counts equal 1 → 'neutral' return. This surfaces in test_classify_sentiment_via_endpoint[nothing shifted-negative]. Cheapest fix: remove 'shift/shifted' from _POSITIVE_TOKENS — it's semantically ambiguous. Alternative: add 'nothing', 'none' to _NEGATORS so they flip subsequent positive tokens."
+}

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { Sparkles, Compass, Loader2, Clock, Zap, ArrowUpRight, ArrowDown } from 'lucide-react';
+import { Sparkles, Compass, Loader2, Clock, Zap, ArrowUpRight, ArrowDown, MessageCircleHeart } from 'lucide-react';
 import api from '@/lib/api';
 
 /**
@@ -66,6 +66,9 @@ const TAG_STYLES = {
   early: 'text-[#C4A67A] border-[#C4A67A]/40 bg-[#C4A67A]/8',
   extended: 'text-[#98C1B0] border-[#98C1B0]/40 bg-[#98C1B0]/8',
   assistant: 'text-[#8FB4C7] border-[#8FB4C7]/40 bg-[#8FB4C7]/8',
+  'reflected-positive': 'text-[#72C2AC] border-[#72C2AC]/40 bg-[#72C2AC]/8',
+  'reflected-neutral': 'text-[#B5C4BC] border-[#B5C4BC]/40 bg-[#B5C4BC]/8',
+  'reflected-negative': 'text-[#D4A87F] border-[#D4A87F]/40 bg-[#D4A87F]/8',
 };
 
 const TimelineRow = ({ entry, isLast }) => {
@@ -75,6 +78,15 @@ const TimelineRow = ({ entry, isLast }) => {
   if (entry.ended_early) tags.push({ key: 'early', label: 'ended early', icon: ArrowDown });
   if (entry.extended) tags.push({ key: 'extended', label: 'extended', icon: ArrowUpRight });
   if (entry.agent_initiated) tags.push({ key: 'assistant', label: 'assistant-led', icon: Sparkles });
+  const refl = entry.reflection;
+  if (refl && refl.response) {
+    const sentiment = refl.sentiment || 'neutral';
+    tags.push({
+      key: `reflected-${sentiment}`,
+      label: `reflected · ${sentiment}`,
+      icon: MessageCircleHeart,
+    });
+  }
   return (
     <div className="relative flex gap-4 pb-6" data-testid="my-journey-row">
       {/* Timeline rail */}
@@ -90,6 +102,15 @@ const TimelineRow = ({ entry, isLast }) => {
         </div>
         {entry.mood && (
           <div className="text-[13px] italic text-[#B5C4BC] mt-1 truncate" title={entry.mood}>“{entry.mood}”</div>
+        )}
+        {refl && refl.response && (
+          <div
+            className="text-[12px] text-[#98C1B0] mt-1 leading-relaxed"
+            data-testid="my-journey-reflection"
+            title={refl.question}
+          >
+            <span className="text-[#5A6B65]">→ </span>{refl.response}
+          </div>
         )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 text-[12px] text-[#8A9A92]">
           <span className="inline-flex items-center gap-1"><Clock size={11} />{fmtDuration(entry.duration_actual_seconds)}</span>

@@ -256,13 +256,12 @@ export default function Dashboard({ onOpenAccount }) {
         setRemaining(0);
         setActiveSoundscape(null);
         fadeArmedRef.current = false;
-        // If the Wellness Assistant kicked off this session, show the soft
-        // "How are you feeling now?" check-in prompt now that the 5-min
-        // fade has fully resolved to silence. The prompt gives the user a
-        // graceful choice: extend the session by 10 min or close the flow.
-        if (assistantOwnedRef.current) {
-          setCheckinOpen(true);
-        }
+        // Phase 6: post-session emotional reflection — request the soft
+        // "How are you feeling now?" check-in for EVERY Smart-Fade timer
+        // completion (previously assistant-owned only). The card is opened
+        // once `logJourneyEntry` resolves so the reflection step has a
+        // valid entry_id to attach to. Manual stops (no timer) still skip.
+        pendingCheckinRef.current = true;
       } else {
         // Smart Fade — arm the master-bus taper once secsLeft crosses below
         // the 5-min threshold. The fade is scheduled with the EXACT remaining
@@ -347,7 +346,17 @@ export default function Dashboard({ onOpenAccount }) {
   // longitudinal memory + the "My Journey" timeline in Account).
   const journeyPlannedRef = React.useRef(null); // planned duration in seconds (null if no timer)
   const journeyLoggedThisRunRef = React.useRef(false);
+  // Set by the timer-expiry branch — signals that we WANT to surface the
+  // post-session reflection card once the journey log POST resolves (so
+  // the card opens with a valid entry_id and the reflection can be
+  // attached to the right row). Read + cleared inside `logJourneyEntry`.
+  const pendingCheckinRef = React.useRef(false);
+  // The most recently-logged journey entry id (returned by /me/journey/log).
+  // Used by the post-session reflection card to attach the user's response
+  // to the right row. Cleared when a new session starts.
+  const [lastJourneyEntryId, setLastJourneyEntryId] = useState(null);
   const logJourneyEntry = React.useCallback(async (actualMs) => {
+    let loggedId = null;
     try {
       const actualSec = Math.round(actualMs / 1000);
       if (actualSec < 60) return;
@@ -381,9 +390,22 @@ export default function Dashboard({ onOpenAccount }) {
         ended_early,
         agent_initiated: !!assistantOwnedRef.current,
       };
-      await api.post('/me/journey/log', payload);
+      const { data } = await api.post('/me/journey/log', payload);
+      if (data && data.ok && data.entry && data.entry.id) {
+        loggedId = data.entry.id;
+        setLastJourneyEntryId(loggedId);
+      }
     } catch (e) {
       console.warn('[Dashboard] journey log failed', e);
+    } finally {
+      // Open the post-session reflection card AFTER the log resolves so the
+      // card has a valid entry_id to attach the reflection to. Even if the
+      // POST failed, we still surface step 1 ("How are you feeling now?");
+      // step 2 gracefully falls back to closing when entry_id is null.
+      if (pendingCheckinRef.current) {
+        pendingCheckinRef.current = false;
+        setCheckinOpen(true);
+      }
     }
   }, [state.frequency, state.waveform, state.binaural, state.ambient, activeSoundscape]);
 
@@ -392,6 +414,10 @@ export default function Dashboard({ onOpenAccount }) {
       setSessionStart(Date.now());
       setCheckedInThisRun(false);
       journeyLoggedThisRunRef.current = false;
+      // Fresh session — a stale reflection id from the previous session
+      // must not persist, otherwise the next Smart-Fade completion would
+      // attach the reflection to the wrong journey row.
+      setLastJourneyEntryId(null);
       // Snapshot planned duration ONLY if a timer is currently running;
       // freeform (no-timer) sessions get `null` and never trigger the
       // ended_early flag.
@@ -1561,6 +1587,7 @@ export default function Dashboard({ onOpenAccount }) {
             open={checkinOpen}
             onContinue={continueCheckin}
             onDone={dismissCheckin}
+            journeyEntryId={lastJourneyEntryId}
           />
           <SessionUnlockCard
             open={sessionUnlockOpen}
