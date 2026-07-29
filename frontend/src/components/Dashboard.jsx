@@ -342,18 +342,74 @@ export default function Dashboard({ onOpenAccount }) {
   }, [state.playing, sleepMode, remaining]);
 
   // Auto check-in: when user has been playing for >= 60s in this run, record it once.
+  // Also captures a snapshot of the audio state at session-end and logs a
+  // Wellness Journey entry (last 30 sessions per user, powers the LLM's
+  // longitudinal memory + the "My Journey" timeline in Account).
+  const journeyPlannedRef = React.useRef(null); // planned duration in seconds (null if no timer)
+  const journeyLoggedThisRunRef = React.useRef(false);
+  const logJourneyEntry = React.useCallback(async (actualMs) => {
+    try {
+      const actualSec = Math.round(actualMs / 1000);
+      if (actualSec < 60) return;
+      const plannedSec = journeyPlannedRef.current;
+      const ended_early = !!(plannedSec && actualSec < plannedSec * 0.6);
+      const ambientClean = {};
+      if (state.ambient && typeof state.ambient === 'object') {
+        Object.entries(state.ambient).forEach(([k, v]) => {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > 0.01) ambientClean[k] = Math.round(n * 1000) / 1000;
+        });
+      }
+      // Mood — set by AIAgentSheet when the user picked a suggestion this
+      // session. Consumed once so an unrelated later session doesn't
+      // reuse a stale mood string.
+      let mood = null;
+      try {
+        mood = localStorage.getItem('solar:last_agent_mood') || null;
+        if (mood) localStorage.removeItem('solar:last_agent_mood');
+      } catch (_) { /* graceful */ }
+      const payload = {
+        frequency: Number.isFinite(state.frequency) ? state.frequency : undefined,
+        waveform: state.waveform || undefined,
+        binaural: Number.isFinite(state.binaural) ? state.binaural : undefined,
+        ambient: ambientClean,
+        soundscape: activeSoundscape || undefined,
+        duration_planned_seconds: plannedSec || undefined,
+        duration_actual_seconds: actualSec,
+        mood: mood || undefined,
+        extended: false,           // wired for future Extend +5 chip
+        ended_early,
+        agent_initiated: !!assistantOwnedRef.current,
+      };
+      await api.post('/me/journey/log', payload);
+    } catch (e) {
+      console.warn('[Dashboard] journey log failed', e);
+    }
+  }, [state.frequency, state.waveform, state.binaural, state.ambient, activeSoundscape]);
+
   useEffect(() => {
     if (state.playing && !sessionStart) {
       setSessionStart(Date.now());
       setCheckedInThisRun(false);
+      journeyLoggedThisRunRef.current = false;
+      // Snapshot planned duration ONLY if a timer is currently running;
+      // freeform (no-timer) sessions get `null` and never trigger the
+      // ended_early flag.
+      journeyPlannedRef.current = remaining > 0 ? remaining : null;
     }
     if (!state.playing && sessionStart) {
-      const minutes = (Date.now() - sessionStart) / 60000;
+      const elapsedMs = Date.now() - sessionStart;
+      const minutes = elapsedMs / 60000;
       if (minutes >= 1 && !checkedInThisRun) {
         checkIn(minutes);
         setCheckedInThisRun(true);
       }
+      if (minutes >= 1 && !journeyLoggedThisRunRef.current) {
+        journeyLoggedThisRunRef.current = true;
+        logJourneyEntry(elapsedMs);
+      }
       setSessionStart(null);
+      journeyPlannedRef.current = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.playing]);

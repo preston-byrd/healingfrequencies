@@ -115,6 +115,9 @@ export default function AIAgentSheet({
     // forget — never block UX on the persistence call.
     const mood = lastUserMessage();
     if (mood) {
+      // Also stash the mood locally so the next completed session picks
+      // it up when it writes a Wellness Journey entry (consumed-once).
+      try { localStorage.setItem('solar:last_agent_mood', mood.slice(0, 300)); } catch (_) { /* graceful */ }
       api.post('/me/agent/checkin', {
         message: mood,
         suggestion: s,

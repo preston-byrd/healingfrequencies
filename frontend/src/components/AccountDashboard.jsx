@@ -8,6 +8,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
+import MyJourneySection from '@/components/MyJourneySection';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
 
 function fmtDate(iso) {
@@ -936,6 +937,11 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
           isPro={!!(sub.pro || sub.is_admin)}
           onOpenSheet={onOpenHarmonicBlueprint}
         />
+
+        {/* Longitudinal wellness memory — the same session history the
+            Wellness Assistant references when it says "Last time you felt X,
+            Y helped — want to start there?". Rendered for all users. */}
+        <MyJourneySection />
 
         {/* Admin: Sound Lineage timeline */}
         {sub.is_admin && <SoundLineage />}

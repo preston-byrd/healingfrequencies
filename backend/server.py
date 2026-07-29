@@ -2029,6 +2029,29 @@ class AgentCheckinIn(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=80)
 
 
+class JourneyLogIn(BaseModel):
+    """One completed listening session. Written from the client the moment a
+    ≥60-second run ends (same trigger as the streak check-in), so the
+    Wellness Assistant can build a longitudinal memory of what worked when.
+
+    All fields are optional except the durations — we tolerate partial
+    captures rather than refuse the row.
+    """
+    frequency: Optional[float] = Field(default=None, ge=0, le=20000)
+    waveform: Optional[str] = Field(default=None, max_length=16)
+    binaural: Optional[float] = Field(default=None, ge=0, le=200)
+    ambient: Optional[dict] = None                # {rain: 0..1, ocean: 0..1, ...}
+    soundscape: Optional[str] = Field(default=None, max_length=32)     # active curated mix key, if any
+    preset_key: Optional[str] = Field(default=None, max_length=48)     # sound-bath / journey preset, if any
+    preset_label: Optional[str] = Field(default=None, max_length=80)
+    duration_planned_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
+    duration_actual_seconds: int = Field(ge=0, le=86400)
+    mood: Optional[str] = Field(default=None, max_length=300)
+    extended: bool = False
+    ended_early: bool = False
+    agent_initiated: bool = False
+
+
 def _summarise_suggestion(s: dict) -> str:
     """Compact one-line summary of a suggestion for embedding in the LLM
     prompt. Keeps the prior-insights block short and token-friendly."""
@@ -2218,6 +2241,16 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     except Exception as exc:
         logger.warning("[agent_chat] harmonic_context lookup failed: %s", exc)
 
+    # Longitudinal wellness memory — recent completed sessions (last 8 of 30).
+    # Lets the assistant say "Last time you felt anxious, 432 Hz Earth helped
+    # you settle — want to start there?" Silently no-ops for new users.
+    try:
+        wj_ctx = await _wellness_journey_for_llm(user["id"], limit=8)
+        if wj_ctx:
+            parts.append(wj_ctx)
+    except Exception as exc:
+        logger.warning("[agent_chat] wellness_journey lookup failed: %s", exc)
+
     history = body.history or []
     for turn in history[-10:]:  # cap context window
         if not isinstance(turn, dict):
@@ -2363,6 +2396,134 @@ async def agent_checkin(body: AgentCheckinIn, request: Request, user: dict = Dep
         },
     )
     return {"ok": True, "id": doc["id"]}
+
+
+# --- Wellness Journey (longitudinal session memory) ---------------------------
+JOURNEY_MAX_PER_USER = 30  # last N sessions retained per user
+
+
+def _time_of_day_label(dt: datetime) -> str:
+    """Coarse bucket used both server-side (for the LLM prompt) and displayed
+    verbatim in the "My Journey" timeline row. UTC-based — good enough given
+    we don't ship user timezone anywhere else on the server yet."""
+    h = dt.hour
+    if 5 <= h < 12:
+        return "morning"
+    if 12 <= h < 17:
+        return "afternoon"
+    if 17 <= h < 22:
+        return "evening"
+    return "night"
+
+
+def _summarise_journey_entry(row: dict) -> str:
+    """Compact one-line summary for embedding in the agent_chat LLM prompt.
+    Kept short (≤ ~140 chars) so 8 rows fit comfortably in the token budget."""
+    when = str(row.get("created_at") or "")[:19]  # YYYY-MM-DDTHH:MM:SS
+    tod = row.get("time_of_day") or ""
+    mood = str(row.get("mood") or "").strip()[:80]
+    bits: list = []
+    if row.get("preset_label"):
+        bits.append(str(row["preset_label"])[:40])
+    elif row.get("frequency"):
+        try:
+            bits.append(f"{float(row['frequency']):.0f} Hz")
+        except Exception:
+            pass
+    if row.get("soundscape"):
+        bits.append(f"+{row['soundscape']}")
+    dur_min = max(1, int(round((row.get("duration_actual_seconds") or 0) / 60)))
+    tags: list = []
+    if row.get("ended_early"):
+        tags.append("ended early")
+    if row.get("extended"):
+        tags.append("extended")
+    if row.get("agent_initiated"):
+        tags.append("assistant-led")
+    payload = " · ".join(x for x in [
+        f"{when} ({tod})" if tod else when,
+        f'mood "{mood}"' if mood else "",
+        " ".join(bits) if bits else "session",
+        f"{dur_min} min",
+        ", ".join(tags),
+    ] if x)
+    return "- " + payload
+
+
+async def _wellness_journey_for_llm(user_id: str, limit: int = 8) -> str:
+    """Build the WELLNESS_JOURNEY prompt block. Silently no-ops when the user
+    hasn't accumulated any entries yet."""
+    try:
+        cursor = db.wellness_journey.find(
+            {"user_id": user_id}, {"_id": 0}
+        ).sort("created_at", -1).limit(limit)
+        rows = await cursor.to_list(length=limit)
+    except Exception as exc:
+        logger.warning("[wellness_journey] fetch failed for %s: %s", user_id, exc)
+        return ""
+    if not rows:
+        return ""
+    lines = ["WELLNESS_JOURNEY (most recent listening sessions, newest first):"]
+    lines.extend(_summarise_journey_entry(r) for r in rows)
+    lines.append(
+        "If the user's current state echoes one of these prior sessions, you MAY "
+        "gently reference it (e.g. \"Last time you felt anxious, 432 Hz Earth "
+        "helped you settle — want to start there?\"). Do NOT force a callback "
+        "if it doesn't fit, and never invent details that aren't in this list."
+    )
+    return "\n".join(lines)
+
+
+@api.post("/me/journey/log")
+async def journey_log(body: JourneyLogIn, user: dict = Depends(get_current_user)):
+    """Record one completed listening session. Called from the client the
+    moment a ≥ 60-second run ends. We keep only the last JOURNEY_MAX_PER_USER
+    entries per user (older rows pruned on write)."""
+    # Hard floor — reject junk pings so an empty run doesn't create noise
+    # in the timeline nor in the LLM prompt.
+    if body.duration_actual_seconds < 60:
+        return {"ok": False, "reason": "too_short"}
+    now = datetime.now(timezone.utc)
+    doc = body.model_dump()
+    doc.update({
+        "id": uuid.uuid4().hex,
+        "user_id": user["id"],
+        "created_at": now.isoformat(),
+        "time_of_day": _time_of_day_label(now),
+    })
+    # Normalise the ambient mix to only include active channels ( > 0.01 )
+    # so timeline rendering stays clean without post-processing.
+    amb = doc.get("ambient") or {}
+    if isinstance(amb, dict):
+        doc["ambient"] = {
+            k: round(float(v), 3)
+            for k, v in amb.items()
+            if isinstance(v, (int, float)) and float(v) > 0.01
+        }
+    await db.wellness_journey.insert_one(doc)
+    # Prune to last JOURNEY_MAX_PER_USER
+    try:
+        cursor = db.wellness_journey.find(
+            {"user_id": user["id"]}, {"id": 1, "created_at": 1}
+        ).sort("created_at", -1).skip(JOURNEY_MAX_PER_USER)
+        stale = [r["id"] async for r in cursor]
+        if stale:
+            await db.wellness_journey.delete_many({"id": {"$in": stale}})
+    except Exception as exc:  # noqa: BLE001 — defensive housekeeping
+        logger.warning("[journey_log] prune failed: %s", exc)
+    doc.pop("_id", None)
+    return {"ok": True, "entry": doc}
+
+
+@api.get("/me/journey")
+async def journey_list(user: dict = Depends(get_current_user)):
+    """Return the user's last 30 completed sessions, newest first. Rendered
+    by the "My Journey" timeline in the Account dashboard."""
+    cursor = db.wellness_journey.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).limit(JOURNEY_MAX_PER_USER)
+    rows = await cursor.to_list(length=JOURNEY_MAX_PER_USER)
+    return {"entries": rows}
 
 
 # ---------- Stripe helper ----------
