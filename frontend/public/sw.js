@@ -9,7 +9,7 @@
  *  - API calls (/api/*): always network (do not cache auth/state).
  *  - Pre-cache the app shell on install for instant offline open.
  */
-const CACHE = 'hf-shell-v3';
+const CACHE = 'hf-shell-v4';
 const SHELL = [
   '/',
   '/index.html',
@@ -21,18 +21,28 @@ const SHELL = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {})
+    Promise.all([
+      caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}),
+      // skipWaiting inside waitUntil so the browser awaits activation
+      // rather than treating it as fire-and-forget. Future SW versions
+      // now auto-activate on existing clients without a manual cache
+      // clear on the user's device.
+      self.skipWaiting(),
+    ])
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
-    )
+    Promise.all([
+      caches.keys().then((keys) =>
+        Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+      ),
+      // Take control of any already-open tabs immediately so the new
+      // worker starts serving them right away, no reload required.
+      self.clients.claim(),
+    ])
   );
-  self.clients.claim();
 });
 
 // Allow the app to trigger an immediate SW takeover after a version bump.
