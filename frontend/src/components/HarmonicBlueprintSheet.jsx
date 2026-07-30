@@ -37,8 +37,13 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
   const [existing, setExisting] = useState(seedProfile);   // latest saved profile or null
   const [eigenmode, setEigenmode] = useState(seedEigen);   // baseline profile or null
   const [loading, setLoading] = useState(!initialData);
-  // intro | capture | analysing | review | eigenmodeSaved | results | error
+  // intro | tipsGate | tipsRitual | capture | analysing | review | eigenmodeSaved | results | error
   const [step, setStep] = useState(seedProfile ? 'results' : 'intro');
+  // Phase 9 — tips-skipped preference loaded from /me/settings on open. When
+  // true, IntroPanel's Begin flows straight to `capture`, bypassing the
+  // Setup Tips ritual. Default false so first-time users see the tips.
+  const [hbTipsSkipped, setHbTipsSkipped] = useState(false);
+  const [savingTipsPref, setSavingTipsPref] = useState(false);
   const [error, setError] = useState('');
   const [profile, setProfile] = useState(seedProfile);
   // Phase 2: findings pending user confirmation. `selected` is a Set of finding keys.
@@ -131,6 +136,40 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
 
   useEffect(() => () => stopStream(), []);
   useEffect(() => { if (!open) stopStream(); }, [open]);
+
+  // Phase 9 — load `hb_tips_skipped` when the sheet opens so IntroPanel's
+  // Begin knows whether to route through the tips ritual or straight to
+  // capture. Silent on failure — defaults to showing tips.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    (async () => {
+      try {
+        const { data } = await api.get('/me/settings');
+        if (alive && data && typeof data === 'object') {
+          setHbTipsSkipped(!!data.hb_tips_skipped);
+        }
+      } catch (_) { /* graceful */ }
+    })();
+    return () => { alive = false; };
+  }, [open]);
+
+  const beginFromIntro = () => {
+    setError('');
+    // If the user has permanently opted out of tips, skip straight to
+    // capture — matches "returning users can bypass this screen".
+    setStep(hbTipsSkipped ? 'capture' : 'tipsGate');
+  };
+
+  const saveTipsSkippedPreference = async (skipped) => {
+    // Optimistic UI — no need to gate the ritual on the network round-trip.
+    setHbTipsSkipped(skipped);
+    setSavingTipsPref(true);
+    try { await api.post('/me/settings', { hb_tips_skipped: skipped }); }
+    catch (_) { /* graceful — local state stays, next visit will sync */ }
+    finally { setSavingTipsPref(false); }
+  };
+
 
   function stopStream() {
     try { rafRef.current && cancelAnimationFrame(rafRef.current); } catch (_) {}
@@ -375,7 +414,7 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
             <IntroPanel
               existing={existing}
               isPro={isPro}
-              onBegin={() => { setError(''); setStep('capture'); }}
+              onBegin={beginFromIntro}
               onPreviewJourney={async () => {
                 setError('');
                 await generateJourney();
@@ -394,6 +433,24 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
               onUpgrade={onOpenAccount}
               onRegenerate={generateJourney}
               onBack={() => setStep('intro')}
+            />
+          )}
+
+          {!loading && step === 'tipsGate' && (
+            <TipsGatePanel
+              onYes={() => setStep('tipsRitual')}
+              onNo={() => { setError(''); setStep('capture'); }}
+              onBack={() => setStep('intro')}
+            />
+          )}
+
+          {!loading && step === 'tipsRitual' && (
+            <TipsRitualPanel
+              hbTipsSkipped={hbTipsSkipped}
+              savingTipsPref={savingTipsPref}
+              onToggleSkip={saveTipsSkippedPreference}
+              onReady={() => { setError(''); setStep('capture'); }}
+              onBack={() => setStep('tipsGate')}
             />
           )}
 
@@ -559,6 +616,152 @@ function IntroPanel({ existing, isPro, onBegin, onPreviewJourney, onUpgrade }) {
     </div>
   );
 }
+
+// -- Phase 9: HB Setup Tips gate + ritual --------------------------------------
+function TipsGatePanel({ onYes, onNo, onBack }) {
+  return (
+    <div className="max-w-2xl mx-auto space-y-6" data-testid="hb-tips-gate">
+      <div className="glass p-8 text-center">
+        <div className="label-tiny mb-4 text-[#C4A67A]">One quick moment</div>
+        <h2 className="text-2xl text-[#E8E3D9] leading-relaxed mb-3" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+          Before we begin, would you like a few tips to help you get the most accurate reading?
+        </h2>
+        <p className="text-[#8A9A92] text-sm leading-relaxed mb-8 max-w-md mx-auto">
+          A gentle ritual for arriving present. Takes about a minute to read.
+        </p>
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+          <button
+            type="button"
+            data-testid="hb-tips-gate-yes"
+            onClick={onYes}
+            className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors w-full sm:w-auto"
+          >
+            Yes, share the tips
+          </button>
+          <button
+            type="button"
+            data-testid="hb-tips-gate-no"
+            onClick={onNo}
+            className="px-6 py-3 rounded-full border border-[#5C9E8C]/40 hover:border-[#72C2AC]/70 text-[#C9DED6] hover:bg-black/25 transition-colors w-full sm:w-auto"
+          >
+            No, I&rsquo;m ready
+          </button>
+        </div>
+      </div>
+      <div className="text-center">
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-[11px] uppercase tracking-[0.18em] text-[#5A6B65] hover:text-[#C4A67A] transition-colors"
+        >
+          ← Back
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const HB_TIPS = [
+  {
+    title: 'Choose Your Moment',
+    body: 'The ideal time to record your Eigenmode baseline is first thing in the morning, around 15 to 30 minutes after waking. Your voice carries its most natural, uninfluenced frequency signature before the day has had a chance to shape it.',
+  },
+  {
+    title: 'Hydrate Gently',
+    body: 'Drink half a glass of room temperature water before you begin. This helps your vocal tract resonate more naturally and gives your system a gentle reset.',
+  },
+  {
+    title: 'Clear the Vocal Tract',
+    body: 'Take a moment to gently clear your throat to wake up the diaphragm and vocal folds. Nothing forced — just a soft, natural clearing to prepare your voice.',
+  },
+  {
+    title: 'Settle Into Stillness',
+    body: 'Sit quietly for 1 to 2 minutes before recording. This is a perfect moment to use the Breathwork feature to stabilize your heart rate and arrive fully present before your baseline is captured.',
+  },
+];
+
+function TipsRitualPanel({ hbTipsSkipped, savingTipsPref, onToggleSkip, onReady, onBack }) {
+  return (
+    <div className="max-w-3xl mx-auto space-y-6" data-testid="hb-tips-ritual">
+      <div className="text-center mb-2">
+        <div className="label-tiny mb-3 text-[#C4A67A]">A gentle pre-session ritual</div>
+        <h2 className="text-3xl text-[#E8E3D9] leading-relaxed" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+          Arriving Present
+        </h2>
+        <p className="text-[#8A9A92] text-sm leading-relaxed mt-2 max-w-lg mx-auto">
+          Take your time with these. They&rsquo;re not steps to check off, just a soft invitation to
+          arrive fully before your voice is captured.
+        </p>
+      </div>
+
+      <div className="space-y-4">
+        {HB_TIPS.map((tip, i) => (
+          <div
+            key={tip.title}
+            className="glass p-6 border-l-2 border-[#C4A67A]/30 hover:border-[#C4A67A]/60 transition-colors"
+            data-testid={`hb-tip-${i + 1}`}
+          >
+            <div className="flex items-baseline gap-3">
+              <span className="label-tiny text-[#C4A67A]">Tip {i + 1}</span>
+              <h3 className="text-lg text-[#E8E3D9]" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                {tip.title}
+              </h3>
+            </div>
+            <p className="text-[#B5C4BC] text-[13.5px] leading-relaxed mt-2">
+              {tip.body}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <div className="glass p-5 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-[13px] text-[#E8E3D9] font-medium">Skip tips next time</div>
+          <div className="text-[11px] text-[#8A9A92] leading-relaxed mt-0.5">
+            Go straight to recording on future analyses. You can turn this back on in the Assistant settings.
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={!!hbTipsSkipped}
+          onClick={() => onToggleSkip(!hbTipsSkipped)}
+          disabled={savingTipsPref}
+          data-testid="hb-tips-skip-toggle"
+          className={`shrink-0 relative inline-flex h-5 w-9 rounded-full border transition-colors ${
+            hbTipsSkipped ? 'bg-[#5C9E8C]/50 border-[#72C2AC]' : 'bg-black/40 border-[#5C9E8C]/25'
+          } ${savingTipsPref ? 'opacity-60' : ''}`}
+        >
+          <span
+            aria-hidden="true"
+            className={`inline-block h-3.5 w-3.5 my-[2px] rounded-full bg-[#E8E3D9] shadow transform transition-transform ${
+              hbTipsSkipped ? 'translate-x-[18px]' : 'translate-x-[2px]'
+            }`}
+          />
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-[11px] uppercase tracking-[0.18em] text-[#5A6B65] hover:text-[#C4A67A] transition-colors"
+        >
+          ← Back
+        </button>
+        <button
+          type="button"
+          data-testid="hb-tips-ready"
+          onClick={onReady}
+          className="px-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors"
+        >
+          I&rsquo;m Ready to Begin
+        </button>
+      </div>
+    </div>
+  );
+}
+
 
 function FreePreviewPanel({ journey, journeyLoading, journeyError, isPro, onUpgrade, onRegenerate, onBack }) {
   return (

@@ -242,7 +242,28 @@ DEFAULT_PLAN_CONFIG = {
     "trial_days": 7,
 }
 
-app = FastAPI()
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app_):
+    """FastAPI lifespan (replaces the deprecated @app.on_event decorators).
+
+    Runs one-time startup work (index creation, plan-config + admin seed),
+    yields control to the app, then runs shutdown cleanup on graceful stop.
+    The real body lives at the bottom of the file (`_lifespan_startup` /
+    `_lifespan_shutdown`) so we keep it near the collection references it
+    touches. Forward-declared here so `app = FastAPI(lifespan=...)` can
+    wire it in before any routes are registered.
+    """
+    await _lifespan_startup()
+    try:
+        yield
+    finally:
+        await _lifespan_shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
 api = APIRouter(prefix="/api")
 
 
@@ -1636,6 +1657,10 @@ async def _user_settings(user_id: str) -> dict:
     s = (doc.get("assistant_settings") or {})
     return {
         "harmonic_influence_enabled": bool(s.get("harmonic_influence_enabled", True)),
+        # Phase 9 — Harmonic Blueprint setup tips shown on first capture.
+        # Users can opt out permanently via a toggle on the tips screen;
+        # default is false so first-time users get the gentle guided intro.
+        "hb_tips_skipped": bool(s.get("hb_tips_skipped", False)),
     }
 
 
@@ -2390,6 +2415,50 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
     except Exception as exc:
         logger.warning("[agent_chat] mood_preference_hint failed: %s", exc)
 
+    # Phase 9: Gentle HB setup nudge — for users WITHOUT an eigenmode
+    # profile who have logged enough listening sessions since the last
+    # nudge. Rules:
+    #   • never fires if the user has already captured an eigenmode
+    #   • never fires within the same session as a dismissal
+    #   • ≥ 3 completed listening sessions must have passed since the last
+    #     nudge OR since account creation (spacing floor)
+    #   • the LLM decides the wording each time — the directive only
+    #     invites it to weave a natural one-liner IF the reply is
+    #     already suggesting a frequency/preset
+    hb_nudge_shown = False
+    try:
+        needs_nudge = False
+        eigen_exists = await _ensure_eigenmode(user["id"])
+        if not eigen_exists:
+            udoc = await db.users.find_one(
+                {"id": user["id"]},
+                {"hb_nudge_last_shown_journey_count": 1, "hb_nudge_dismissed_session_id": 1},
+            ) or {}
+            if udoc.get("hb_nudge_dismissed_session_id") != body.session_id:
+                journey_count = await db.wellness_journey.count_documents({"user_id": user["id"]})
+                last_shown = int(udoc.get("hb_nudge_last_shown_journey_count") or 0)
+                # Spacing floor: 3 listening sessions between nudges. First
+                # nudge fires once the user has ≥ 3 sessions of history.
+                if journey_count - last_shown >= 3:
+                    needs_nudge = True
+        if needs_nudge:
+            parts.append(
+                "HB_SETUP_NUDGE_ELIGIBLE: this user has NOT captured a Harmonic "
+                "Blueprint yet. If — and only if — your reply is already "
+                "suggesting a frequency, preset, or soundscape, weave ONE "
+                "warm, brief sentence inviting them to capture their "
+                "Harmonic Blueprint so future suggestions can be personalised "
+                "to their resonance profile. VARY the wording every time; "
+                "never sound like a canned prompt. Never mention 'HB setup', "
+                "'set up', or use bracket/parenthetical asides — say it "
+                "conversationally as if suggesting a next step to a friend. "
+                "If the reply isn't already suggesting audio, OMIT the nudge "
+                "entirely — do not force it."
+            )
+            hb_nudge_shown = True
+    except Exception as exc:
+        logger.warning("[agent_chat] HB nudge eligibility check failed: %s", exc)
+
     # Phase 7: behavioural patterns detected across the user's journey.
     # Compact block, top-3 non-dismissed patterns, with soft one-callback
     # guidance so the LLM doesn't lecture.
@@ -2456,6 +2525,20 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
                                 s["harmonic_note"] = note
             except Exception as exc:
                 logger.warning("[agent_chat] hb_note annotation failed: %s", exc)
+        # Phase 9: attach the nudge-shown flag AND record the journey-count
+        # snapshot on the user doc so we honour the 3-session spacing rule
+        # even if the user never explicitly dismisses. Failure to record
+        # doesn't block the reply.
+        if hb_nudge_shown:
+            reply["hb_nudge_shown"] = True
+            try:
+                jc = await db.wellness_journey.count_documents({"user_id": user["id"]})
+                await db.users.update_one(
+                    {"id": user["id"]},
+                    {"$set": {"hb_nudge_last_shown_journey_count": jc}},
+                )
+            except Exception as exc:
+                logger.warning("[agent_chat] hb_nudge bookkeeping failed: %s", exc)
         return reply
     except HTTPException:
         raise
@@ -3258,6 +3341,9 @@ class AssistantSettingsIn(BaseModel):
     frontend can PATCH-style update a single toggle without echoing state
     it doesn't own."""
     harmonic_influence_enabled: Optional[bool] = None
+    # Phase 9 — set true when the user chooses "Skip tips next time" on the
+    # HB setup tips screen. Skips straight from IntroPanel → capture.
+    hb_tips_skipped: Optional[bool] = None
 
 
 @api.get("/me/settings")
@@ -3278,6 +3364,29 @@ async def update_settings(
         update = {f"assistant_settings.{k}": v for k, v in payload.items()}
         await db.users.update_one({"id": user["id"]}, {"$set": update})
     return await _user_settings(user["id"])
+
+
+class HBNudgeDismissIn(BaseModel):
+    """Records that the user tapped "not now" on the gentle HB setup nudge.
+    Dismissal is scoped to the current agent chat session — the same
+    session won't re-nudge, but a fresh session after 3+ new listening
+    sessions still can. Once the user actually captures an eigenmode,
+    nudges silence permanently regardless of dismissals.
+    """
+    session_id: str = Field(min_length=1, max_length=80)
+
+
+@api.post("/me/hb-nudge/dismiss")
+async def hb_nudge_dismiss(
+    body: HBNudgeDismissIn,
+    user: dict = Depends(get_current_user),
+):
+    """Persist that the user said "not now" to this session's HB nudge."""
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"hb_nudge_dismissed_session_id": body.session_id}},
+    )
+    return {"ok": True}
 
 
 # ---------- Stripe helper ----------
@@ -4580,8 +4689,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-@app.on_event("startup")
-async def startup():
+# --- FastAPI lifespan bodies ------------------------------------------------
+# Wired via the `lifespan=` context manager declared at module top; the
+# legacy @app.on_event decorators were removed to silence the FastAPI
+# deprecation warnings and avoid double-fire.
+async def _lifespan_startup():
     await db.users.create_index("email", unique=True)
     await db.sessions.create_index([("user_id", 1), ("created_at", -1)])
     await db.streaks.create_index("user_id", unique=True)
@@ -4634,6 +4746,8 @@ async def startup():
             logger.info("[seed] admin fields updated: %s", list(updates.keys()))
 
 
-@app.on_event("shutdown")
-async def shutdown():
+async def _lifespan_shutdown():
     client.close()
+
+# NOTE: startup + shutdown are wired via the `lifespan=` context manager
+# declared at module top (see `async def lifespan(app_)`).

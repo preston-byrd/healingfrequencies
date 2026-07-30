@@ -114,7 +114,15 @@ export default function AIAgentSheet({
       });
       setMessages((prev) => [
         ...prev,
-        { id: mkId(), role: 'assistant', text: data.message, suggestions: data.suggestions || [] },
+        {
+          id: mkId(),
+          role: 'assistant',
+          text: data.message,
+          suggestions: data.suggestions || [],
+          // Phase 9 — LLM was invited to weave a gentle HB setup nudge. UI
+          // reflects this with a soft "not now" affordance on the message.
+          hbNudgeShown: !!data.hb_nudge_shown,
+        },
       ]);
     } catch (e) {
       const msg = e?.response?.data?.detail || e?.message || 'Could not reach the agent';
@@ -373,6 +381,29 @@ export default function AIAgentSheet({
                       )}
                     </button>
                   ))}
+                </div>
+              )}
+              {m.role === 'assistant' && m.hbNudgeShown && (
+                <div className="mt-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.14em] text-[#5A6B65]">
+                  <span>Harmonic Blueprint hint above · </span>
+                  <button
+                    type="button"
+                    data-testid="agent-hb-nudge-dismiss"
+                    onClick={() => {
+                      // Hide the affordance immediately so the user knows
+                      // it registered. Persist the dismiss server-side so
+                      // this session won't nudge again.
+                      setMessages((prev) => prev.map((mm) =>
+                        mm.id === m.id ? { ...mm, hbNudgeShown: false } : mm
+                      ));
+                      api.post('/me/hb-nudge/dismiss', {
+                        session_id: sessionIdRef.current,
+                      }).catch(() => {});
+                    }}
+                    className="text-[#C4A67A]/80 hover:text-[#C4A67A] transition-colors underline-offset-2 hover:underline"
+                  >
+                    not now
+                  </button>
                 </div>
               )}
             </div>
