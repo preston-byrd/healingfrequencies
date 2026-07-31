@@ -634,6 +634,9 @@ export default function Dashboard({ onOpenAccount }) {
   const accountMenuRef = React.useRef(null);
   // ---- Notifications preferences modal ----------------------------------
   const [notifPrefsOpen, setNotifPrefsOpen] = useState(false);
+  // Deferred ref so `handleNotificationNavigate` can call toggleBreathwork
+  // without a TDZ error (the const is declared ~500 lines below).
+  const toggleBreathworkRef = React.useRef(null);
   // Listening guide modal — accessed via the info icon in the player.
   const [listeningGuideOpen, setListeningGuideOpen] = useState(false);
   // Extended headphone reminder — fires once per 24h when binaural,
@@ -663,6 +666,13 @@ export default function Dashboard({ onOpenAccount }) {
       if (key === 'harmonic-blueprint') { setHbOpen && setHbOpen(true); return; }
       if (key === 'notification-preferences' || key === 'notifications') { setNotifPrefsOpen(true); return; }
       if (key === 'account') { onOpenAccount && onOpenAccount(); return; }
+      if (key === 'breathwork') {
+        // Accept the "take a breath together" invitation — turn on breathwork
+        // (which auto-starts the engine if it's not already playing).
+        try { toggleBreathworkRef.current && toggleBreathworkRef.current(); } catch (_) { /* graceful */ }
+        return;
+      }
+      if (key === 'listening-guide') { setListeningGuideOpen(true); return; }
       return;
     }
     try {
@@ -1174,6 +1184,13 @@ export default function Dashboard({ onOpenAccount }) {
     if (!isPro) { onOpenAccount(); return; }
     audioEngine.setFrequency(parseFloat(e.target.value));
   };
+
+  // Publish toggleBreathwork through the ref so hash-route destinations
+  // pointing at `#breathwork` (fired from the notification reader) can
+  // invoke it without a TDZ reference issue.
+  useEffect(() => {
+    toggleBreathworkRef.current = toggleBreathwork;
+  });
 
   const saveSession = async () => {
     setErr('');

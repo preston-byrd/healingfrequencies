@@ -3981,20 +3981,36 @@ async def notifications_checkin_nudge(
     """Called by the frontend when a check-in surface renders (post-session
     card, pre-session pause, or long-idle prompt). Emits an in-app notification
     row AND, if push is enabled, a browser push — but never during active
-    playback (the client is responsible for not calling this mid-playback)."""
+    playback (the client is responsible for not calling this mid-playback).
+
+    Destinations are chosen so the reader's "Open" CTA always leads somewhere
+    the user can actually accept the invitation:
+      • pre_session  → Wellness Assistant (set an intention)
+      • post_session → Wellness Assistant (reflect together)
+      • inactivity   → Breathwork (take a breath together)
+    """
     trig = body.trigger
     lines = {
-        "pre_session": ("Want to check in for a moment?",
-                        "Before you begin — how are you arriving today?"),
-        "post_session": ("How are you feeling?",
-                         "Take a soft moment. Anything shift for you just now?"),
-        "inactivity": ("A quiet moment awaits",
-                       "You haven't been here in a while. Want to take a breath together?"),
+        "pre_session": (
+            "Want to check in for a moment?",
+            "Before you begin — how are you arriving today?",
+            "#wellness-assistant",
+        ),
+        "post_session": (
+            "How are you feeling?",
+            "Take a soft moment. Anything shift for you just now?",
+            "#wellness-assistant",
+        ),
+        "inactivity": (
+            "A quiet moment awaits",
+            "You haven't been here in a while. Want to take a breath together?",
+            "#breathwork",
+        ),
     }
-    title, body_txt = lines[trig]
+    title, body_txt, destination = lines[trig]
     doc = await _enqueue_notification(
         user_id=user["id"], category="checkin", kind=trig,
-        title=title, body=body_txt, destination="/",
+        title=title, body=body_txt, destination=destination,
         meta={"trigger": trig},
     )
     return {"ok": True, "delivered": bool(doc)}

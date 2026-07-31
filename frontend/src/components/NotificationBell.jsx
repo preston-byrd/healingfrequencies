@@ -37,6 +37,8 @@ function ctaLabelFor(destination) {
     if (k === 'harmonic-blueprint') return 'Open Harmonic Blueprint';
     if (k === 'notification-preferences' || k === 'notifications') return 'Open notification settings';
     if (k === 'account') return 'Open Account';
+    if (k === 'breathwork') return 'Take a breath together';
+    if (k === 'listening-guide') return 'Read the guide';
     return 'Open';
   }
   try {
