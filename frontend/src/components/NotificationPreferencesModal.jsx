@@ -91,8 +91,9 @@ export default function NotificationPreferencesModal({ open, onClose }) {
       const res = await subscribeToPush();
       if (!res.ok) {
         if (res.reason === 'unsupported') setError('Push notifications aren\'t available in this browser.');
-        else if (res.reason === 'denied') setError('Browser blocked notifications. Enable them in your browser settings, then try again.');
-        else setError('We couldn\'t enable push notifications right now.');
+        else if (res.reason === 'denied' || res.reason === 'NotAllowedError') setError('Your browser blocked notifications. Enable them in your browser settings, then try again.');
+        else if (res.reason === 'no_vapid_key') setError('Push isn\'t configured on the server right now. In-app notifications still work.');
+        else setError('We couldn\'t enable push notifications right now. In-app notifications still work.');
         return;
       }
       setPermission('granted');
