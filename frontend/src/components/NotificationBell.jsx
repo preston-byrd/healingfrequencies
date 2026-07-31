@@ -151,7 +151,7 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
             ref={panelRef}
             data-testid="notification-center"
             role="dialog"
-            className="fixed left-3 right-3 top-[64px] sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-[380px] max-h-[75vh] sm:max-h-[70vh] z-50 bg-[#0A1612] border border-[#5C9E8C]/40 rounded-xl shadow-[0_18px_40px_-8px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col"
+            className="fixed left-3 right-3 top-[64px] sm:left-6 sm:right-auto sm:top-20 sm:w-[380px] max-h-[75vh] sm:max-h-[70vh] z-50 bg-[#0A1612] border border-[#5C9E8C]/40 rounded-xl shadow-[0_18px_40px_-8px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col"
           >
           <div className="flex items-center justify-between px-4 py-3 border-b border-[#5C9E8C]/20">
             <div className="flex flex-col">

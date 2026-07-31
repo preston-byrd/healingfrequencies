@@ -10,6 +10,7 @@ import SoundLineage from '@/components/SoundLineage';
 import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
 import MyJourneySection from '@/components/MyJourneySection';
 import MyPatternsSection from '@/components/MyPatternsSection';
+import AnnouncementComposerSection from '@/components/AnnouncementComposerSection';
 import { usePaymentMethodSupport } from '@/hooks/usePaymentMethodSupport';
 
 function fmtDate(iso) {
@@ -1002,6 +1003,7 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
                 </button>
               </div>
             </form>
+            <AnnouncementComposerSection />
           </div>
         )}
 

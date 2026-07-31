@@ -25,6 +25,7 @@ import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
 import NotificationBell from '@/components/NotificationBell';
 import NotificationPreferencesModal from '@/components/NotificationPreferencesModal';
+import PushOptInSlip, { requestPushOptInIfWarm } from '@/components/PushOptInSlip';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -442,6 +443,11 @@ export default function Dashboard({ onOpenAccount }) {
         // center so users who dismiss the inline card can still find their
         // way back to reflection. Backend gates for prefs + quiet hours.
         try { api.post('/me/notifications/checkin-nudge', { trigger: 'post_session' }).catch(() => {}); } catch (_) {}
+        // Warm-moment push opt-in: after a completed session (Smart Fade
+        // ran to zero), invite the user to enable browser push. The slip
+        // is silent if push is unsupported, already granted/denied, or
+        // dismissed in the last 7/60 days.
+        try { setTimeout(() => requestPushOptInIfWarm(), 4200); } catch (_) {}
       }
     }
   }, [state.frequency, state.waveform, state.binaural, state.ambient, activeSoundscape]);
@@ -787,8 +793,17 @@ export default function Dashboard({ onOpenAccount }) {
       }, 30000);
     };
     window.addEventListener('sf:agent:suggestion-taken', onSuggestion);
+    // Warm-moment push opt-in: peak value moment for a first-time user is
+    // right after they've asked the Assistant for guidance and tapped an
+    // audio suggestion. 8s delay so the tone has actually landed + they've
+    // heard it, not the moment they tapped a button.
+    const onSuggestionForPush = () => {
+      setTimeout(() => { try { requestPushOptInIfWarm(); } catch (_) {} }, 8000);
+    };
+    window.addEventListener('sf:agent:suggestion-taken', onSuggestionForPush);
     return () => {
       window.removeEventListener('sf:agent:suggestion-taken', onSuggestion);
+      window.removeEventListener('sf:agent:suggestion-taken', onSuggestionForPush);
       if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
     };
   }, []);
@@ -1342,6 +1357,11 @@ export default function Dashboard({ onOpenAccount }) {
             <div className="flex items-center justify-between mb-1">
               <div className="label-tiny">Healing Frequencies</div>
               <div className="flex items-center gap-3">
+                <NotificationBell
+                  testid="notification-bell"
+                  onNavigate={handleNotificationNavigate}
+                  onOpenPreferences={() => setNotifPrefsOpen(true)}
+                />
                 <button
                   data-testid="wellness-assistant-button"
                   onClick={openCompanion}
@@ -1351,11 +1371,6 @@ export default function Dashboard({ onOpenAccount }) {
                 >
                   <Sparkles size={16} />
                 </button>
-                <NotificationBell
-                  testid="notification-bell"
-                  onNavigate={handleNotificationNavigate}
-                  onOpenPreferences={() => setNotifPrefsOpen(true)}
-                />
                 <div className="relative" ref={accountMenuRef}>
                   <button
                     data-testid="account-button"
@@ -2355,6 +2370,12 @@ export default function Dashboard({ onOpenAccount }) {
         open={notifPrefsOpen}
         onClose={() => setNotifPrefsOpen(false)}
       />
+
+      {/* Warm-moment push opt-in slip — silently invited by
+          `requestPushOptInIfWarm()` after Smart-Fade completion OR after a
+          Wellness Assistant suggestion tap. Never shown mid-session; snoozes
+          for 7 days on "Later" or 60 days on "No thanks". */}
+      <PushOptInSlip />
     </div>
   );
 }
