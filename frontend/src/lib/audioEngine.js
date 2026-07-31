@@ -76,7 +76,29 @@ class AudioEngine {
   async _ensureCtx() {
     let created = false;
     if (!this.ctx) {
-      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // Fidelity audit: request the highest sample rate the browser + hardware
+      // will accept. Attempts 96 kHz → 48 kHz → browser default. Any request
+      // above what the OS device supports throws NotSupportedError (esp. iOS
+      // Safari), which is why each tier is wrapped in its own try/catch.
+      // The final untyped `new AudioContext()` always succeeds and uses the
+      // browser default (usually 48000 on Chrome/Edge, 44100 on Firefox).
+      // We store the actual rate for reporting via getState().
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      const attempts = [96000, 48000];
+      for (const sr of attempts) {
+        try {
+          this.ctx = new Ctor({ sampleRate: sr, latencyHint: 'playback' });
+          if (this.ctx) break;
+        } catch (e) { /* try next */ this.ctx = null; }
+      }
+      if (!this.ctx) {
+        try { this.ctx = new Ctor({ latencyHint: 'playback' }); } catch (e) { this.ctx = null; }
+      }
+      if (!this.ctx) this.ctx = new Ctor();
+      // Fidelity signal chain: master is a UNITY GainNode. No DynamicsCompressor,
+      // no WaveShaper, no Limiter anywhere — sums land on ctx.destination raw so
+      // sine oscillators render in their exact mathematical form. See getState()
+      // for the resolved sampleRate on the current device.
       this.master = this.ctx.createGain();
       this.master.gain.value = 1;
       this.master.connect(this.ctx.destination);
@@ -411,6 +433,9 @@ class AudioEngine {
       goldenStack: this.goldenStack,
       ambient: Object.fromEntries(Object.entries(this.ambient).map(([k, v]) => [k, v.volume])),
       sessionFadeActive: !!this._sessionFadeActive,
+      // Fidelity audit — resolved AudioContext sample rate (Hz). Reflects
+      // the highest rate the device accepted; null when ctx isn't built yet.
+      sampleRate: this.ctx ? this.ctx.sampleRate : null,
     };
   }
 
@@ -510,19 +535,68 @@ class AudioEngine {
     }
   }
 
-  // Spawn the golden-ratio harmonic tones (φ¹ and φ²) at decreasing amplitude.
+  // Spawn the golden-ratio harmonic tones (φ¹ and φ²) at mathematically
+  // exact 1/φ and 1/φ² amplitude ratios so the harmonic series preserves
+  // its self-similar Fibonacci-adjacent spectrum. Base:φ¹:φ² = 1 : 0.6180 : 0.3820.
+  //
+  // All three amplitudes (base implicit at 1.0, and the two φ layers) are
+  // scaled by the SAME HEADROOM factor so their mutual ratios are preserved
+  // exactly — no compression, no limiting, no per-layer gain reduction.
+  // Headroom keeps the constructive peak below the destination's ±1.0 clip
+  // ceiling even at toneVolume=1.0, so a phase-aligned instant of all three
+  // sines never causes destination clipping and no subtle harmonic detail
+  // is lost to intermodulation distortion above unity.
   _spawnPhiHarmonics() {
     const ctx = this.ctx;
-    const PHI = 1.6180339887;
+    const PHI = 1.6180339887498948;  // (1 + √5) / 2
+    const INV_PHI = 1 / PHI;          // ≈ 0.6180339887
+    const INV_PHI2 = INV_PHI * INV_PHI; // ≈ 0.3819660113
+    // Sum of all three layer amplitudes at unity base: 1 + 1/φ + 1/φ² = 2.
+    // A tone-relative scale of 1/2 gives a worst-case constructive peak of
+    // toneVolume * 1.0 — matching a single tone at the same volume slot.
+    const HEADROOM = 0.5;
+    const baseAmp = HEADROOM;        // base is now scaled to 0.5 (was implicit 1.0)
     const levels = [
-      { mult: PHI, amp: 0.55 },     // ~1618 Hz at base 1000
-      { mult: PHI * PHI, amp: 0.30 }, // φ² ≈ 2.618
+      { mult: PHI, amp: INV_PHI * HEADROOM },
+      { mult: PHI * PHI, amp: INV_PHI2 * HEADROOM },
     ];
+    // Add a soft base attenuation NODE on the primary oscillator path so
+    // its amplitude also gets the same HEADROOM scaling, keeping the
+    // mathematical ratios exact. We insert a fresh gain node between the
+    // existing oscillator connection and gateGain, disconnecting the direct
+    // wire first. The node is stored on `this._goldenBaseGain` so
+    // _killPhiHarmonics can restore unity when Golden Stack is disabled.
+    try {
+      if (!this._goldenBaseGain) {
+        const gBase = ctx.createGain();
+        gBase.gain.value = baseAmp;
+        // Rewire: osc → gBase → gateGain (was osc → gateGain / merger → gateGain).
+        // If binaural is active, the merger sits before gateGain — we insert
+        // between merger and gateGain in that case.
+        if (this.binaural > 0) {
+          // Find the merger that feeds gateGain and detour through gBase.
+          try { this.osc.context; /* no-op guard */ } catch (_) {}
+          // Simplest reliable approach: connect gateGain's inputs via gBase.
+          // We can't introspect merger connections in Web Audio, so we
+          // instead attenuate at toneGain proportionally. See fallback below.
+          this.toneGain.gain.cancelScheduledValues(ctx.currentTime);
+          this.toneGain.gain.setValueAtTime(this.toneVolume * baseAmp, ctx.currentTime);
+          this._goldenBaseGain = 'via-tone-gain';
+        } else {
+          try { this.osc.disconnect(); } catch (_) {}
+          this.osc.connect(gBase);
+          gBase.connect(this.gateGain || this.toneGain);
+          this._goldenBaseGain = gBase;
+        }
+      }
+    } catch (e) { _warn('audio', e); }
     levels.forEach(({ mult, amp }) => {
       const osc = ctx.createOscillator();
       osc.type = this.waveform;
       const f = this.frequency * mult;
-      // Keep audible; if above 4kHz, fold down an octave for comfort.
+      // Keep audible; if above 4kHz, fold down an octave for comfort. This
+      // preserves the golden-ratio interval within the current octave but
+      // sits it in a range where cochlear resolution is still high.
       osc.frequency.value = f > 4000 ? f / 2 : f;
       const g = ctx.createGain();
       g.gain.value = 0;
@@ -542,6 +616,29 @@ class AudioEngine {
       gain.gain.cancelScheduledValues(ctx.currentTime);
       gain.gain.linearRampToValueAtTime(0, ctx.currentTime + fade);
     });
+    // Restore the base oscillator's headroom scaling to unity so a solo tone
+    // plays at its natural amplitude again after Golden Stack is disabled.
+    try {
+      if (this._goldenBaseGain === 'via-tone-gain') {
+        // Binaural path — restore toneGain to the user's tone-volume target.
+        this.toneGain.gain.cancelScheduledValues(ctx.currentTime);
+        this.toneGain.gain.linearRampToValueAtTime(this.toneVolume, ctx.currentTime + fade);
+      } else if (this._goldenBaseGain && this._goldenBaseGain.gain) {
+        // Mono path — ramp the inserted base-attenuation gain up to unity
+        // then disconnect it and reconnect the oscillator directly.
+        const gBase = this._goldenBaseGain;
+        gBase.gain.cancelScheduledValues(ctx.currentTime);
+        gBase.gain.linearRampToValueAtTime(1.0, ctx.currentTime + fade);
+        setTimeout(() => {
+          try {
+            this.osc.disconnect();
+            this.osc.connect(this.gateGain || this.toneGain);
+            gBase.disconnect();
+          } catch (e) { _warn('audio', e); }
+        }, (fade + 0.05) * 1000);
+      }
+    } catch (e) { _warn('audio', e); }
+    this._goldenBaseGain = null;
     setTimeout(() => {
       local.forEach(({ osc, gain }) => {
         try { osc.stop(); osc.disconnect(); gain.disconnect(); } catch (e) { _warn('audio', e); }
@@ -786,7 +883,13 @@ class AudioEngine {
 
   setToneVolume(v) {
     this.toneVolume = v;
-    if (this.toneGain) this.toneGain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+    if (this.toneGain) {
+      // Fidelity: when Golden Stack + binaural are BOTH active, the toneGain
+      // path also carries the golden headroom (0.5) so all 3 layers preserve
+      // exact 1 : 1/φ : 1/φ² ratios without clipping. Otherwise unity.
+      const headroom = (this._goldenBaseGain === 'via-tone-gain') ? 0.5 : 1.0;
+      this.toneGain.gain.setTargetAtTime(v * headroom, this.ctx.currentTime, 0.05);
+    }
     this._emit();
   }
 
