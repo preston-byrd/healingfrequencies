@@ -191,7 +191,9 @@ def test_settings_default_true_for_fresh_user():
         r = s.get(f"{API}/me/settings", timeout=15)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body == {"harmonic_influence_enabled": True}
+        assert body.get("harmonic_influence_enabled") is True
+        # Phase 9.2 added hb_tips_skipped (default false)
+        assert body.get("hb_tips_skipped") is False
     finally:
         _cleanup_user(s._uid)
 
@@ -202,15 +204,15 @@ def test_settings_roundtrip_persists():
         r = s.post(f"{API}/me/settings",
                    json={"harmonic_influence_enabled": False}, timeout=15)
         assert r.status_code == 200, r.text
-        assert r.json() == {"harmonic_influence_enabled": False}
+        assert r.json().get("harmonic_influence_enabled") is False
         # GET reads back the new value
         r2 = s.get(f"{API}/me/settings", timeout=15)
         assert r2.status_code == 200
-        assert r2.json() == {"harmonic_influence_enabled": False}
+        assert r2.json().get("harmonic_influence_enabled") is False
         # Flip back
         r3 = s.post(f"{API}/me/settings",
                     json={"harmonic_influence_enabled": True}, timeout=15)
-        assert r3.json() == {"harmonic_influence_enabled": True}
+        assert r3.json().get("harmonic_influence_enabled") is True
     finally:
         _cleanup_user(s._uid)
 
@@ -224,7 +226,7 @@ def test_settings_empty_body_is_noop():
         # Empty body should NOT change the value
         r = s.post(f"{API}/me/settings", json={}, timeout=15)
         assert r.status_code == 200, r.text
-        assert r.json() == {"harmonic_influence_enabled": False}
+        assert r.json().get("harmonic_influence_enabled") is False
     finally:
         _cleanup_user(s._uid)
 
@@ -238,8 +240,9 @@ def test_settings_unknown_fields_ignored():
         assert r.status_code == 200, r.text
         body = r.json()
         # Only the recognised field survives; unknowns are silently dropped
-        assert body == {"harmonic_influence_enabled": False}
+        assert body.get("harmonic_influence_enabled") is False
         assert "random_key" not in body
+        assert "wat" not in body
     finally:
         _cleanup_user(s._uid)
 

@@ -9,7 +9,7 @@
  *  - API calls (/api/*): always network (do not cache auth/state).
  *  - Pre-cache the app shell on install for instant offline open.
  */
-const CACHE = 'hf-shell-v4';
+const CACHE = 'hf-shell-v5';
 const SHELL = [
   '/',
   '/index.html',
@@ -49,6 +49,48 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
   if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });
+
+// -- Web Push (Phase 10) ---------------------------------------------------
+// Payloads are JSON: {title, body, destination, id, category}. We show a
+// simple system notification and route notificationclick to the right URL.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (e) { data = {}; }
+  const title = data.title || 'Solarisound';
+  const body = data.body || '';
+  const destination = data.destination || '/';
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      tag: data.id || undefined,
+      data: { destination, id: data.id, category: data.category },
+      // Never fire loud OS-level alerts; this is a supportive channel.
+      silent: false,
+      requireInteraction: false,
+    })
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const dest = (event.notification.data && event.notification.data.destination) || '/';
+  event.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of all) {
+      if ('focus' in client) {
+        try {
+          client.postMessage({ type: 'notification-click', destination: dest, id: event.notification.data?.id });
+          return client.focus();
+        } catch (e) { /* fall through */ }
+      }
+    }
+    if (self.clients.openWindow) return self.clients.openWindow(dest);
+    return null;
+  })());
+});
+
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;

@@ -3389,6 +3389,729 @@ async def hb_nudge_dismiss(
     return {"ok": True}
 
 
+# ==========================================================================
+# NOTIFICATIONS — Phase 10 (Feb 2026)
+# --------------------------------------------------------------------------
+# Multi-surface notification system with the following user-facing surfaces:
+#   • In-app notification center (bell + panel)  — always available
+#   • Browser / PWA push (VAPID)                — opt-in, tab-closed reach
+#
+# Categories (per-user toggles):
+#   • feature_announcement — new features shipped
+#   • checkin              — gentle emotional check-in nudges
+#   • recommendation       — frequency / soundscape / preset suggestions
+#   • session_reminder     — "your quiet moment" reminders
+#   • harmonic_blueprint   — HB capture / rescan nudges
+#
+# Copy guardrails: warm, supportive, non-clinical, no diagnosis/treatment
+# claims, no urgency, no manipulation. Content generators enforce short
+# strings (title ≤ 80, body ≤ 180) and the admin CMS validates the same.
+# ==========================================================================
+
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
+VAPID_PRIVATE_PEM = (os.environ.get("VAPID_PRIVATE_PEM", "") or "").replace("\\n", "\n")
+VAPID_CONTACT = os.environ.get("VAPID_CONTACT", "mailto:admin@solarisound.com")
+
+NOTIFICATION_CATEGORIES = (
+    "feature_announcement",
+    "checkin",
+    "recommendation",
+    "session_reminder",
+    "harmonic_blueprint",
+)
+
+# Default: everything on, quiet hours 22:00 → 07:00 local, cap 4/day.
+def _default_notification_prefs() -> dict:
+    return {
+        "enabled": True,
+        "push_enabled": False,  # requires explicit browser opt-in
+        "categories": {c: True for c in NOTIFICATION_CATEGORIES},
+        "quiet_hours": {"enabled": True, "start_hour": 22, "end_hour": 7},
+        "max_per_day": 4,
+        "timezone_offset_minutes": 0,  # UTC by default; frontend refreshes
+    }
+
+
+class NotificationPrefsIn(BaseModel):
+    """PATCH-style. Any subset of fields updates that subset."""
+    enabled: Optional[bool] = None
+    push_enabled: Optional[bool] = None
+    categories: Optional[Dict[str, bool]] = None
+    quiet_hours: Optional[Dict[str, object]] = None  # {enabled, start_hour, end_hour}
+    max_per_day: Optional[int] = Field(None, ge=0, le=50)
+    timezone_offset_minutes: Optional[int] = Field(None, ge=-720, le=840)
+
+
+async def _get_notification_prefs(user_id: str) -> dict:
+    doc = await db.users.find_one({"id": user_id}, {"notification_prefs": 1}) or {}
+    prefs = doc.get("notification_prefs") or {}
+    merged = _default_notification_prefs()
+    # Shallow merge with a deep merge for categories + quiet_hours.
+    for k, v in prefs.items():
+        if k == "categories" and isinstance(v, dict):
+            merged["categories"] = {**merged["categories"], **{c: bool(x) for c, x in v.items() if c in NOTIFICATION_CATEGORIES}}
+        elif k == "quiet_hours" and isinstance(v, dict):
+            qh = merged["quiet_hours"].copy()
+            if "enabled" in v: qh["enabled"] = bool(v["enabled"])
+            if "start_hour" in v:
+                try:
+                    qh["start_hour"] = max(0, min(23, int(v["start_hour"])))
+                except (TypeError, ValueError):
+                    pass
+            if "end_hour" in v:
+                try:
+                    qh["end_hour"] = max(0, min(23, int(v["end_hour"])))
+                except (TypeError, ValueError):
+                    pass
+            merged["quiet_hours"] = qh
+        else:
+            merged[k] = v
+    return merged
+
+
+def _is_within_quiet_hours(prefs: dict, now_utc: Optional[datetime] = None) -> bool:
+    qh = prefs.get("quiet_hours") or {}
+    if not qh.get("enabled"): return False
+    now = (now_utc or datetime.now(timezone.utc))
+    local = now + timedelta(minutes=int(prefs.get("timezone_offset_minutes") or 0))
+    hr = local.hour
+    start = int(qh.get("start_hour", 22)); end = int(qh.get("end_hour", 7))
+    if start == end: return False
+    if start < end:  return start <= hr < end
+    return hr >= start or hr < end  # wraps midnight
+
+
+async def _daily_notification_count(user_id: str, now_utc: Optional[datetime] = None) -> int:
+    now = now_utc or datetime.now(timezone.utc)
+    since = now - timedelta(hours=24)
+    return await db.notifications.count_documents({
+        "user_id": user_id,
+        "created_at": {"$gte": since.isoformat()},
+    })
+
+
+async def _can_send_notification(user_id: str, category: str, prefs: Optional[dict] = None,
+                                  bypass_quiet: bool = False) -> tuple[bool, str]:
+    """Returns (allowed, reason). Never raises."""
+    if category not in NOTIFICATION_CATEGORIES:
+        return False, "unknown_category"
+    prefs = prefs or await _get_notification_prefs(user_id)
+    if not prefs.get("enabled"): return False, "master_disabled"
+    if not (prefs.get("categories") or {}).get(category, True):
+        return False, "category_disabled"
+    if not bypass_quiet and _is_within_quiet_hours(prefs):
+        return False, "quiet_hours"
+    cap = int(prefs.get("max_per_day") or 4)
+    if cap > 0:
+        count = await _daily_notification_count(user_id)
+        if count >= cap: return False, "daily_cap"
+    return True, "ok"
+
+
+async def _enqueue_notification(*, user_id: str, category: str, kind: str, title: str,
+                                 body: str, destination: Optional[str] = None,
+                                 meta: Optional[dict] = None,
+                                 send_push: bool = True,
+                                 bypass_gates: bool = False) -> Optional[dict]:
+    """Creates an in-app notification row and (optionally) fires a browser push.
+
+    Gates: honours preferences + quiet hours + daily cap unless `bypass_gates`.
+    Returns the notification doc on success, None if gated. Never raises.
+    """
+    title = (title or "").strip()[:80]
+    body = (body or "").strip()[:180]
+    destination = (destination or "").strip()[:120] or None
+    if not title or not body:
+        return None
+    prefs = await _get_notification_prefs(user_id)
+    if not bypass_gates:
+        allowed, reason = await _can_send_notification(user_id, category, prefs=prefs)
+        if not allowed:
+            logger.info("[notif] gated user=%s category=%s reason=%s", user_id, category, reason)
+            return None
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "category": category,
+        "kind": kind,
+        "title": title,
+        "body": body,
+        "destination": destination,
+        "meta": (meta or {}),
+        "created_at": now,
+        "opened_at": None,
+        "dismissed_at": None,
+    }
+    try:
+        await db.notifications.insert_one(dict(doc))
+    except Exception as exc:
+        logger.warning("[notif] insert failed user=%s: %s", user_id, exc)
+        return None
+    # Analytics event
+    try:
+        await db.notification_events.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "notification_id": doc["id"],
+            "event": "sent",
+            "category": category,
+            "kind": kind,
+            "surface": "inapp",
+            "created_at": now,
+        })
+    except Exception:
+        pass
+    # Push
+    if send_push and prefs.get("push_enabled") and prefs.get("enabled"):
+        try:
+            asyncio.create_task(_dispatch_push(user_id, doc))
+        except Exception as exc:
+            logger.warning("[notif] push dispatch failed user=%s: %s", user_id, exc)
+    return doc
+
+
+async def _dispatch_push(user_id: str, notif: dict) -> None:
+    """Sends a Web Push via VAPID to every subscription registered for the user.
+    Best-effort; broken subscriptions (410 Gone) are pruned automatically.
+    """
+    if not (VAPID_PRIVATE_PEM and VAPID_PUBLIC_KEY):
+        return
+    try:
+        from pywebpush import webpush, WebPushException  # type: ignore
+    except Exception:
+        return
+    subs_cur = db.push_subscriptions.find({"user_id": user_id})
+    subs = await subs_cur.to_list(length=25)
+    if not subs: return
+    payload_str = json.dumps({
+        "title": notif["title"],
+        "body": notif["body"],
+        "destination": notif.get("destination") or "/",
+        "id": notif["id"],
+        "category": notif["category"],
+    })
+    for sub in subs:
+        info = sub.get("subscription") or {}
+        try:
+            await asyncio.to_thread(
+                webpush,
+                subscription_info=info,
+                data=payload_str,
+                vapid_private_key=VAPID_PRIVATE_PEM,
+                vapid_claims={"sub": VAPID_CONTACT},
+                ttl=3600,
+            )
+            try:
+                await db.notification_events.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": user_id,
+                    "notification_id": notif["id"],
+                    "event": "sent",
+                    "category": notif["category"],
+                    "kind": notif["kind"],
+                    "surface": "push",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+        except WebPushException as exc:  # type: ignore
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code in (404, 410):
+                try:
+                    await db.push_subscriptions.delete_one({"_id": sub["_id"]})
+                except Exception:
+                    pass
+            logger.info("[push] webpush failed status=%s", code)
+        except Exception as exc:
+            logger.warning("[push] send unexpected: %s", exc)
+
+
+# ---------- Public VAPID endpoint ----------
+@api.get("/notifications/vapid-public-key")
+async def notifications_vapid_public_key():
+    return {"public_key": VAPID_PUBLIC_KEY or ""}
+
+
+# ---------- User notification prefs ----------
+@api.get("/me/notifications/prefs")
+async def notifications_prefs(user: dict = Depends(get_current_user)):
+    return await _get_notification_prefs(user["id"])
+
+
+@api.put("/me/notifications/prefs")
+async def notifications_prefs_update(
+    body: NotificationPrefsIn,
+    user: dict = Depends(get_current_user),
+):
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        return await _get_notification_prefs(user["id"])
+    # Sanitise nested fields to prevent unknown keys.
+    if "categories" in updates and isinstance(updates["categories"], dict):
+        updates["categories"] = {
+            c: bool(v) for c, v in updates["categories"].items() if c in NOTIFICATION_CATEGORIES
+        }
+    if "quiet_hours" in updates and isinstance(updates["quiet_hours"], dict):
+        qh = {}
+        raw = updates["quiet_hours"]
+        if "enabled" in raw: qh["enabled"] = bool(raw["enabled"])
+        if "start_hour" in raw:
+            try: qh["start_hour"] = max(0, min(23, int(raw["start_hour"])))
+            except (TypeError, ValueError): pass
+        if "end_hour" in raw:
+            try: qh["end_hour"] = max(0, min(23, int(raw["end_hour"])))
+            except (TypeError, ValueError): pass
+        updates["quiet_hours"] = qh
+    to_set = {f"notification_prefs.{k}": v for k, v in updates.items()}
+    if to_set:
+        await db.users.update_one({"id": user["id"]}, {"$set": to_set})
+    # If master or push disabled, log an analytics event.
+    if updates.get("enabled") is False or updates.get("push_enabled") is False:
+        try:
+            await db.notification_events.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "event": "disabled",
+                "surface": "settings",
+                "detail": {k: v for k, v in updates.items() if k in ("enabled", "push_enabled")},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+    return await _get_notification_prefs(user["id"])
+
+
+# ---------- Push subscription mgmt ----------
+class PushSubscribeIn(BaseModel):
+    subscription: Dict[str, object]  # {endpoint, keys:{p256dh,auth}}
+    user_agent: Optional[str] = Field(None, max_length=255)
+
+
+@api.post("/me/notifications/push/subscribe")
+async def notifications_push_subscribe(
+    body: PushSubscribeIn,
+    user: dict = Depends(get_current_user),
+):
+    sub = body.subscription or {}
+    endpoint = str(sub.get("endpoint") or "").strip()
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="Missing subscription endpoint")
+    now = datetime.now(timezone.utc).isoformat()
+    # Idempotent upsert on (user_id, endpoint).
+    await db.push_subscriptions.update_one(
+        {"user_id": user["id"], "endpoint": endpoint},
+        {"$set": {
+            "user_id": user["id"],
+            "endpoint": endpoint,
+            "subscription": sub,
+            "user_agent": (body.user_agent or "")[:255],
+            "updated_at": now,
+        }, "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+        upsert=True,
+    )
+    # Flip push_enabled on now that we have a real subscription.
+    await db.users.update_one({"id": user["id"]}, {"$set": {"notification_prefs.push_enabled": True}})
+    return {"ok": True}
+
+
+@api.delete("/me/notifications/push/subscribe")
+async def notifications_push_unsubscribe(
+    endpoint: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    q: Dict[str, object] = {"user_id": user["id"]}
+    if endpoint: q["endpoint"] = endpoint
+    await db.push_subscriptions.delete_many(q)
+    if not endpoint:
+        await db.users.update_one({"id": user["id"]}, {"$set": {"notification_prefs.push_enabled": False}})
+    return {"ok": True}
+
+
+# ---------- Notification list / mark ----------
+@api.get("/me/notifications")
+async def notifications_list(
+    limit: int = 30,
+    include_dismissed: bool = False,
+    user: dict = Depends(get_current_user),
+):
+    limit = max(1, min(int(limit or 30), 100))
+    q: Dict[str, object] = {"user_id": user["id"]}
+    if not include_dismissed:
+        q["dismissed_at"] = None
+    cur = db.notifications.find(q, {"_id": 0}).sort("created_at", -1).limit(limit)
+    items = await cur.to_list(length=limit)
+    unread = await db.notifications.count_documents({
+        "user_id": user["id"], "dismissed_at": None, "opened_at": None,
+    })
+    return {"items": items, "unread": unread}
+
+
+@api.get("/me/notifications/unread-count")
+async def notifications_unread_count(user: dict = Depends(get_current_user)):
+    n = await db.notifications.count_documents({
+        "user_id": user["id"], "dismissed_at": None, "opened_at": None,
+    })
+    return {"unread": n}
+
+
+@api.post("/me/notifications/{notif_id}/opened")
+async def notifications_mark_opened(notif_id: str, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.notifications.update_one(
+        {"id": notif_id, "user_id": user["id"], "opened_at": None},
+        {"$set": {"opened_at": now}},
+    )
+    if r.modified_count:
+        try:
+            n = await db.notifications.find_one({"id": notif_id}, {"category": 1, "kind": 1}) or {}
+            await db.notification_events.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "notification_id": notif_id,
+                "event": "opened",
+                "category": n.get("category"),
+                "kind": n.get("kind"),
+                "surface": "inapp",
+                "created_at": now,
+            })
+        except Exception:
+            pass
+    return {"ok": True}
+
+
+@api.post("/me/notifications/{notif_id}/dismissed")
+async def notifications_mark_dismissed(notif_id: str, user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.notifications.update_one(
+        {"id": notif_id, "user_id": user["id"], "dismissed_at": None},
+        {"$set": {"dismissed_at": now}},
+    )
+    if r.modified_count:
+        try:
+            n = await db.notifications.find_one({"id": notif_id}, {"category": 1, "kind": 1}) or {}
+            await db.notification_events.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "notification_id": notif_id,
+                "event": "dismissed",
+                "category": n.get("category"),
+                "kind": n.get("kind"),
+                "surface": "inapp",
+                "created_at": now,
+            })
+        except Exception:
+            pass
+    return {"ok": True}
+
+
+@api.post("/me/notifications/read-all")
+async def notifications_mark_all_read(user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+    await db.notifications.update_many(
+        {"user_id": user["id"], "opened_at": None},
+        {"$set": {"opened_at": now}},
+    )
+    return {"ok": True}
+
+
+# ---------- Content generators ----------
+def _time_of_day() -> str:
+    h = datetime.now(timezone.utc).hour
+    if 5 <= h < 12: return "morning"
+    if 12 <= h < 17: return "afternoon"
+    if 17 <= h < 22: return "evening"
+    return "night"
+
+
+async def _generate_recommendation_notification(user_id: str) -> Optional[dict]:
+    """Compute a single, well-grounded suggestion based on the user's data.
+    Returns a notification dict ({title, body, destination, meta}) or None if
+    there isn't enough data to make a warm, honest suggestion.
+    """
+    # 1) Detected pattern with a start-there CTA is the strongest signal.
+    try:
+        pats, _ = await _cached_detect_wellness_patterns(user_id)
+        dismissed = set()
+        udoc = await db.users.find_one({"id": user_id}, {"dismissed_patterns": 1, "assistant_settings": 1}) or {}
+        for k in (udoc.get("dismissed_patterns") or []):
+            dismissed.add(k)
+        settings = udoc.get("assistant_settings") or {}
+        hb_enabled = bool(settings.get("harmonic_influence_enabled", True))
+        for p in pats or []:
+            if _pattern_key(p) in dismissed: continue
+            cta = p.get("cta") or {}
+            hz = cta.get("arm_frequency")
+            if not hz: continue
+            msg = (p.get("message") or "").strip()
+            if not msg: continue
+            body = msg
+            if not body.rstrip().endswith("?"):
+                body = body.rstrip(".") + ". Want to start there?"
+            return {
+                "title": "A gentle suggestion",
+                "body": body[:180],
+                "destination": f"/play?frequency={hz}",
+                "meta": {"source": "pattern", "pattern_key": _pattern_key(p), "arm_frequency": hz},
+            }
+    except Exception as exc:
+        logger.warning("[notif][rec] pattern read failed: %s", exc)
+    # 2) HB confirmed gap (only if user opted in).
+    try:
+        udoc = await db.users.find_one({"id": user_id}, {"assistant_settings": 1}) or {}
+        if bool((udoc.get("assistant_settings") or {}).get("harmonic_influence_enabled", True)):
+            latest = await db.resonance_profiles.find_one(
+                {"user_id": user_id}, sort=[("created_at", -1)]
+            )
+            gaps = ((latest or {}).get("confirmed_gaps") or []) if latest else []
+            for g in gaps:
+                lo, hi = g.get("low_hz"), g.get("high_hz")
+                if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                    center = int(round((lo + hi) / 2))
+                    return {
+                        "title": "Something for your resonance",
+                        "body": f"Your Harmonic Blueprint shows an opening around {center} Hz. Want to spend some time there?",
+                        "destination": f"/play?frequency={center}",
+                        "meta": {"source": "hb_gap", "frequency": center},
+                    }
+    except Exception:
+        pass
+    return None
+
+
+async def _maybe_send_daily_recommendation(user_id: str) -> Optional[dict]:
+    """Send at most one recommendation notification per calendar day per user.
+    Called from `/api/me/notifications/tick` on app open. Silent when gated."""
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+    udoc = await db.users.find_one({"id": user_id}, {"notif_last_rec_day": 1}) or {}
+    if udoc.get("notif_last_rec_day") == today:
+        return None
+    prefs = await _get_notification_prefs(user_id)
+    allowed, _ = await _can_send_notification(user_id, "recommendation", prefs=prefs)
+    if not allowed:
+        return None
+    rec = await _generate_recommendation_notification(user_id)
+    if not rec: return None
+    doc = await _enqueue_notification(
+        user_id=user_id, category="recommendation", kind="daily",
+        title=rec["title"], body=rec["body"],
+        destination=rec.get("destination"), meta=rec.get("meta"),
+    )
+    if doc:
+        await db.users.update_one({"id": user_id}, {"$set": {"notif_last_rec_day": today}})
+    return doc
+
+
+async def _maybe_send_feature_announcements(user_id: str) -> list:
+    """Enqueues per-user notifications for any published feature announcements
+    the user hasn't yet seen. Idempotent via `feature_announcements_seen[]`
+    on the user doc."""
+    prefs = await _get_notification_prefs(user_id)
+    allowed, _ = await _can_send_notification(user_id, "feature_announcement",
+                                               prefs=prefs, bypass_quiet=True)
+    if not allowed:
+        return []
+    udoc = await db.users.find_one(
+        {"id": user_id}, {"feature_announcements_seen": 1, "pro_until": 1, "role": 1, "created_at": 1},
+    ) or {}
+    seen = set(udoc.get("feature_announcements_seen") or [])
+    is_pro = bool(udoc.get("role") == "admin") or (
+        isinstance(udoc.get("pro_until"), str) and udoc["pro_until"] > datetime.now(timezone.utc).isoformat()
+    )
+    created = udoc.get("created_at")  # only announce features published after account creation
+    cur = db.feature_announcements.find({"active": True}, {"_id": 0}).sort("published_at", -1).limit(20)
+    anns = await cur.to_list(length=20)
+    delivered = []
+    for a in anns:
+        aid = a.get("id")
+        if not aid or aid in seen: continue
+        audience = a.get("audience") or "all"
+        if audience == "pro" and not is_pro: continue
+        if audience == "free" and is_pro: continue
+        # Don't back-announce features shipped before the user joined.
+        pub = a.get("published_at") or ""
+        if created and pub and pub < created: 
+            seen.add(aid)
+            continue
+        doc = await _enqueue_notification(
+            user_id=user_id, category="feature_announcement", kind="release",
+            title=a.get("title") or "", body=a.get("body") or "",
+            destination=a.get("destination"),
+            meta={"announcement_id": aid},
+            bypass_gates=False,
+        )
+        if doc: delivered.append(doc)
+        seen.add(aid)
+    if seen:
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"feature_announcements_seen": list(seen)}},
+        )
+    return delivered
+
+
+@api.post("/me/notifications/tick")
+async def notifications_tick(user: dict = Depends(get_current_user)):
+    """Client heartbeat, typically called on app open. Runs feature-announcement
+    and daily-recommendation sweeps for the caller. Returns fresh unread count.
+    """
+    delivered_ann = await _maybe_send_feature_announcements(user["id"])
+    delivered_rec = await _maybe_send_daily_recommendation(user["id"])
+    n = await db.notifications.count_documents({
+        "user_id": user["id"], "dismissed_at": None, "opened_at": None,
+    })
+    return {
+        "unread": n,
+        "delivered_announcements": len(delivered_ann or []),
+        "delivered_recommendation": 1 if delivered_rec else 0,
+    }
+
+
+# ---------- Emotional check-in nudge ----------
+class CheckinNudgeIn(BaseModel):
+    trigger: str = Field(pattern=r"^(pre_session|post_session|inactivity)$")
+
+
+@api.post("/me/notifications/checkin-nudge")
+async def notifications_checkin_nudge(
+    body: CheckinNudgeIn,
+    user: dict = Depends(get_current_user),
+):
+    """Called by the frontend when a check-in surface renders (post-session
+    card, pre-session pause, or long-idle prompt). Emits an in-app notification
+    row AND, if push is enabled, a browser push — but never during active
+    playback (the client is responsible for not calling this mid-playback)."""
+    trig = body.trigger
+    lines = {
+        "pre_session": ("Want to check in for a moment?",
+                        "Before you begin — how are you arriving today?"),
+        "post_session": ("How are you feeling?",
+                         "Take a soft moment. Anything shift for you just now?"),
+        "inactivity": ("A quiet moment awaits",
+                       "You haven't been here in a while. Want to take a breath together?"),
+    }
+    title, body_txt = lines[trig]
+    doc = await _enqueue_notification(
+        user_id=user["id"], category="checkin", kind=trig,
+        title=title, body=body_txt, destination="/",
+        meta={"trigger": trig},
+    )
+    return {"ok": True, "delivered": bool(doc)}
+
+
+# ---------- Admin: feature announcements CRUD ----------
+class FeatureAnnouncementIn(BaseModel):
+    title: str = Field(min_length=2, max_length=80)
+    body: str = Field(min_length=2, max_length=180)
+    destination: Optional[str] = Field(None, max_length=120)
+    audience: str = Field(default="all", pattern=r"^(all|pro|free)$")
+    active: bool = True
+
+
+@api.get("/admin/feature-announcements")
+async def admin_feature_ann_list(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    cur = db.feature_announcements.find({}, {"_id": 0}).sort("published_at", -1).limit(200)
+    return {"items": await cur.to_list(length=200)}
+
+
+@api.post("/admin/feature-announcements")
+async def admin_feature_ann_create(
+    body: FeatureAnnouncementIn,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "title": body.title.strip(),
+        "body": body.body.strip(),
+        "destination": (body.destination or "").strip() or None,
+        "audience": body.audience,
+        "active": bool(body.active),
+        "published_at": now,
+        "created_by": user["id"],
+    }
+    await db.feature_announcements.insert_one(dict(doc))
+    return doc
+
+
+@api.put("/admin/feature-announcements/{ann_id}")
+async def admin_feature_ann_update(
+    ann_id: str,
+    body: FeatureAnnouncementIn,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    updates = {
+        "title": body.title.strip(),
+        "body": body.body.strip(),
+        "destination": (body.destination or "").strip() or None,
+        "audience": body.audience,
+        "active": bool(body.active),
+    }
+    r = await db.feature_announcements.update_one({"id": ann_id}, {"$set": updates})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    doc = await db.feature_announcements.find_one({"id": ann_id}, {"_id": 0})
+    return doc
+
+
+@api.delete("/admin/feature-announcements/{ann_id}")
+async def admin_feature_ann_delete(ann_id: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    await db.feature_announcements.delete_one({"id": ann_id})
+    return {"ok": True}
+
+
+@api.post("/admin/feature-announcements/{ann_id}/broadcast")
+async def admin_feature_ann_broadcast(ann_id: str, user: dict = Depends(get_current_user)):
+    """Enqueue this announcement for every user who hasn't seen it yet.
+    Bounded to 5000 users per call to keep runtime predictable; call again
+    to continue if you have a larger base."""
+    _require_admin(user)
+    ann = await db.feature_announcements.find_one({"id": ann_id})
+    if not ann or not ann.get("active"):
+        raise HTTPException(status_code=404, detail="Announcement not found or inactive")
+    cur = db.users.find({}, {"id": 1, "feature_announcements_seen": 1}).limit(5000)
+    delivered = 0
+    async for u in cur:
+        uid = u.get("id")
+        if not uid: continue
+        if ann_id in (u.get("feature_announcements_seen") or []): continue
+        try:
+            sent = await _maybe_send_feature_announcements(uid)
+            if sent: delivered += 1
+        except Exception:
+            pass
+    return {"ok": True, "delivered": delivered}
+
+
+@api.get("/admin/notifications/analytics")
+async def admin_notif_analytics(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    pipeline = [
+        {"$group": {"_id": {"event": "$event", "category": "$category", "surface": "$surface"}, "count": {"$sum": 1}}},
+    ]
+    rows = await db.notification_events.aggregate(pipeline).to_list(length=500)
+    out = []
+    for r in rows:
+        k = r.get("_id") or {}
+        out.append({
+            "event": k.get("event"), "category": k.get("category"),
+            "surface": k.get("surface"), "count": int(r.get("count") or 0),
+        })
+    total_notifs = await db.notifications.count_documents({})
+    total_subs = await db.push_subscriptions.count_documents({})
+    return {"rows": out, "total_notifications": total_notifs, "push_subscriptions": total_subs}
+
+
+# ==========================================================================
+# END NOTIFICATIONS
+# ==========================================================================
+
+
 # ---------- Stripe helper ----------
 def _normalise_stripe_api_base():
     """Defense against the upstream library's sticky module-level mutation —
@@ -4704,6 +5427,51 @@ async def _lifespan_startup():
     # works against the parallel `ts_at` Date field — added below per-insert).
     await db.audit_log.create_index([("ts", -1)])
     await db.audit_log.create_index([("event", 1), ("ts", -1)])
+    # Notifications (Phase 10)
+    await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+    await db.notifications.create_index([("user_id", 1), ("dismissed_at", 1), ("opened_at", 1)])
+    await db.notification_events.create_index([("user_id", 1), ("created_at", -1)])
+    await db.notification_events.create_index([("event", 1), ("category", 1)])
+    await db.push_subscriptions.create_index([("user_id", 1), ("endpoint", 1)], unique=True)
+    await db.feature_announcements.create_index([("active", 1), ("published_at", -1)])
+    # Seed default feature announcements the first time the app boots (idempotent).
+    seed_anns = [
+        {
+            "slug": "wellness-assistant-hb-nudges",
+            "title": "Your Wellness Assistant just got warmer",
+            "body": "It now weaves in gentle Harmonic Blueprint suggestions when they're a good fit — no pressure, just an invitation.",
+            "destination": "/",
+            "audience": "all",
+        },
+        {
+            "slug": "harmonic-blueprint-setup-ritual",
+            "title": "A calmer way into Harmonic Blueprint",
+            "body": "Before you record, we'll share four short tips for the most honest reading. You can always skip.",
+            "destination": "/",
+            "audience": "pro",
+        },
+        {
+            "slug": "notification-center-launch",
+            "title": "A quiet notification center is here",
+            "body": "Feature news, gentle check-ins, and personalised suggestions — all opt-in, all under your control.",
+            "destination": "/",
+            "audience": "all",
+        },
+    ]
+    for a in seed_anns:
+        exists = await db.feature_announcements.find_one({"slug": a["slug"]})
+        if exists: continue
+        await db.feature_announcements.insert_one({
+            "id": str(uuid.uuid4()),
+            "slug": a["slug"],
+            "title": a["title"],
+            "body": a["body"],
+            "destination": a["destination"],
+            "audience": a["audience"],
+            "active": True,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": "seed",
+        })
     # Seed plan_config if missing
     existing_cfg = await db.plan_config.find_one({"_id": "current"})
     if not existing_cfg:

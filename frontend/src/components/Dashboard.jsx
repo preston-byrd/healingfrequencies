@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2 } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2, Bell } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -23,6 +23,8 @@ import SoundBathPanel from '@/components/SoundBathPanel';
 import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
 import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
+import NotificationBell from '@/components/NotificationBell';
+import NotificationPreferencesModal from '@/components/NotificationPreferencesModal';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -436,6 +438,10 @@ export default function Dashboard({ onOpenAccount }) {
       if (pendingCheckinRef.current) {
         pendingCheckinRef.current = false;
         setCheckinOpen(true);
+        // Also drop a post-session check-in nudge into the notification
+        // center so users who dismiss the inline card can still find their
+        // way back to reflection. Backend gates for prefs + quiet hours.
+        try { api.post('/me/notifications/checkin-nudge', { trigger: 'post_session' }).catch(() => {}); } catch (_) {}
       }
     }
   }, [state.frequency, state.waveform, state.binaural, state.ambient, activeSoundscape]);
@@ -616,6 +622,73 @@ export default function Dashboard({ onOpenAccount }) {
   // is already running standalone).
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = React.useRef(null);
+  // ---- Notifications preferences modal ----------------------------------
+  const [notifPrefsOpen, setNotifPrefsOpen] = useState(false);
+  // Handles taps on in-app notification cards (or lock-screen push clicks
+  // relayed via `notification-click` postMessage from the Service Worker).
+  // We interpret `destination` in an app-native way rather than reload the
+  // page: /play?frequency=<hz> arms and starts that frequency;
+  // /account switches to the Account view; otherwise stay on the dashboard.
+  const handleNotificationNavigate = React.useCallback((destination) => {
+    if (!destination || typeof destination !== 'string') return;
+    try {
+      const isAbs = destination.startsWith('http');
+      const u = isAbs ? new URL(destination) : new URL(destination, window.location.origin);
+      const p = u.pathname;
+      const params = u.searchParams;
+      if (p.startsWith('/account') && onOpenAccount) { onOpenAccount(); return; }
+      if (p.startsWith('/play')) {
+        const hz = parseFloat(params.get('frequency') || '');
+        if (!isNaN(hz) && hz > 0) {
+          try {
+            audioEngine.setFrequency(hz);
+            audioEngine.start();
+          } catch (_) { /* graceful */ }
+        }
+      }
+    } catch (_) { /* invalid destination — no-op */ }
+  }, [onOpenAccount]);
+  // Listen for Service Worker relays (push notification taps while app is open).
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return undefined;
+    const onMsg = (evt) => {
+      if (evt?.data?.type === 'notification-click') {
+        const dest = evt.data.destination;
+        if (dest && dest.startsWith('/play')) handleNotificationNavigate(dest);
+        else if (dest && dest.startsWith('/account') && onOpenAccount) onOpenAccount();
+      }
+    };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+  }, [handleNotificationNavigate, onOpenAccount]);
+  // Inactivity-based check-in nudge — fires once per browser session after
+  // 12 minutes of no user interaction, and only when audio is NOT actively
+  // playing (never interrupts a session). Backend still gates on prefs +
+  // quiet hours + daily cap, so pushy behaviour is impossible even if the
+  // client misfires.
+  const inactivityFiredRef = React.useRef(false);
+  const inactivityTimerRef = React.useRef(null);
+  useEffect(() => {
+    const IDLE_MS = 12 * 60 * 1000;
+    const reset = () => {
+      if (inactivityFiredRef.current) return;
+      if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = setTimeout(() => {
+        if (inactivityFiredRef.current) return;
+        // Guard: never fire mid-playback.
+        try { if (audioEngine.getState && audioEngine.getState().playing) return; } catch (_) {}
+        inactivityFiredRef.current = true;
+        try { api.post('/me/notifications/checkin-nudge', { trigger: 'inactivity' }).catch(() => {}); } catch (_) {}
+      }, IDLE_MS);
+    };
+    const activityEvents = ['mousemove', 'keydown', 'pointerdown', 'touchstart', 'scroll'];
+    activityEvents.forEach((e) => window.addEventListener(e, reset, { passive: true }));
+    reset();
+    return () => {
+      activityEvents.forEach((e) => window.removeEventListener(e, reset));
+      if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+    };
+  }, []);
   useEffect(() => {
     if (!accountMenuOpen) return undefined;
     const onDocClick = (e) => {
@@ -1278,6 +1351,11 @@ export default function Dashboard({ onOpenAccount }) {
                 >
                   <Sparkles size={16} />
                 </button>
+                <NotificationBell
+                  testid="notification-bell"
+                  onNavigate={handleNotificationNavigate}
+                  onOpenPreferences={() => setNotifPrefsOpen(true)}
+                />
                 <div className="relative" ref={accountMenuRef}>
                   <button
                     data-testid="account-button"
@@ -1329,6 +1407,14 @@ export default function Dashboard({ onOpenAccount }) {
                           Install Solarisound
                         </button>
                       )}
+                      <button
+                        data-testid="account-menu-notifications"
+                        onClick={() => { setAccountMenuOpen(false); setNotifPrefsOpen(true); }}
+                        className="w-full flex items-center gap-3 px-3 py-2 text-sm text-[#E8E3D9] hover:bg-[#5C9E8C]/15 transition-colors"
+                      >
+                        <Bell size={14} className="text-[#72C2AC]" />
+                        Notifications
+                      </button>
                       <button
                         data-testid="account-menu-calibration"
                         onClick={() => { setAccountMenuOpen(false); setCalibrationOpen(true); }}
@@ -2260,6 +2346,14 @@ export default function Dashboard({ onOpenAccount }) {
         alreadyCalibrated={hasProfile}
         onStart={startCalibrationFromTransition}
         onSkip={dismissTransitionCard}
+      />
+
+      {/* Notification preferences — accessed via the bell panel footer OR the
+          Account dropdown. Owns push subscription lifecycle + per-category
+          toggles + quiet hours + daily-cap. */}
+      <NotificationPreferencesModal
+        open={notifPrefsOpen}
+        onClose={() => setNotifPrefsOpen(false)}
       />
     </div>
   );
