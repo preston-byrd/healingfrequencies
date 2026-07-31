@@ -473,6 +473,15 @@ class AudioEngine {
       this.osc.type = this.waveform;
       this.osc.frequency.value = this.frequency;
 
+      // Fidelity: schedule EVERY oscillator (base, oscR, and any φ harmonics)
+      // to begin at the SAME clock time so all sines are phase-coherent at
+      // t = startAt. Without this, JS execution timing between successive
+      // .start() calls can land the oscillators in different 128-sample
+      // render quanta, producing a small but audible phase offset that
+      // subtly cancels harmonic partials. A 50 ms scheduling lead-time keeps
+      // the start-moment safely in the future relative to `currentTime`.
+      const startAt = ctx.currentTime + 0.05;
+
       if (this.binaural > 0) {
         const merger = ctx.createChannelMerger(2);
         const gL = ctx.createGain();
@@ -485,16 +494,16 @@ class AudioEngine {
         gL.connect(merger, 0, 0);
         gR.connect(merger, 0, 1);
         merger.connect(this.gateGain);
-        this.oscR.start();
+        this.oscR.start(startAt);
       } else {
         this.osc.connect(this.gateGain);
       }
 
-      this.osc.start();
+      this.osc.start(startAt);
       this.toneGain.gain.linearRampToValueAtTime(this.toneVolume, ctx.currentTime + 0.8);
 
       if (this.isochronic > 0) this._spawnIsochronicLFO(this.isochronic);
-      if (this.goldenStack) this._spawnPhiHarmonics();
+      if (this.goldenStack) this._spawnPhiHarmonics(startAt);
 
       // Flip playing BEFORE the _pendingAmbient restore — setAmbient's
       // "stopped" branch checks this.playing, so the restore loop would
@@ -539,46 +548,32 @@ class AudioEngine {
   // exact 1/φ and 1/φ² amplitude ratios so the harmonic series preserves
   // its self-similar Fibonacci-adjacent spectrum. Base:φ¹:φ² = 1 : 0.6180 : 0.3820.
   //
+  // `startAt` (optional): if provided, all φ oscillators begin at that
+  // exact clock time — the same instant the base oscillator starts —
+  // guaranteeing phase-coherent initialization across the whole stack. Pass
+  // no argument to start "now" (used when Golden Stack is toggled on
+  // mid-session, where phase alignment with the already-running base isn't
+  // recoverable anyway).
+  //
   // All three amplitudes (base implicit at 1.0, and the two φ layers) are
   // scaled by the SAME HEADROOM factor so their mutual ratios are preserved
   // exactly — no compression, no limiting, no per-layer gain reduction.
-  // Headroom keeps the constructive peak below the destination's ±1.0 clip
-  // ceiling even at toneVolume=1.0, so a phase-aligned instant of all three
-  // sines never causes destination clipping and no subtle harmonic detail
-  // is lost to intermodulation distortion above unity.
-  _spawnPhiHarmonics() {
+  _spawnPhiHarmonics(startAt) {
     const ctx = this.ctx;
     const PHI = 1.6180339887498948;  // (1 + √5) / 2
     const INV_PHI = 1 / PHI;          // ≈ 0.6180339887
     const INV_PHI2 = INV_PHI * INV_PHI; // ≈ 0.3819660113
-    // Sum of all three layer amplitudes at unity base: 1 + 1/φ + 1/φ² = 2.
-    // A tone-relative scale of 1/2 gives a worst-case constructive peak of
-    // toneVolume * 1.0 — matching a single tone at the same volume slot.
     const HEADROOM = 0.5;
-    const baseAmp = HEADROOM;        // base is now scaled to 0.5 (was implicit 1.0)
+    const baseAmp = HEADROOM;
     const levels = [
       { mult: PHI, amp: INV_PHI * HEADROOM },
       { mult: PHI * PHI, amp: INV_PHI2 * HEADROOM },
     ];
-    // Add a soft base attenuation NODE on the primary oscillator path so
-    // its amplitude also gets the same HEADROOM scaling, keeping the
-    // mathematical ratios exact. We insert a fresh gain node between the
-    // existing oscillator connection and gateGain, disconnecting the direct
-    // wire first. The node is stored on `this._goldenBaseGain` so
-    // _killPhiHarmonics can restore unity when Golden Stack is disabled.
     try {
       if (!this._goldenBaseGain) {
         const gBase = ctx.createGain();
         gBase.gain.value = baseAmp;
-        // Rewire: osc → gBase → gateGain (was osc → gateGain / merger → gateGain).
-        // If binaural is active, the merger sits before gateGain — we insert
-        // between merger and gateGain in that case.
         if (this.binaural > 0) {
-          // Find the merger that feeds gateGain and detour through gBase.
-          try { this.osc.context; /* no-op guard */ } catch (_) {}
-          // Simplest reliable approach: connect gateGain's inputs via gBase.
-          // We can't introspect merger connections in Web Audio, so we
-          // instead attenuate at toneGain proportionally. See fallback below.
           this.toneGain.gain.cancelScheduledValues(ctx.currentTime);
           this.toneGain.gain.setValueAtTime(this.toneVolume * baseAmp, ctx.currentTime);
           this._goldenBaseGain = 'via-tone-gain';
@@ -594,14 +589,16 @@ class AudioEngine {
       const osc = ctx.createOscillator();
       osc.type = this.waveform;
       const f = this.frequency * mult;
-      // Keep audible; if above 4kHz, fold down an octave for comfort. This
-      // preserves the golden-ratio interval within the current octave but
-      // sits it in a range where cochlear resolution is still high.
       osc.frequency.value = f > 4000 ? f / 2 : f;
       const g = ctx.createGain();
       g.gain.value = 0;
       osc.connect(g).connect(this.gateGain || this.toneGain);
-      osc.start();
+      // Phase-coherent start: honour the caller's shared startAt if given.
+      if (typeof startAt === 'number' && startAt > ctx.currentTime) {
+        osc.start(startAt);
+      } else {
+        osc.start();
+      }
       g.gain.linearRampToValueAtTime(amp, ctx.currentTime + 1.0);
       this.phiOscs.push({ osc, gain: g, mult });
     });

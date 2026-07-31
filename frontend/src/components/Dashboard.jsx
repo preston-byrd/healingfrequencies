@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2, Bell } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2, Bell, Info } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -26,6 +26,7 @@ import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
 import NotificationBell from '@/components/NotificationBell';
 import NotificationPreferencesModal from '@/components/NotificationPreferencesModal';
 import PushOptInSlip, { requestPushOptInIfWarm } from '@/components/PushOptInSlip';
+import ListeningGuide, { HeadphoneReminder, useHeadphoneReminder } from '@/components/ListeningGuide';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
 const SOLFEGGIO = [
@@ -119,10 +120,13 @@ function formatTime(secs) {
 function _patternCtaToSuggestion(cta) {
   if (!cta || typeof cta !== 'object') return null;
   if (cta.action === 'arm_frequency' && Number.isFinite(cta.frequency) && cta.frequency > 0) {
+    // Fidelity: preserve the exact stored Hz — Math.round would lose the
+    // sub-Hz precision that Pro users can dial in (e.g. 528.3 Hz).
+    const freq = Number(cta.frequency);
     return {
       kind: 'preset',
-      label: `${Math.round(cta.frequency)} Hz — start where you left off`,
-      frequency: Math.round(cta.frequency),
+      label: `${freq.toFixed(1)} Hz — start where you left off`,
+      frequency: freq,
       waveform: 'sine',
       duration_min: 15,
       pro_only: false,
@@ -630,6 +634,16 @@ export default function Dashboard({ onOpenAccount }) {
   const accountMenuRef = React.useRef(null);
   // ---- Notifications preferences modal ----------------------------------
   const [notifPrefsOpen, setNotifPrefsOpen] = useState(false);
+  // Listening guide modal — accessed via the info icon in the player.
+  const [listeningGuideOpen, setListeningGuideOpen] = useState(false);
+  // Extended headphone reminder — fires once per 24h when binaural,
+  // isochronic, OR Golden Stack is active on the current session.
+  const headphoneReminder = useHeadphoneReminder({
+    playing: state.playing,
+    binaural: state.binaural,
+    isochronic: state.isochronic,
+    goldenStack: state.goldenStack,
+  });
   // Handles taps on in-app notification cards (or lock-screen push clicks
   // relayed via `notification-click` postMessage from the Service Worker).
   // We interpret `destination` in an app-native way rather than reload the
@@ -1936,6 +1950,18 @@ export default function Dashboard({ onOpenAccount }) {
                 <span>{keepAwake ? 'Screen on' : 'Keep screen on'}</span>
               </button>
             )}
+            {/* For-best-results listening guide — subtle, non-clinical set of
+                recommendations (wired headphones, moderate volume, quiet
+                environment). Opens a soft glass card, never blocks playback. */}
+            <button
+              data-testid="listening-guide-open"
+              onClick={() => setListeningGuideOpen(true)}
+              title="For best results"
+              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-[#5C9E8C]/30 bg-black/20 text-[10px] tracking-[0.18em] uppercase text-[#8A9A92] hover:text-[#E8E3D9] hover:border-[#72C2AC]/60 transition-colors"
+            >
+              <Info size={12} />
+              <span>For best results</span>
+            </button>
           </div>
         </main>
 
@@ -2390,6 +2416,18 @@ export default function Dashboard({ onOpenAccount }) {
           Wellness Assistant suggestion tap. Never shown mid-session; snoozes
           for 7 days on "Later" or 60 days on "No thanks". */}
       <PushOptInSlip />
+
+      {/* Fidelity: "For best results" listening guide — wired headphones,
+          moderate volume, quiet environment. Accessed from the player card. */}
+      <ListeningGuide open={listeningGuideOpen} onClose={() => setListeningGuideOpen(false)} />
+
+      {/* Fidelity: gentle headphone reminder when binaural / isochronic /
+          Golden Stack is active. Auto-hides after 12s, snoozes 24h on dismiss. */}
+      <HeadphoneReminder
+        visible={headphoneReminder.visible}
+        reason={headphoneReminder.reason}
+        onDismiss={headphoneReminder.dismiss}
+      />
     </div>
   );
 }
