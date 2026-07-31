@@ -634,12 +634,26 @@ export default function Dashboard({ onOpenAccount }) {
   // relayed via `notification-click` postMessage from the Service Worker).
   // We interpret `destination` in an app-native way rather than reload the
   // page: /play?frequency=<hz> arms and starts that frequency;
-  // /account switches to the Account view; otherwise stay on the dashboard.
+  // /account switches to the Account view; hash routes open in-app sheets:
+  //   #wellness-assistant → open the Assistant sheet
+  //   #harmonic-blueprint → open the Harmonic Blueprint sheet
+  //   #notification-preferences → open the notification prefs modal
+  //   #account → same as /account
   const handleNotificationNavigate = React.useCallback((destination) => {
     if (!destination || typeof destination !== 'string') return;
+    const raw = destination.trim();
+    // Hash routes for in-app sheets
+    if (raw.startsWith('#')) {
+      const key = raw.slice(1).toLowerCase();
+      if (key === 'wellness-assistant') { openCompanion && openCompanion(); return; }
+      if (key === 'harmonic-blueprint') { setHbOpen && setHbOpen(true); return; }
+      if (key === 'notification-preferences' || key === 'notifications') { setNotifPrefsOpen(true); return; }
+      if (key === 'account') { onOpenAccount && onOpenAccount(); return; }
+      return;
+    }
     try {
-      const isAbs = destination.startsWith('http');
-      const u = isAbs ? new URL(destination) : new URL(destination, window.location.origin);
+      const isAbs = raw.startsWith('http');
+      const u = isAbs ? new URL(raw) : new URL(raw, window.location.origin);
       const p = u.pathname;
       const params = u.searchParams;
       if (p.startsWith('/account') && onOpenAccount) { onOpenAccount(); return; }
@@ -653,7 +667,7 @@ export default function Dashboard({ onOpenAccount }) {
         }
       }
     } catch (_) { /* invalid destination — no-op */ }
-  }, [onOpenAccount]);
+  }, [onOpenAccount, openCompanion]);
   // Listen for Service Worker relays (push notification taps while app is open).
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return undefined;

@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Bell, X, Check, CheckCheck, Sparkles, MessageCircleHeart, Waves, Moon, Wand2 } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Bell, X, Check, CheckCheck, Sparkles, MessageCircleHeart, Waves, Moon, Wand2, ArrowLeft, ArrowRight } from 'lucide-react';
 import api from '@/lib/api';
 
 const CATEGORY_ICONS = {
@@ -17,6 +18,49 @@ const CATEGORY_TINT = {
   session_reminder: '#A9B7D2',
   harmonic_blueprint: '#B79FE8',
 };
+
+const CATEGORY_LABEL = {
+  feature_announcement: 'What\'s new',
+  checkin: 'Gentle check-in',
+  recommendation: 'A gentle suggestion',
+  session_reminder: 'Session reminder',
+  harmonic_blueprint: 'Harmonic Blueprint',
+};
+
+// Human-friendly CTA copy per destination path.
+function ctaLabelFor(destination) {
+  if (!destination) return 'Open';
+  const raw = destination.trim();
+  if (raw.startsWith('#')) {
+    const k = raw.slice(1).toLowerCase();
+    if (k === 'wellness-assistant') return 'Open Wellness Assistant';
+    if (k === 'harmonic-blueprint') return 'Open Harmonic Blueprint';
+    if (k === 'notification-preferences' || k === 'notifications') return 'Open notification settings';
+    if (k === 'account') return 'Open Account';
+    return 'Open';
+  }
+  try {
+    const u = new URL(raw, 'https://x.example');
+    if (u.pathname.startsWith('/play')) {
+      const hz = parseFloat(u.searchParams.get('frequency') || '');
+      if (!isNaN(hz) && hz > 0) return `Start ${hz} Hz`;
+      return 'Start listening';
+    }
+    if (u.pathname.startsWith('/account')) return 'Open Account';
+  } catch { /* fall through */ }
+  return 'Explore';
+}
+
+// Returns true if the destination actually goes somewhere. A bare "/" is
+// treated as "no meaningful destination" — the notification is
+// informational and the Explore button is hidden.
+function hasMeaningfulDestination(destination) {
+  if (!destination) return false;
+  const raw = String(destination).trim();
+  if (!raw) return false;
+  if (raw === '/' || raw === '') return false;
+  return true;
+}
 
 function timeAgo(iso) {
   if (!iso) return '';
@@ -44,6 +88,11 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
   const [loading, setLoading] = useState(false);
+  // Reader view — the currently-expanded notification (if any). While a
+  // notification is being read, the list view is hidden and a full-body
+  // reader takes over the panel body. Back / X return the user to the list
+  // WITHOUT closing the panel or navigating.
+  const [reading, setReading] = useState(null);
   const panelRef = useRef(null);
   const buttonRef = useRef(null);
 
@@ -92,15 +141,36 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
   }, [open]);
 
-  // Refresh list every time the panel opens.
-  useEffect(() => { if (open) load(); }, [open, load]);
+  // Refresh list every time the panel opens; reset reader when panel closes.
+  useEffect(() => { if (open) load(); else setReading(null); }, [open, load]);
 
-  const handleOpenItem = async (n) => {
-    try { api.post(`/me/notifications/${n.id}/opened`).catch(() => {}); } catch {}
-    setItems((prev) => prev.map((x) => x.id === n.id ? { ...x, opened_at: new Date().toISOString() } : x));
-    setUnread((u) => Math.max(0, u - (n.opened_at ? 0 : 1)));
-    if (onNavigate && n.destination) onNavigate(n.destination, n);
+  const handleOpenItem = (n) => {
+    // Mark as opened server-side + locally so the unread badge decrements
+    // right away — BUT do NOT navigate. Instead, expand this notification
+    // in the reader view so the user can read the full body. Navigation is
+    // an explicit second action ("Open" CTA) inside the reader.
+    if (!n.opened_at) {
+      try { api.post(`/me/notifications/${n.id}/opened`).catch(() => {}); } catch {}
+      setItems((prev) => prev.map((x) => x.id === n.id ? { ...x, opened_at: new Date().toISOString() } : x));
+      setUnread((u) => Math.max(0, u - 1));
+    }
+    setReading(n);
+  };
+
+  const handleReaderNavigate = () => {
+    if (!reading) return;
+    const dest = reading.destination;
+    if (onNavigate && dest) onNavigate(dest, reading);
+    setReading(null);
     setOpen(false);
+  };
+
+  const handleReaderDismiss = () => {
+    if (!reading) return;
+    const n = reading;
+    try { api.post(`/me/notifications/${n.id}/dismissed`).catch(() => {}); } catch {}
+    setItems((prev) => prev.filter((x) => x.id !== n.id));
+    setReading(null);
   };
 
   const handleDismiss = async (e, n) => {
@@ -117,13 +187,13 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
   };
 
   return (
-    <div className="relative">
+    <div className="relative inline-flex items-center">
       <button
         ref={buttonRef}
         type="button"
         data-testid={testid}
         onClick={() => setOpen((o) => !o)}
-        className="relative text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
+        className="relative inline-flex items-center justify-center w-5 h-5 text-[#8A9A92] hover:text-[#72C2AC] transition-colors"
         aria-label="Notifications"
         aria-expanded={open}
         title="Notifications"
@@ -132,13 +202,13 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
         {unread > 0 && (
           <span
             data-testid="notification-unread-badge"
-            className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-[#E8B872] text-[#08120F] text-[10px] font-semibold flex items-center justify-center leading-none"
+            className="absolute -top-1.5 -right-1.5 min-w-[16px] h-[16px] px-1 rounded-full bg-[#E8B872] text-[#08120F] text-[10px] font-semibold flex items-center justify-center leading-none"
           >
             {unread > 9 ? '9+' : unread}
           </span>
         )}
       </button>
-      {open && (
+      {open && typeof document !== 'undefined' && createPortal(
         <>
           {/* Mobile backdrop so taps outside the panel dismiss cleanly and the
               user can see the panel isn't buried behind other content. */}
@@ -154,22 +224,58 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
             className="fixed left-3 right-3 top-[64px] sm:left-6 sm:right-auto sm:top-20 sm:w-[380px] max-h-[75vh] sm:max-h-[70vh] z-50 bg-[#0A1612] border border-[#5C9E8C]/40 rounded-xl shadow-[0_18px_40px_-8px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col"
           >
           <div className="flex items-center justify-between px-4 py-3 border-b border-[#5C9E8C]/20">
-            <div className="flex flex-col">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-[#5A6B65]">Quiet space</div>
-              <div className="text-sm text-[#E8E3D9]" style={{ fontFamily: 'Cormorant Garamond, serif' }}>Notifications</div>
+            <div className="flex items-center gap-2 min-w-0">
+              {reading ? (
+                <button
+                  type="button"
+                  data-testid="notification-reader-back"
+                  onClick={() => setReading(null)}
+                  className="text-[#8A9A92] hover:text-[#72C2AC] transition-colors -ml-1 p-1"
+                  aria-label="Back to notifications"
+                  title="Back"
+                >
+                  <ArrowLeft size={14} />
+                </button>
+              ) : null}
+              <div className="flex flex-col min-w-0">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-[#5A6B65]">
+                  {reading ? 'Reading' : 'Quiet space'}
+                </div>
+                <div className="text-sm text-[#E8E3D9] truncate" style={{ fontFamily: 'Cormorant Garamond, serif' }}>
+                  {reading ? (CATEGORY_LABEL[reading.category] || 'Message') : 'Notifications'}
+                </div>
+              </div>
             </div>
             <div className="flex items-center gap-2">
+              {!reading && (
+                <button
+                  type="button"
+                  data-testid="notification-mark-all-read"
+                  onClick={handleMarkAllRead}
+                  className="text-[10px] uppercase tracking-[0.14em] text-[#C4A67A] hover:text-[#E8B872] transition-colors flex items-center gap-1"
+                  title="Mark all as read"
+                >
+                  <CheckCheck size={12} /> Read all
+                </button>
+              )}
               <button
                 type="button"
-                data-testid="notification-mark-all-read"
-                onClick={handleMarkAllRead}
-                className="text-[10px] uppercase tracking-[0.14em] text-[#C4A67A] hover:text-[#E8B872] transition-colors flex items-center gap-1"
-                title="Mark all as read"
+                data-testid="notification-panel-close"
+                onClick={() => setOpen(false)}
+                aria-label="Close notifications"
+                className="text-[#8A9A92] hover:text-[#F0B4A8] transition-colors p-1 -mr-1"
               >
-                <CheckCheck size={12} /> Read all
+                <X size={14} />
               </button>
             </div>
           </div>
+          {reading ? (
+            <NotificationReader
+              n={reading}
+              onNavigate={handleReaderNavigate}
+              onDismiss={handleReaderDismiss}
+            />
+          ) : (
           <div className="overflow-y-auto divide-y divide-[#5C9E8C]/10">
             {loading && items.length === 0 && (
               <div className="p-6 text-center text-xs text-[#5A6B65]">Loading…</div>
@@ -219,6 +325,7 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
               );
             })}
           </div>
+          )}
           <div className="px-4 py-2.5 border-t border-[#5C9E8C]/20 flex items-center justify-between">
             <button
               type="button"
@@ -233,8 +340,70 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
             </div>
           </div>
         </div>
-        </>
+        </>,
+        document.body,
       )}
+    </div>
+  );
+}
+
+/**
+ * Full-message reader shown inside the notification panel when a user taps
+ * a card. Displays the complete title + body, timestamp, category chip, and
+ * (when present) an explicit "Open" CTA that navigates to the destination.
+ * Back arrow / X in the panel header return here to the list without
+ * navigating; a Dismiss button in the footer removes the notification.
+ */
+function NotificationReader({ n, onNavigate, onDismiss }) {
+  const Icon = CATEGORY_ICONS[n.category] || Bell;
+  const tint = CATEGORY_TINT[n.category] || '#C4A67A';
+  const chipLabel = CATEGORY_LABEL[n.category] || 'Notification';
+  return (
+    <div className="flex-1 overflow-y-auto" data-testid={`notification-reader-${n.id}`}>
+      <div className="p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.14em] border"
+            style={{ color: tint, borderColor: `${tint}55`, backgroundColor: `${tint}12` }}
+          >
+            <Icon size={11} /> {chipLabel}
+          </span>
+          <span className="text-[10px] uppercase tracking-[0.14em] text-[#5A6B65]">{timeAgo(n.created_at)}</span>
+        </div>
+        <h3
+          className="text-lg text-[#E8E3D9] leading-snug"
+          style={{ fontFamily: 'Cormorant Garamond, serif' }}
+          data-testid="notification-reader-title"
+        >
+          {n.title}
+        </h3>
+        <p
+          className="text-sm text-[#C9DED6] leading-relaxed whitespace-pre-wrap"
+          data-testid="notification-reader-body"
+        >
+          {n.body}
+        </p>
+        {hasMeaningfulDestination(n.destination) && (
+          <button
+            type="button"
+            data-testid="notification-reader-navigate"
+            onClick={onNavigate}
+            className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium text-sm transition-colors"
+          >
+            {ctaLabelFor(n.destination)} <ArrowRight size={13} />
+          </button>
+        )}
+      </div>
+      <div className="px-5 pb-5">
+        <button
+          type="button"
+          data-testid="notification-reader-dismiss"
+          onClick={onDismiss}
+          className="text-[10px] uppercase tracking-[0.14em] text-[#8A9A92] hover:text-[#F0B4A8] transition-colors"
+        >
+          Dismiss this notification
+        </button>
+      </div>
     </div>
   );
 }
