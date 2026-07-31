@@ -45,6 +45,7 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
   const [unread, setUnread] = useState(0);
   const [loading, setLoading] = useState(false);
   const panelRef = useRef(null);
+  const buttonRef = useRef(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -75,10 +76,16 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
     return () => { clearInterval(iv); window.removeEventListener('focus', onFocus); };
   }, [load, pollUnread]);
 
-  // Close panel on outside click / Escape.
+  // Close panel on outside click / Escape. IMPORTANT: also treat the bell
+  // button itself as "inside" so a second tap on the bell doesn't first
+  // close-via-mousedown and then immediately re-open via onClick.
   useEffect(() => {
     if (!open) return undefined;
-    const onDown = (e) => { if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false); };
+    const onDown = (e) => {
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      if (buttonRef.current && buttonRef.current.contains(e.target)) return;
+      setOpen(false);
+    };
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
@@ -112,6 +119,7 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
   return (
     <div className="relative">
       <button
+        ref={buttonRef}
         type="button"
         data-testid={testid}
         onClick={() => setOpen((o) => !o)}
@@ -131,12 +139,20 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
         )}
       </button>
       {open && (
-        <div
-          ref={panelRef}
-          data-testid="notification-center"
-          role="dialog"
-          className="absolute right-0 mt-2 w-[340px] sm:w-[380px] max-h-[70vh] z-50 bg-[#0A1612] border border-[#5C9E8C]/40 rounded-xl shadow-[0_18px_40px_-8px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col"
-        >
+        <>
+          {/* Mobile backdrop so taps outside the panel dismiss cleanly and the
+              user can see the panel isn't buried behind other content. */}
+          <div
+            className="fixed inset-0 z-40 bg-black/40 sm:hidden"
+            onClick={() => setOpen(false)}
+            aria-hidden
+          />
+          <div
+            ref={panelRef}
+            data-testid="notification-center"
+            role="dialog"
+            className="fixed left-3 right-3 top-[64px] sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-[380px] max-h-[75vh] sm:max-h-[70vh] z-50 bg-[#0A1612] border border-[#5C9E8C]/40 rounded-xl shadow-[0_18px_40px_-8px_rgba(0,0,0,0.85)] overflow-hidden flex flex-col"
+          >
           <div className="flex items-center justify-between px-4 py-3 border-b border-[#5C9E8C]/20">
             <div className="flex flex-col">
               <div className="text-[10px] uppercase tracking-[0.2em] text-[#5A6B65]">Quiet space</div>
@@ -217,6 +233,7 @@ export default function NotificationBell({ onNavigate, onOpenPreferences, testid
             </div>
           </div>
         </div>
+        </>
       )}
     </div>
   );
