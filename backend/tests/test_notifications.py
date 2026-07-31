@@ -118,6 +118,9 @@ def test_daily_cap_gates_nudges(s):
 def test_tick_delivers_feature_announcements_idempotently(s):
     token, _ = _register(s)
     h = {"Authorization": f"Bearer {token}"}
+    # Disable quiet hours so this test isn't UTC-time-of-day flaky.
+    s.put(f"{API}/me/notifications/prefs", headers=h,
+           json={"quiet_hours": {"enabled": False}})
     admin_token = _login(s, ADMIN_EMAIL, ADMIN_PASSWORD)
     ah = {"Authorization": f"Bearer {admin_token}"}
     title = f"Test feature {uuid.uuid4().hex[:6]}"

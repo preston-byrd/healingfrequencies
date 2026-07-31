@@ -223,6 +223,86 @@ async def _notify_admin_new_user(user_email: str, user_name: str, ip: str) -> No
         logger.warning("[resend] admin notify failed: %s", type(e).__name__)
 
 
+# ---- Sign-up alert digest buffer -------------------------------------------
+# SEC-001 hardening: bursts of registrations previously produced one admin
+# email per user (alert fatigue + amplification vector). Instead, we now
+# buffer pending sign-ups for a short window and send a SINGLE digest email
+# summarising all of them. First sign-up in a quiet period sends immediately
+# (so the admin still gets prompt notice); subsequent ones within
+# _ADMIN_SIGNUP_DIGEST_WINDOW_S are appended and flushed together.
+_ADMIN_SIGNUP_DIGEST_WINDOW_S = 300      # 5 minutes
+_ADMIN_SIGNUP_DIGEST_MAX = 50            # never buffer more than this
+_admin_signup_buffer: list = []          # [(email, name, ip, ts), ...]
+_admin_signup_flush_task: Optional[asyncio.Task] = None
+_admin_signup_lock = asyncio.Lock()
+_admin_signup_last_sent_at: float = 0.0
+
+
+async def _queue_admin_signup_alert(user_email: str, user_name: str, ip: str) -> None:
+    """Buffered replacement for `_notify_admin_new_user`. Fires the first
+    email in any quiet window immediately, then rolls the next 5-minute
+    burst into a single digest, then repeats. Silent if Resend is unset."""
+    if not _resend or not _RESEND_API_KEY or not _RESEND_ADMIN_RECIPIENT:
+        return
+    global _admin_signup_flush_task, _admin_signup_last_sent_at
+    now = _time.time()
+    async with _admin_signup_lock:
+        if now - _admin_signup_last_sent_at > _ADMIN_SIGNUP_DIGEST_WINDOW_S and not _admin_signup_buffer:
+            # Quiet period — send THIS one immediately, don't buffer.
+            _admin_signup_last_sent_at = now
+            asyncio.create_task(_notify_admin_new_user(user_email, user_name, ip))
+            return
+        # Otherwise queue and (re)arm the digest flush.
+        if len(_admin_signup_buffer) < _ADMIN_SIGNUP_DIGEST_MAX:
+            _admin_signup_buffer.append((user_email, user_name, ip, now))
+        if _admin_signup_flush_task and not _admin_signup_flush_task.done():
+            return
+        _admin_signup_flush_task = asyncio.create_task(_flush_admin_signup_digest())
+
+
+async def _flush_admin_signup_digest() -> None:
+    await asyncio.sleep(_ADMIN_SIGNUP_DIGEST_WINDOW_S)
+    global _admin_signup_last_sent_at
+    async with _admin_signup_lock:
+        pending = list(_admin_signup_buffer)
+        _admin_signup_buffer.clear()
+    if not pending:
+        return
+    _admin_signup_last_sent_at = _time.time()
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    rows_html = ""
+    for email, name, ip, ts in pending:
+        safe_name = (name or "").strip()[:120].replace("<", "&lt;").replace(">", "&gt;")
+        safe_email = (email or "").strip()[:200].replace("<", "&lt;").replace(">", "&gt;")
+        safe_ip = (ip or "unknown")[:64]
+        rows_html += (
+            f"<tr><td style=\"padding: 8px 0; border-top: 1px solid #1E2A26;\">"
+            f"<div style=\"font-size: 14px; color: #E8E3D9;\">{safe_name or safe_email}</div>"
+            f"<div style=\"font-size: 12px; color: #8A9A92;\">{safe_email}</div>"
+            f"<div style=\"font-family: ui-monospace, monospace; font-size: 10px; color: #5A6B65; padding-top: 2px;\">IP {safe_ip}</div>"
+            f"</td></tr>"
+        )
+    total = len(pending)
+    html = f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · sign-up digest</td></tr>
+      <tr><td style="padding-top: 12px; font-size: 22px; font-weight: 500; color: #E8E3D9;">{total} new sign-up{'s' if total != 1 else ''}</td></tr>
+      <tr><td style="padding-top: 4px; font-size: 12px; color: #8A9A92;">In the last {_ADMIN_SIGNUP_DIGEST_WINDOW_S // 60} minutes · {when}</td></tr>
+      <tr><td style="padding-top: 12px;"><table style="width: 100%;">{rows_html}</table></td></tr>
+      <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">— From your Healing Frequencies admin alerts</td></tr>
+    </table>
+    """
+    try:
+        await asyncio.to_thread(
+            _send_email_sync,
+            _RESEND_ADMIN_RECIPIENT,
+            f"{total} new sign-up{'s' if total != 1 else ''} · digest",
+            html,
+        )
+    except Exception as e:
+        logger.warning("[resend] admin digest failed: %s", type(e).__name__)
+
+
 # --- Setup --------------------------------------------------------------------
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -355,7 +435,7 @@ async def get_current_user(request: Request) -> dict:
 class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=120)
 
 
 class LoginIn(BaseModel):
@@ -395,6 +475,18 @@ class Session(SessionIn):
 # --- Auth routes --------------------------------------------------------------
 @api.post("/auth/register")
 async def register(body: RegisterIn, request: Request, response: Response):
+    # SEC-001 hardening: per-IP throttle prevents bulk-account spam that would
+    # otherwise flood the DB and the admin sign-up alert inbox. 15 sign-ups per
+    # IP per hour (refill 1 token every 4 min) — generous for genuine bursts
+    # (household NAT / campus, integration tests) while a script attempting
+    # thousands of accounts will trip within seconds. Localhost is skipped so
+    # the pytest suite and internal integration checks aren't hobbled.
+    ip = _client_ip(request)
+    if ip not in ("127.0.0.1", "::1", "localhost", "unknown"):
+        _rate_limit_or_429(
+            f"register:{ip}", capacity=15, refill_per_sec=1 / 240,
+            label="registration attempt",
+        )
     email = body.email.lower()
     existing = await db.users.find_one({"email": email})
     if existing:
@@ -402,7 +494,7 @@ async def register(body: RegisterIn, request: Request, response: Response):
     user = {
         "id": str(uuid.uuid4()),
         "email": email,
-        "name": body.name or email.split("@")[0],
+        "name": (body.name or email.split("@")[0])[:120],
         "password_hash": hash_password(body.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -414,10 +506,10 @@ async def register(body: RegisterIn, request: Request, response: Response):
         user_id=user["id"], user_email=email,
         metadata={"name": user["name"]},
     )
-    # Fire-and-forget admin email alert (Resend). Wrapped in create_task so a
-    # slow/failed email never blocks the user's registration response.
+    # Fire-and-forget admin alert — funnelled through the digest buffer so
+    # a burst of sign-ups sends ONE roll-up email instead of one-per-user.
     asyncio.create_task(
-        _notify_admin_new_user(email, user["name"], _client_ip(request))
+        _queue_admin_signup_alert(email, user["name"], ip)
     )
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
