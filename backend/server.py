@@ -2230,6 +2230,174 @@ class GapEditIn(BaseModel):
     confirmed_gaps: list[dict] = Field(default_factory=list, max_length=16)
 
 
+# ---------------- Phase 12b: Before/After Frequency Map ----------------
+
+_BAND_ORDER = ("sub", "low", "lowmid", "mid", "uppermid", "presence")
+_BAND_LABELS = {
+    "sub": "Sub-bass grounding",
+    "low": "Lower grounding",
+    "lowmid": "Warm-body",
+    "mid": "Mid-harmonic",
+    "uppermid": "Upper-mid clarity",
+    "presence": "Presence / brilliance",
+}
+
+
+def _band_alignment(delta_db: float) -> str:
+    """Classify how aligned a single band is vs the baseline eigenmode.
+
+    Bands close to baseline (|delta| < 2 dB) are considered *aligned*.
+    Bands with a moderate deviation (2 - 4 dB) sit in *near*. Anything ≥ 4 dB
+    off the baseline is *drift*. Thresholds mirror the drift ranking rules
+    already used elsewhere in this file.
+    """
+    a = abs(delta_db)
+    if a < 2.0:
+        return "aligned"
+    if a < 4.0:
+        return "near"
+    return "drift"
+
+
+def _describe_before_after(band_deltas: list[dict]) -> str:
+    """Plain-language summary of what improved vs what still drifts.
+
+    Groups bands into (1) noticeable strengthening (lower or sub bands now
+    close to baseline that were previously off), and (2) remaining drift
+    (bands ≥ 4 dB off in the latest reading). Falls back gracefully to a
+    generic encouragement when there's not enough signal to speak to.
+    """
+    strengthened = [b for b in band_deltas if b.get("improved") and b["alignment"] == "aligned"]
+    lingering = [b for b in band_deltas if b["alignment"] == "drift"]
+
+    if not band_deltas:
+        return "Keep capturing sessions — your before-and-after map will appear here."
+
+    parts: list[str] = []
+    if strengthened:
+        # Prefer the human-friendly labels of the first 2 strengthened bands
+        names = ", ".join(b["label"].lower() for b in strengthened[:2])
+        parts.append(
+            f"Your {names} frequencies have strengthened significantly since you began."
+        )
+    if lingering:
+        names = ", ".join(b["label"].lower() for b in lingering[:2])
+        parts.append(
+            f"Your {names} range continues to show some drift and remains a focus area."
+        )
+    if not parts:
+        # Everything is roughly stable
+        parts.append(
+            "Your harmonic signature is holding steady with your baseline — a "
+            "calm, consistent field to keep tuning from."
+        )
+    return " ".join(parts)
+
+
+@api.get("/harmonic-blueprint/before-after")
+async def harmonic_blueprint_before_after(user: dict = Depends(get_current_user)):
+    """Side-by-side comparison of the user's first eigenmode baseline vs
+    their most recent Harmonic Blueprint capture.
+
+    Returns per-band values for both readings plus band-level classifications
+    (`improved`, `alignment`) the frontend uses to colour teal/amber cells,
+    and a plain-language `summary_text` beneath the visualisation.
+
+    Also exposes `show_celebration` which flips true every 5th non-baseline
+    session so the frontend can gently celebrate progress at the end of a
+    capture flow.
+    """
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+
+    eigen = await _ensure_eigenmode(user["id"])
+    if not eigen:
+        return {
+            "baseline": None,
+            "latest": None,
+            "band_deltas": [],
+            "summary_text": "Capture your baseline eigenmode to unlock your before-and-after map.",
+            "session_count": 0,
+            "show_celebration": False,
+        }
+
+    # Latest non-eigenmode capture. If none exists yet, latest == baseline.
+    latest = await db.resonance_profiles.find_one(
+        {"user_id": user["id"], "is_eigenmode": {"$ne": True}},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if not latest:
+        return {
+            "baseline": {
+                "id": eigen.get("id"),
+                "created_at": eigen.get("created_at"),
+                "bands": eigen.get("bands", []),
+            },
+            "latest": None,
+            "band_deltas": [],
+            "summary_text": (
+                "Your baseline is captured. Take a fresh Harmonic Blueprint "
+                "reading to unlock your first side-by-side map."
+            ),
+            "session_count": 0,
+            "show_celebration": False,
+        }
+
+    session_count = await db.resonance_profiles.count_documents({
+        "user_id": user["id"],
+        "is_eigenmode": {"$ne": True},
+    })
+
+    ebands = _band_map(eigen.get("bands", []))
+    lbands = _band_map(latest.get("bands", []))
+
+    band_deltas: list[dict] = []
+    for key in _BAND_ORDER:
+        if key not in ebands or key not in lbands:
+            continue
+        try:
+            base_db = float(ebands[key].get("db", -60))
+            now_db = float(lbands[key].get("db", -60))
+        except (TypeError, ValueError):
+            continue
+        delta = round(now_db - base_db, 2)
+        alignment = _band_alignment(delta)
+        # "Improved" means the band is now aligned to baseline (delta ≈ 0).
+        # It doesn't try to reason about whether the raw dB went up or down,
+        # because the eigenmode itself is the target — closer is always better.
+        improved = alignment == "aligned"
+        band_deltas.append({
+            "key": key,
+            "label": _BAND_LABELS.get(key, key),
+            "lo": ebands[key].get("lo"),
+            "hi": ebands[key].get("hi"),
+            "baseline_db": round(base_db, 2),
+            "latest_db": round(now_db, 2),
+            "delta_db": delta,
+            "alignment": alignment,
+            "improved": improved,
+        })
+
+    return {
+        "baseline": {
+            "id": eigen.get("id"),
+            "created_at": eigen.get("created_at"),
+            "bands": eigen.get("bands", []),
+        },
+        "latest": {
+            "id": latest.get("id"),
+            "created_at": latest.get("created_at"),
+            "bands": latest.get("bands", []),
+        },
+        "band_deltas": band_deltas,
+        "summary_text": _describe_before_after(band_deltas),
+        "session_count": session_count,
+        # Every 5th non-baseline session triggers the gentle celebration.
+        "show_celebration": session_count > 0 and session_count % 5 == 0,
+    }
+
+
 @api.patch("/harmonic-blueprint/profile/{profile_id}/gaps")
 async def update_profile_gaps(
     profile_id: str,

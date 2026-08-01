@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="6" time="3.120" timestamp="2026-08-01T04:34:57.876576+00:00" hostname="agent-env-ecc48b74-f010-4ac4-ad40-4999b9ebdf0d"><testcase classname="tests.test_before_after" name="test_before_after_requires_auth" time="0.004" /><testcase classname="tests.test_before_after" name="test_before_after_free_user_402" time="0.256" /><testcase classname="tests.test_before_after" name="test_before_after_no_baseline" time="0.546" /><testcase classname="tests.test_before_after" name="test_before_after_eigenmode_only" time="0.476" /><testcase classname="tests.test_before_after" name="test_before_after_full_shape_and_classification" time="0.487" /><testcase classname="tests.test_before_after" name="test_before_after_celebration_flag_on_fifth_session" time="0.241"><failure message="requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login">backend/tests/test_before_after.py:198: in test_before_after_celebration_flag_on_fifth_session
+    tok = _login(email, pw)
+          ^^^^^^^^^^^^^^^^^
+backend/tests/test_before_after.py:78: in _login
+    r.raise_for_status()
+/root/.venv/lib/python3.11/site-packages/requests/models.py:1167: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login</failure></testcase></testsuite></testsuites>

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Sparkles, Anchor, X, Waves, Clock, Trash2, RotateCcw, TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
+import BeforeAfterMap from './BeforeAfterMap';
 
 /**
  * Phase 4 — Harmonic Blueprint section for the Account dashboard.
@@ -170,6 +171,11 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
               timeline={progress.timeline}
               summary={progress.summary}
             />
+          )}
+
+          {/* Before & After Frequency Map (Pro only, shown once baseline exists) */}
+          {isPro && (
+            <BeforeAfterMap />
           )}
 
           {/* Recent Eigenmode Journey */}

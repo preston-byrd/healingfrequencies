@@ -8,6 +8,7 @@ import {
 } from '@/lib/harmonicBlueprintEngine';
 import HarmonicJourneyPlayer from '@/components/HarmonicJourneyPlayer';
 import ResonanceScoreReveal, { computeResonanceScore } from '@/components/ResonanceScoreReveal';
+import { BeforeAfterCelebration } from '@/components/BeforeAfterMap';
 
 /**
  * Full-screen Harmonic Blueprint experience — voice capture, FFT analysis,
@@ -44,6 +45,10 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
   // completes and BEFORE the review step, so users see how closely they're
   // aligned with their eigenmode baseline before they see the gaps.
   const [resonanceScore, setResonanceScore] = useState(null);
+  // Phase 12b — Before/After celebration overlay shown every 5th capture.
+  // `data` is the payload from /harmonic-blueprint/before-after with
+  // `show_celebration: true`. `null` when the overlay isn't active.
+  const [celebrationData, setCelebrationData] = useState(null);
   // Phase 9 — tips-skipped preference loaded from /me/settings on open. When
   // true, IntroPanel's Begin flows straight to `capture`, bypassing the
   // Setup Tips ritual. Default false so first-time users see the tips.
@@ -328,6 +333,15 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
       setPendingFindings([]);
       setSelectedKeys(new Set());
       setStep('results');
+      // Phase 12b — after every 5th capture, gently celebrate progress by
+      // surfacing the before/after map. Fetch is non-blocking; failure just
+      // means no overlay this session.
+      try {
+        const ba = await api.get('/harmonic-blueprint/before-after');
+        if (ba.data && ba.data.show_celebration) {
+          setCelebrationData(ba.data);
+        }
+      } catch (_) { /* silent */ }
     } catch (e) {
       setError(formatApiError(e) || 'Could not save findings — please try again.');
     } finally {
@@ -556,6 +570,12 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
           )}
         </div>
       </div>
+      {celebrationData && (
+        <BeforeAfterCelebration
+          data={celebrationData}
+          onClose={() => setCelebrationData(null)}
+        />
+      )}
     </div>
   );
 }
