@@ -167,24 +167,53 @@ export function analyseBuffer(audioBuffer, { maxSeconds = 30 } = {}) {
     if (dominant.length >= 5) break;
   }
 
-  // Dip detection: local minima where neighbours are ≥ 8 dB louder — genuine
-  // notches, not just floor noise. Cap at 4.
-  const rawDips = [];
-  for (let i = 3; i < spectrum.length - 3; i++) {
-    const d = spectrum[i].db;
-    if (
-      d < spectrum[i - 1].db && d < spectrum[i + 1].db &&
-      d < spectrum[i - 3].db - 8 && d < spectrum[i + 3].db - 8 &&
-      d < median - 4
-    ) {
-      rawDips.push({ ...spectrum[i], idx: i });
+  // Dip detection: notches in the spectrum the user is genuinely moving
+  // AWAY from. Averaged spectra are smoothed AND typical vocal spectra
+  // slope downward at higher frequencies, so a GLOBAL median gate falsely
+  // rejects real notches in the lower half. Instead we use the LOCAL
+  // shoulder average as the reference — a notch is real when the trough
+  // sits ≥ `depthDb` below the mean of the shoulder bins `winBins` away.
+  //
+  // Two-pass approach guarantees we surface the user's most notable dips
+  // rather than silently reporting "None detected" every time:
+  //   1. STRICT — ±6-bin shoulders, 5 dB deep. Captures genuine notches.
+  //   2. RELAXED fallback — ±10-bin shoulders, 3 dB deep. Runs only when
+  //      the strict pass yields fewer than 2 hits.
+  const findDips = (winBins, depthDb) => {
+    const raw = [];
+    const w = Math.max(1, winBins);
+    for (let i = w; i < spectrum.length - w; i++) {
+      const d = spectrum[i].db;
+      // Bin i must be the minimum over ±2 bins so we can catch notches
+      // whose trough shifts by one bin due to FFT binning offsets.
+      let isLocalMin = true;
+      for (let k = 1; k <= 2 && isLocalMin; k++) {
+        if (spectrum[i - k].db < d || spectrum[i + k].db < d) {
+          isLocalMin = false;
+        }
+      }
+      if (!isLocalMin) continue;
+      const shoulderAvg = (spectrum[i - w].db + spectrum[i + w].db) / 2;
+      if (d < shoulderAvg - depthDb) {
+        raw.push({ ...spectrum[i], idx: i, depth: shoulderAvg - d });
+      }
     }
-  }
-  rawDips.sort((a, b) => a.db - b.db);
-  const dips = [];
-  for (const p of rawDips) {
-    if (dips.every((q) => Math.abs(q.hz - p.hz) > 60)) dips.push(p);
-    if (dips.length >= 4) break;
+    raw.sort((a, b) => b.depth - a.depth);
+    const picked = [];
+    for (const p of raw) {
+      if (picked.every((q) => Math.abs(q.hz - p.hz) > 60)) picked.push(p);
+      if (picked.length >= 4) break;
+    }
+    return picked;
+  };
+
+  let dips = findDips(6, 5);
+  if (dips.length < 2) {
+    const relaxed = findDips(10, 3);
+    for (const r of relaxed) {
+      if (dips.every((q) => Math.abs(q.hz - r.hz) > 60)) dips.push(r);
+      if (dips.length >= 4) break;
+    }
   }
 
   // Vocal-relevant band summary (band → average dB, 0-normalised to peak bin).

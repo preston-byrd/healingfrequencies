@@ -482,3 +482,10 @@
   - **Verified live**: 12 rapid login attempts with rotating `X-Forwarded-For: 203.0.113.N` values → first 8 return 401, remaining 4 return **429** and stay sticky. Old code would have granted 8 fresh buckets. Regular login still returns HTTP 200. All 6 security headers observed on every response via `curl -I`.
   - **Files** — `backend/server.py` (added `_is_private_peer`, rewrote `_client_ip`, added `_security_headers_middleware`).
 
+
+- **Notable Dips detection fix (Feb 2026, iter 62e)**: The Harmonic Blueprint "Notable Dips" card was almost always showing "None detected." because the dip-finder in `frontend/src/lib/harmonicBlueprintEngine.js` used a strict `<` on immediate ±1 bin neighbours (fails when the notch has a flat bottom after spectral averaging), a fixed 8 dB shoulder threshold ±3 bins away (a smoothed spectrum doesn't drop that steeply over 35 Hz), and a global-median gate (breaks for typical vocal spectra with a downward slope).
+  - **New algorithm**: `findDips(winBins, depthDb)` uses (1) a ±2-bin local-minimum check so an FFT-binning shift doesn't reject a real notch, (2) the **average of the two shoulder bins** at ±winBins as the reference — a truly local baseline instead of a global median that gets dragged around by the overall slope, and (3) a two-pass strict / relaxed strategy (±6 bins/5 dB → ±10 bins/3 dB fallback if fewer than 2 dips found).
+  - **Results ordered by depth** so the deepest notch appears first, capped at 4 with 60 Hz de-dup spacing.
+  - **Verified**: new test suite `backend/tests/test_dip_detection.mjs` — 5/5 pass (flat + notches, sloped + notches, realistic voice with peaks + notches, smooth slope returns none, noisy wobble returns none).
+  - **Files** — `frontend/src/lib/harmonicBlueprintEngine.js` (rewrote dip detector), `backend/tests/test_dip_detection.mjs` (new, node-runnable).
+
