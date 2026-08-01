@@ -447,6 +447,16 @@
 - P2: Real recorded ambient tracks (rain/ocean/forest) for premium quality (would need licensed assets)
 - P2: PWA install + offline mode + service-worker-driven reminders (for when tab is closed)
 
+
+- **Phase 12e — Milestone Celebrations (Feb 2026, iter 62)**: Full-screen milestone acknowledgement cards + persistent "My Milestones" timeline.
+  - **6 milestones detected**: `first_eigenmode`, `first_gap_closed`, `streak_7`, `streak_30`, `resonance_90`, `full_spectrum_improvement`. Each has exact-spec title + warm message.
+  - **New collection** `hb_milestones` with unique index on `(user_id, key)` — idempotent detection prevents double-awarding.
+  - **New endpoints**: `GET /api/hb/milestones` (runs detection, persists newly-earned rows, returns `{milestones, pending_celebration}`); `POST /api/hb/milestones/{key}/celebrate` (marks celebrated_at, returns 400/404 for bad keys / un-earned milestones).
+  - **New frontend components**: `MilestoneCelebration.jsx` (full-screen radial-gradient overlay with inline SVG `CymaticVisual` — deterministic petal rosette + concentric teal rings keyed by milestone type, gentle pulse animation, "Continue my journey" gold CTA) and `MyMilestones.jsx` (dual-purpose: auto-fetch + inline chronological card + auto-surface celebration overlay for oldest un-celebrated milestone first).
+  - **Two mount points**: HB Account section (default with inline card) and Dashboard (`showInlineCard={false}` for overlay-only mount, so milestones celebrate anywhere on app open).
+  - **Tests** — 9 cases in `backend/tests/test_milestones.py` (auth gate, empty state, each of the 6 detectors, idempotency, celebrate happy path + 400/404 errors). All passing.
+  - **Files** — `backend/server.py` (Phase 12e section: `_MILESTONES` catalogue, `_detect_milestones`, endpoints, unique-index in lifespan startup), `frontend/src/components/MilestoneCelebration.jsx` (new), `frontend/src/components/MyMilestones.jsx` (new), `frontend/src/components/HarmonicBlueprintSection.jsx` (import + mount `<MyMilestones />`), `frontend/src/components/Dashboard.jsx` (import + mount `<MyMilestones showInlineCard={false} />`), `backend/tests/test_milestones.py` (new, 9 cases).
+
 ## Next tasks (suggested)
 1. Hook "last used config" into localStorage (no backend change needed)
 2. Add A/B switch for 432Hz reference
