@@ -1,8 +1,22 @@
 import React, { useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { formatApiError } from '@/lib/api';
 import ForgotPasswordModal from '@/components/ForgotPasswordModal';
 import { LOGIN } from '@/constants/testIds/auth';
+
+// Axios throws either `Network Error` (browser refused / DNS / TLS died) or
+// aborts the request with `ECONNABORTED` when the 45-second timeout hits.
+// Both mean "the server was never reached", i.e. safe to retry with the
+// same body — as opposed to a 401 (wrong password) or 429 (rate-limited)
+// where retrying is the wrong move. Only these two surfaces the Retry chip.
+function isNetworkError(err) {
+  if (!err) return false;
+  if (err.response) return false;
+  if (err.code === 'ECONNABORTED') return true;
+  if (err.message === 'Network Error') return true;
+  return false;
+}
 
 export default function AuthScreen() {
   const { login, register } = useAuth();
@@ -11,21 +25,28 @@ export default function AuthScreen() {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [err, setErr] = useState('');
+  const [canRetry, setCanRetry] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
 
-  const submit = async (e) => {
-    e.preventDefault();
+  const attempt = async () => {
     setErr('');
+    setCanRetry(false);
     setBusy(true);
     try {
       if (mode === 'login') await login(email, password);
       else await register(email, password, name);
     } catch (e) {
       setErr(formatApiError(e));
+      setCanRetry(isNetworkError(e));
     } finally {
       setBusy(false);
     }
+  };
+
+  const submit = (e) => {
+    e.preventDefault();
+    attempt();
   };
 
   return (
@@ -82,7 +103,23 @@ export default function AuthScreen() {
             />
           </div>
 
-          {err && <div data-testid="auth-error" className="text-[#D96C6C] text-sm">{err}</div>}
+          {err && (
+            <div className="space-y-2" data-testid="auth-error-block">
+              <div data-testid="auth-error" className="text-[#D96C6C] text-sm">{err}</div>
+              {canRetry && (
+                <button
+                  type="button"
+                  onClick={attempt}
+                  disabled={busy}
+                  data-testid="auth-retry-button"
+                  className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-[#72C2AC] hover:text-[#C4A67A] transition-colors disabled:opacity-40"
+                >
+                  <RefreshCw size={12} className={busy ? 'animate-spin' : ''} />
+                  {busy ? 'Retrying…' : 'Retry'}
+                </button>
+              )}
+            </div>
+          )}
 
           <button
             data-testid="auth-submit-button"
