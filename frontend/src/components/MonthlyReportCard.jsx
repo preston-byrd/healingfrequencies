@@ -1,4 +1,5 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { X, TrendingUp, TrendingDown, Minus, Sparkles, Clock, Target, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 
 /**
@@ -8,10 +9,22 @@ import { X, TrendingUp, TrendingDown, Minus, Sparkles, Clock, Target, ArrowUpRig
  * available.
  */
 export default function MonthlyReportCard({ report, onClose }) {
+  const scrollRef = useRef(null);
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    // Force the modal to open scrolled to the top. Deferred by two rAF
+    // frames because the browser re-syncs scroll position after we lock
+    // body overflow, so a synchronous scrollTop=0 gets clobbered.
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      document.body.style.overflow = prev;
+    };
   }, []);
 
   if (!report) return null;
@@ -20,14 +33,16 @@ export default function MonthlyReportCard({ report, onClose }) {
   const hasPrev = report.resonance_score_previous !== null && report.resonance_score_previous !== undefined;
   const listeningMin = report.listening_minutes || 0;
 
-  return (
+  return createPortal((
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-[rgba(8,18,15,0.9)] backdrop-blur-md overflow-y-auto"
+      ref={scrollRef}
+      className="fixed inset-0 z-[80] overflow-y-auto bg-[rgba(8,18,15,0.9)] backdrop-blur-md"
       data-testid="monthly-report-card"
     >
-      <div className="max-w-3xl w-full my-8 rounded-2xl bg-gradient-to-b from-[#0f1c19] to-[#0a1613] border border-[rgba(196,166,122,0.3)] shadow-[0_30px_100px_rgba(0,0,0,0.7)] overflow-hidden">
+      <div className="min-h-full flex items-start justify-center px-4 py-8">
+        <div className="max-w-3xl w-full rounded-2xl bg-gradient-to-b from-[#0f1c19] to-[#0a1613] border border-[rgba(196,166,122,0.3)] shadow-[0_30px_100px_rgba(0,0,0,0.7)] overflow-hidden">
         {/* Header with warm headline */}
-        <div className="relative px-8 pt-8 pb-6 border-b border-[rgba(196,166,122,0.15)]">
+        <div className="relative px-6 sm:px-8 pt-6 sm:pt-8 pb-5 sm:pb-6 border-b border-[rgba(196,166,122,0.15)]">
           <button
             type="button"
             onClick={onClose}
@@ -149,7 +164,7 @@ export default function MonthlyReportCard({ report, onClose }) {
           </div>
         </div>
 
-        <div className="px-8 py-5 border-t border-[rgba(196,166,122,0.15)] flex justify-end">
+        <div className="px-6 sm:px-8 py-5 border-t border-[rgba(196,166,122,0.15)] flex justify-end">
           <button
             type="button"
             onClick={onClose}
@@ -160,8 +175,9 @@ export default function MonthlyReportCard({ report, onClose }) {
           </button>
         </div>
       </div>
+      </div>
     </div>
-  );
+  ), document.body);
 }
 
 

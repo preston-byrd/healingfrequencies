@@ -468,3 +468,10 @@
   - **Verified**: turn 1 with a `streak_30` milestone produced *"Hey MilestoneAgent! Thirty days of showing up for yourself — that's beautiful. How are you feeling right now?"* Turn 2 with user stress ("a bit tense") correctly OMITTED the milestone reference. Different milestone (`first_gap_closed`) produced *"I noticed something's coming back into balance for you — that's beautiful."*
   - **Files** — `backend/server.py` (helper + one prompt block in `agent_chat`), `backend/tests/test_milestones.py` (added `test_recent_milestone_helper_returns_fresh_earned`).
 
+
+
+- **Modal Portal Fix (Feb 2026, iter 62c)**: Fixed the Monthly Report / Before-After Celebration / Milestone Celebration overlays being clipped and off-center on desktop and mobile.
+  - **Root cause**: The Account section wrapper (`.glass { backdrop-filter: blur(...) }`) creates a new containing block that breaks `position: fixed` for descendants — the same portal-clipping bug flagged in the handoff summary.
+  - **Fix**: Render all three overlays via `createPortal(..., document.body)` so they escape any `.glass` ancestor entirely. Added a `useRef` + double-`requestAnimationFrame` scroll-to-top guard so content always opens at the headline regardless of the underlying page's scroll state.
+  - **Removed** the click-to-close-on-backdrop behavior that was misfiring during modal interactions. Users still have the explicit X (top-right) + gold Continue CTA.
+  - **Files** — `frontend/src/components/MonthlyReportCard.jsx`, `frontend/src/components/BeforeAfterMap.jsx`, `frontend/src/components/MilestoneCelebration.jsx` (all three now use `createPortal`).

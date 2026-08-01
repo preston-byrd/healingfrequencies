@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowRight, Sparkles } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 
@@ -202,19 +203,29 @@ function _fmtDate(iso) {
  * without breaking their session flow.
  */
 export function BeforeAfterCelebration({ data, onClose }) {
+  const scrollRef = React.useRef(null);
   useEffect(() => {
-    // Lock body scroll while the celebration overlay is up.
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      document.body.style.overflow = prev;
+    };
   }, []);
 
-  return (
+  return createPortal((
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-[rgba(8,18,15,0.85)] backdrop-blur-md"
+      ref={scrollRef}
+      className="fixed inset-0 z-[80] overflow-y-auto bg-[rgba(8,18,15,0.85)] backdrop-blur-md"
       data-testid="before-after-celebration"
     >
-      <div className="max-w-3xl w-full max-h-[92vh] overflow-y-auto rounded-2xl bg-[#0d1a17] border border-[rgba(196,166,122,0.25)] p-6 shadow-[0_20px_80px_rgba(0,0,0,0.6)]">
+      <div className="min-h-full flex items-start justify-center px-4 py-8">
+        <div className="max-w-3xl w-full rounded-2xl bg-[#0d1a17] border border-[rgba(196,166,122,0.25)] p-6 shadow-[0_20px_80px_rgba(0,0,0,0.6)]">
         <div className="flex items-center justify-between mb-4">
           <div>
             <div className="label-tiny text-[#C4A67A]">Progress celebration</div>
@@ -245,7 +256,8 @@ export function BeforeAfterCelebration({ data, onClose }) {
             Continue your journey <ArrowRight size={12} />
           </button>
         </div>
+        </div>
       </div>
     </div>
-  );
+  ), document.body);
 }

@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Sparkles, ArrowRight } from 'lucide-react';
 
 /**
@@ -12,25 +13,36 @@ import { Sparkles, ArrowRight } from 'lucide-react';
  *   onDismiss()   — parent handles the POST /celebrate call
  */
 export default function MilestoneCelebration({ milestone, onDismiss }) {
+  const scrollRef = useRef(null);
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      document.body.style.overflow = prev;
+    };
   }, []);
 
   const dateLabel = useMemo(() => _fmtDate(milestone?.achieved_at), [milestone]);
 
   if (!milestone) return null;
 
-  return (
+  return createPortal((
     <div
-      className="fixed inset-0 z-[85] flex items-center justify-center p-4 overflow-y-auto"
+      ref={scrollRef}
+      className="fixed inset-0 z-[85] overflow-y-auto"
       data-testid="milestone-celebration"
       style={{
         background: 'radial-gradient(circle at 50% 40%, rgba(196,166,122,0.14), rgba(8,18,15,0.96) 55%, #050d0b 100%)',
       }}
     >
-      <div className="max-w-lg w-full my-8 relative">
+      <div className="min-h-full flex items-start justify-center px-4 py-8">
+        <div className="max-w-lg w-full relative">
         {/* Cymatics-inspired visual — layered concentric SVG rings that
             slowly breathe. Pure inline SVG so it works offline + inherits
             the theme without any dependency. */}
@@ -71,9 +83,10 @@ export default function MilestoneCelebration({ milestone, onDismiss }) {
             Continue my journey <ArrowRight size={13} />
           </button>
         </div>
+        </div>
       </div>
     </div>
-  );
+  ), document.body);
 }
 
 
