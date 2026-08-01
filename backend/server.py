@@ -7,6 +7,7 @@ load_dotenv(ROOT_DIR / '.env')
 import os
 import asyncio
 import logging
+import math
 import uuid
 import bcrypt
 import jwt
@@ -1331,6 +1332,111 @@ async def _ensure_eigenmode(user_id: str) -> Optional[dict]:
     return oldest
 
 
+# ---------- Phase 11: Resonance / Drift Score --------------------------------
+# Cosine similarity between the caller's current spectrum and their saved
+# eigenmode baseline, mapped 0-100. The spectrum shape is a list of {freq,
+# magnitude} pairs (client-side FFT output). We log-bin both spectra onto a
+# shared frequency grid then compute cosine similarity so a small variance in
+# the exact peak frequencies doesn't wreck the score — what matters is the
+# distribution of energy across the audible range.
+_RS_BINS = 48
+_RS_F_LO = 20.0
+_RS_F_HI = 20000.0
+
+
+def _spectrum_to_bins(spectrum: list) -> list:
+    if not spectrum:
+        return [0.0] * _RS_BINS
+    out = [0.0] * _RS_BINS
+    counts = [0] * _RS_BINS
+    log_hi_lo = math.log(_RS_F_HI / _RS_F_LO)
+    for point in spectrum:
+        try:
+            if isinstance(point, dict):
+                f = float(point.get("freq") or point.get("frequency") or 0)
+                m = float(point.get("mag") or point.get("magnitude") or 0)
+            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                f = float(point[0]); m = float(point[1])
+            else:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if f < _RS_F_LO or f > _RS_F_HI or not math.isfinite(m):
+            continue
+        idx = min(_RS_BINS - 1, max(0, int(_RS_BINS * math.log(f / _RS_F_LO) / log_hi_lo)))
+        out[idx] += m
+        counts[idx] += 1
+    for i in range(_RS_BINS):
+        if counts[i]:
+            out[i] /= counts[i]
+    return out
+
+
+def _compute_resonance_score(current_spectrum: list, eigen_spectrum: list) -> int:
+    """Cosine similarity between `current` and `eigen` spectra → 0..100.
+    Returns 100 when either spectrum is missing (there's nothing to compare)
+    so a first-ever capture registers as 'baseline established today'."""
+    if not current_spectrum or not eigen_spectrum:
+        return 100
+    a = _spectrum_to_bins(current_spectrum)
+    b = _spectrum_to_bins(eigen_spectrum)
+    dot = 0.0; na = 0.0; nb = 0.0
+    for i in range(_RS_BINS):
+        dot += a[i] * b[i]
+        na += a[i] * a[i]
+        nb += b[i] * b[i]
+    if na <= 0 or nb <= 0:
+        return 100
+    cos = dot / math.sqrt(na * nb)
+    if cos < 0: cos = 0.0
+    if cos > 1: cos = 1.0
+    return int(round(cos * 100))
+
+
+class ResonanceScorePreviewIn(BaseModel):
+    """Client-provided spectrum used to preview a Resonance Score prior to
+    saving a new profile. Reuses the same shape as HarmonicProfileIn.spectrum."""
+    spectrum: list = Field(default_factory=list, max_length=512)
+
+
+@api.post("/harmonic-blueprint/resonance-score/preview")
+async def preview_resonance_score(
+    body: ResonanceScorePreviewIn,
+    user: dict = Depends(get_current_user),
+):
+    """Return the caller's Resonance Score for a candidate spectrum, without
+    persisting anything. Returns 100 when the caller has no eigenmode yet."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    eigen = await _ensure_eigenmode(user["id"])
+    if not eigen or not eigen.get("spectrum"):
+        return {"score": 100, "has_baseline": False}
+    score = _compute_resonance_score(body.spectrum or [], eigen.get("spectrum") or [])
+    return {"score": score, "has_baseline": True}
+
+
+@api.get("/harmonic-blueprint/resonance-score/history")
+async def resonance_score_history(user: dict = Depends(get_current_user)):
+    """Return the caller's resonance-score time series (chronological), oldest
+    first, so the client can chart drift over time."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    cur = db.resonance_profiles.find(
+        {"user_id": user["id"], "resonance_score": {"$exists": True}},
+        {"_id": 0, "resonance_score": 1, "created_at": 1, "is_eigenmode": 1, "id": 1},
+    ).sort("created_at", 1)
+    rows = await cur.to_list(500)
+    return {"items": [
+        {
+            "id": r.get("id"),
+            "score": int(r.get("resonance_score") or 0),
+            "at": r.get("created_at"),
+            "is_eigenmode": bool(r.get("is_eigenmode")),
+        }
+        for r in rows if r.get("resonance_score") is not None
+    ]}
+
+
 @api.get("/harmonic-blueprint/profile")
 async def get_harmonic_profile(user: dict = Depends(get_current_user)):
     """Return the user's most recent resonance profile alongside their
@@ -1346,6 +1452,31 @@ async def get_harmonic_profile(user: dict = Depends(get_current_user)):
         sort=[("created_at", -1)],
     )
     eigen = await _ensure_eigenmode(user["id"])
+    # Phase 11 back-compat: profiles saved before the Resonance Score existed
+    # lack the field. Compute + persist lazily on first read so existing users
+    # see their score immediately when they reopen HB.
+    if latest and latest.get("resonance_score") is None:
+        if eigen and latest.get("id") != eigen.get("id"):
+            score = _compute_resonance_score(
+                latest.get("spectrum") or [], eigen.get("spectrum") or [],
+            )
+        else:
+            score = 100
+        try:
+            await db.resonance_profiles.update_one(
+                {"id": latest["id"]}, {"$set": {"resonance_score": score}},
+            )
+        except Exception:
+            pass
+        latest["resonance_score"] = score
+    if eigen and eigen.get("resonance_score") is None:
+        try:
+            await db.resonance_profiles.update_one(
+                {"id": eigen["id"]}, {"$set": {"resonance_score": 100}},
+            )
+        except Exception:
+            pass
+        eigen["resonance_score"] = 100
     return {"profile": latest, "eigenmode": eigen}
 
 
@@ -1378,6 +1509,14 @@ async def save_harmonic_profile(
     )
     existing_eigen = await _ensure_eigenmode(user["id"])
     is_first_ever = existing_eigen is None
+    # Phase 11 — compute + persist the Resonance Score against the eigenmode
+    # baseline. First-ever captures ARE the baseline, so score = 100.
+    if is_first_ever:
+        resonance_score = 100
+    else:
+        resonance_score = _compute_resonance_score(
+            body.spectrum or [], (existing_eigen or {}).get("spectrum") or [],
+        )
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1395,6 +1534,7 @@ async def save_harmonic_profile(
         "confirmed_gaps": body.confirmed_gaps,
         "generated_at": body.generated_at or now,
         "is_eigenmode": is_first_ever,
+        "resonance_score": resonance_score,
     }
     await db.resonance_profiles.insert_one({**doc})
     # Retention: keep latest 5 profiles per user, PLUS the eigenmode even if

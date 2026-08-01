@@ -7,6 +7,7 @@ import {
   compareToEigenmode,
 } from '@/lib/harmonicBlueprintEngine';
 import HarmonicJourneyPlayer from '@/components/HarmonicJourneyPlayer';
+import ResonanceScoreReveal, { computeResonanceScore } from '@/components/ResonanceScoreReveal';
 
 /**
  * Full-screen Harmonic Blueprint experience — voice capture, FFT analysis,
@@ -37,8 +38,12 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
   const [existing, setExisting] = useState(seedProfile);   // latest saved profile or null
   const [eigenmode, setEigenmode] = useState(seedEigen);   // baseline profile or null
   const [loading, setLoading] = useState(!initialData);
-  // intro | tipsGate | tipsRitual | capture | analysing | review | eigenmodeSaved | results | error
+  // intro | tipsGate | tipsRitual | capture | analysing | scoreReveal | review | eigenmodeSaved | results | error
   const [step, setStep] = useState(seedProfile ? 'results' : 'intro');
+  // Phase 11 — Resonance / Drift Score. Computed client-side after FFT
+  // completes and BEFORE the review step, so users see how closely they're
+  // aligned with their eigenmode baseline before they see the gaps.
+  const [resonanceScore, setResonanceScore] = useState(null);
   // Phase 9 — tips-skipped preference loaded from /me/settings on open. When
   // true, IntroPanel's Begin flows straight to `capture`, bypassing the
   // Setup Tips ritual. Default false so first-time users see the tips.
@@ -277,7 +282,14 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
         // Default: pre-select the top finding so users see the affordance;
         // they can toggle any/all off before saving.
         setSelectedKeys(new Set(findings.slice(0, 1).map((f) => f.key)));
-        setStep('review');
+        // Phase 11 — compute Resonance Score locally and reveal it BEFORE
+        // findings. Matches the server-side formula so the number persisted
+        // on save equals what the user just saw.
+        try {
+          const score = computeResonanceScore(derived?.spectrum, eigenmode?.spectrum);
+          setResonanceScore(score);
+        } catch (_) { setResonanceScore(100); }
+        setStep('scoreReveal');
         return;
       }
       // First-ever capture — this IS the eigenmode.
@@ -286,6 +298,8 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
       setProfile(saved);
       setExisting(saved);
       setEigenmode(saved);
+      // No comparison possible for a first capture — it IS the baseline.
+      setResonanceScore(100);
       setStep('eigenmodeSaved');
     } catch (e) {
       setError(formatApiError(e) || 'Could not analyse audio — please try again.');
@@ -393,6 +407,7 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
               <h1 className="font-display text-4xl sm:text-5xl font-light tracking-tight text-[#E8E3D9]">
                 {step === 'results' ? 'Your resonance profile'
                   : step === 'review' ? 'Review your findings'
+                  : step === 'scoreReveal' ? 'Your Resonance Score'
                   : step === 'eigenmodeSaved' ? 'Your natural baseline is set'
                   : 'Discover your signature'}
               </h1>
@@ -476,6 +491,16 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
               <Waves className="mx-auto text-[#72C2AC] animate-pulse" size={36} />
               <div className="font-display text-2xl text-[#E8E3D9] mt-6">Analysing your signature…</div>
               <div className="text-[#8A9A92] text-sm mt-2">Running FFT and mapping your resonance</div>
+            </div>
+          )}
+
+          {!loading && step === 'scoreReveal' && (
+            <div className="glass p-6 sm:p-10" data-testid="harmonic-blueprint-score-reveal">
+              <ResonanceScoreReveal
+                score={resonanceScore}
+                hasBaseline={!!eigenmode}
+                onContinue={() => setStep('review')}
+              />
             </div>
           )}
 
