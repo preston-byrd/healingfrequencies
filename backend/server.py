@@ -2398,6 +2398,332 @@ async def harmonic_blueprint_before_after(user: dict = Depends(get_current_user)
     }
 
 
+# ---------------- Phase 12c: Session Impact Rating ----------------
+
+_RATING_WEIGHTS = {"clear_shift": 3, "subtle_difference": 1, "not_sure": 0}
+
+
+class ImpactRatingIn(BaseModel):
+    entry_id: str = Field(min_length=1, max_length=64)
+    rating: str = Field(pattern="^(clear_shift|subtle_difference|not_sure)$")
+
+
+@api.get("/hb/pending-impact-ratings")
+async def hb_pending_impact_ratings(user: dict = Depends(get_current_user)):
+    """Return HB-recommended journey entries from ≥ 24h ago that don't yet
+    have an `impact_rating`. Powers the "How did you feel after yesterday's
+    {frequency} session?" prompt shown on the next app open."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    cursor = db.wellness_journey.find(
+        {
+            "user_id": user["id"],
+            "hb_recommended": True,
+            "created_at": {"$lte": cutoff},
+            "impact_rating": {"$exists": False},
+        },
+        {"_id": 0, "id": 1, "frequency": 1, "preset_label": 1, "preset_key": 1,
+         "created_at": 1, "soundscape": 1, "duration_actual_seconds": 1,
+         "hb_source": 1},
+    ).sort("created_at", 1).limit(5)
+    rows = await cursor.to_list(length=5)
+
+    def _label(row: dict) -> str:
+        if row.get("preset_label"):
+            return row["preset_label"]
+        if row.get("soundscape"):
+            return str(row["soundscape"]).replace("_", " ").title()
+        if row.get("frequency"):
+            return f"{round(float(row['frequency']))} Hz"
+        return "recent"
+
+    for r in rows:
+        r["label"] = _label(r)
+    return {"pending": rows}
+
+
+@api.post("/hb/impact-rating")
+async def hb_impact_rating(
+    body: ImpactRatingIn,
+    user: dict = Depends(get_current_user),
+):
+    """Store the user's post-session impact rating alongside the journey
+    entry. Idempotent — a re-submission replaces the previous rating."""
+    row = await db.wellness_journey.find_one(
+        {"id": body.entry_id, "user_id": user["id"]}, {"_id": 0, "id": 1},
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await db.wellness_journey.update_one(
+        {"id": body.entry_id, "user_id": user["id"]},
+        {"$set": {
+            "impact_rating": body.rating,
+            "impact_rated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    return {"ok": True, "rating": body.rating}
+
+
+@api.get("/hb/effective-frequencies")
+async def hb_effective_frequencies(user: dict = Depends(get_current_user)):
+    """Aggregate rated HB-recommended sessions by frequency and return the
+    top 5 by effectiveness score. Requires at least 2 rated sessions per
+    frequency to reduce single-session noise.
+
+    Effectiveness score = mean(weights) where clear_shift=3, subtle=1,
+    not_sure=0. Normalised to 0-100 for a friendlier UI.
+    """
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    cursor = db.wellness_journey.find(
+        {
+            "user_id": user["id"],
+            "hb_recommended": True,
+            "impact_rating": {"$in": list(_RATING_WEIGHTS.keys())},
+            "frequency": {"$ne": None},
+        },
+        {"_id": 0, "frequency": 1, "impact_rating": 1, "preset_label": 1},
+    )
+    rows = await cursor.to_list(length=1000)
+
+    # Bucket by rounded frequency (nearest 1 Hz) so 432.0 and 432.1 collapse.
+    buckets: dict[int, dict] = {}
+    for r in rows:
+        try:
+            hz = int(round(float(r.get("frequency"))))
+        except (TypeError, ValueError):
+            continue
+        b = buckets.setdefault(hz, {"scores": [], "labels": []})
+        b["scores"].append(_RATING_WEIGHTS[r["impact_rating"]])
+        if r.get("preset_label"):
+            b["labels"].append(r["preset_label"])
+
+    ranked = []
+    for hz, b in buckets.items():
+        n = len(b["scores"])
+        if n < 2:
+            continue
+        mean = sum(b["scores"]) / n
+        # Normalise 0-3 → 0-100 for a friendlier display value.
+        pct = round((mean / 3.0) * 100)
+        label = max(set(b["labels"]), key=b["labels"].count) if b["labels"] else f"{hz} Hz"
+        ranked.append({
+            "frequency": hz,
+            "label": label,
+            "score": pct,
+            "sample_count": n,
+        })
+
+    ranked.sort(key=lambda x: (-x["score"], -x["sample_count"]))
+    return {"frequencies": ranked[:5]}
+
+
+# ---------------- Phase 12d: Monthly Harmonic Blueprint Report ----------------
+
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _month_key(dt: datetime) -> str:
+    return dt.strftime("%Y-%m")
+
+
+def _month_bounds(month_key: str) -> tuple[datetime, datetime]:
+    y, m = (int(x) for x in month_key.split("-"))
+    start = datetime(y, m, 1, tzinfo=timezone.utc)
+    if m == 12:
+        end = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end = datetime(y, m + 1, 1, tzinfo=timezone.utc)
+    return start, end
+
+
+def _friendly_month_title(month_key: str) -> str:
+    y, m = (int(x) for x in month_key.split("-"))
+    return f"Your {_MONTH_NAMES[m - 1]} Resonance Journey"
+
+
+async def _compose_monthly_report(user_id: str, month_key: str) -> Optional[dict]:
+    """Build the report payload for a specific YYYY-MM. Returns None when the
+    user doesn't yet qualify (< 2 HB captures in that month). Pure function
+    — no persistence. Caller decides whether/when to store the result.
+    """
+    start, end = _month_bounds(month_key)
+    # HB captures this month (non-eigenmode only — the eigenmode is a
+    # one-off baseline, not a repeatable "session").
+    profiles = await db.resonance_profiles.find(
+        {
+            "user_id": user_id,
+            "is_eigenmode": {"$ne": True},
+            "created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()},
+        },
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(200)
+    if len(profiles) < 2:
+        return None
+
+    # Reference eigenmode for band-delta math.
+    eigen = await db.resonance_profiles.find_one(
+        {"user_id": user_id, "is_eigenmode": True}, {"_id": 0},
+    )
+    ebands = _band_map(eigen.get("bands", [])) if eigen else {}
+
+    # Current-month latest score.
+    latest = profiles[-1]
+    current_score = int(latest.get("resonance_score") or 0)
+
+    # Previous-month latest score (any capture, eigenmode or not).
+    prev_start, _ = _month_bounds(month_key)
+    prev_end = prev_start
+    prev_month_key = (prev_start - timedelta(days=1)).strftime("%Y-%m")
+    ps, pe = _month_bounds(prev_month_key)
+    prev_doc = await db.resonance_profiles.find_one(
+        {"user_id": user_id,
+         "created_at": {"$gte": ps.isoformat(), "$lt": pe.isoformat()}},
+        {"_id": 0, "resonance_score": 1},
+        sort=[("created_at", -1)],
+    )
+    previous_score = int(prev_doc["resonance_score"]) if prev_doc and prev_doc.get("resonance_score") is not None else None
+
+    # Band deltas: compare month-start profile (or eigenmode) against
+    # month-end profile to compute per-band closure.
+    first_month_profile = profiles[0]
+    first_bands = _band_map(first_month_profile.get("bands", []))
+    last_bands = _band_map(latest.get("bands", []))
+
+    band_movements: list[dict] = []
+    for key in _BAND_ORDER:
+        if key not in ebands or key not in last_bands:
+            continue
+        base_db = float(ebands[key].get("db", -60))
+        first_db = float(first_bands.get(key, {}).get("db", base_db))
+        last_db = float(last_bands.get(key, {}).get("db", base_db))
+        first_sev = abs(first_db - base_db)
+        last_sev = abs(last_db - base_db)
+        band_movements.append({
+            "key": key,
+            "label": _BAND_LABELS.get(key, key),
+            "lo": ebands[key].get("lo"),
+            "hi": ebands[key].get("hi"),
+            "closure_db": round(first_sev - last_sev, 2),  # + = improved
+            "current_severity": round(last_sev, 2),
+        })
+
+    most_improved = [b for b in sorted(band_movements, key=lambda x: -x["closure_db"])
+                     if b["closure_db"] > 0.5][:3]
+    most_persistent = [b for b in sorted(band_movements, key=lambda x: -x["current_severity"])
+                       if b["current_severity"] >= 3.0][:3]
+
+    # Recommended focus frequencies: centre Hz of the top persistent gaps.
+    recommended = []
+    for b in most_persistent:
+        try:
+            centre = int((float(b["lo"]) + float(b["hi"])) / 2)
+        except (TypeError, ValueError):
+            continue
+        recommended.append({
+            "frequency": centre,
+            "band": b["label"],
+            "range": f"{b['lo']}-{b['hi']} Hz",
+        })
+
+    # Total listening time on HB-recommended sessions this month.
+    listening_cursor = db.wellness_journey.find(
+        {
+            "user_id": user_id,
+            "hb_recommended": True,
+            "created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()},
+        },
+        {"_id": 0, "duration_actual_seconds": 1},
+    )
+    listening_rows = await listening_cursor.to_list(length=500)
+    listening_seconds = int(sum(r.get("duration_actual_seconds") or 0 for r in listening_rows))
+
+    return {
+        "month": month_key,
+        "title": _friendly_month_title(month_key),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_sessions": len(profiles),
+        "resonance_score_current": current_score,
+        "resonance_score_previous": previous_score,
+        "resonance_score_delta": (current_score - previous_score) if previous_score is not None else None,
+        "most_improved_ranges": most_improved,
+        "most_persistent_gaps": most_persistent,
+        "recommended_frequencies": recommended,
+        "listening_seconds": listening_seconds,
+        "listening_minutes": round(listening_seconds / 60),
+    }
+
+
+async def _ensure_monthly_report(user_id: str, month_key: str) -> Optional[dict]:
+    """Return the stored report for (user, month) or lazily compose+persist
+    a new one on first access. Returns None when the user doesn't yet
+    qualify (< 2 sessions that month)."""
+    existing = await db.hb_monthly_reports.find_one(
+        {"user_id": user_id, "month": month_key}, {"_id": 0},
+    )
+    if existing:
+        return existing
+    payload = await _compose_monthly_report(user_id, month_key)
+    if not payload:
+        return None
+    doc = {**payload, "user_id": user_id, "id": uuid.uuid4().hex}
+    try:
+        await db.hb_monthly_reports.insert_one(doc)
+    except Exception as exc:  # noqa: BLE001 — race with another request
+        logger.warning("[monthly_report] insert failed for %s %s: %s", user_id, month_key, exc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/hb/monthly-report")
+async def hb_monthly_report_latest(user: dict = Depends(get_current_user)):
+    """Return the most recent monthly report available for the user, plus a
+    list of every prior report month for the profile-section browser.
+
+    Lazy generation: if the user has enough sessions THIS month or LAST month
+    but no stored report yet, we compose and persist one on the fly.
+    """
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+
+    now = datetime.now(timezone.utc)
+    prev_key = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    # Prefer LAST calendar month — a completed month is a real "monthly
+    # summary". Fall back to the current in-progress month if last month
+    # is empty but the user has already crossed the 2-session threshold.
+    for candidate in (prev_key, _month_key(now)):
+        r = await _ensure_monthly_report(user["id"], candidate)
+        if r:
+            latest = r
+            break
+    else:
+        latest = None
+
+    all_cursor = db.hb_monthly_reports.find(
+        {"user_id": user["id"]}, {"_id": 0, "month": 1, "title": 1, "generated_at": 1},
+    ).sort("month", -1).limit(24)
+    available = await all_cursor.to_list(length=24)
+    return {"report": latest, "available_months": available}
+
+
+@api.get("/hb/monthly-report/{month}")
+async def hb_monthly_report_by_month(
+    month: str,
+    user: dict = Depends(get_current_user),
+):
+    """Fetch a specific month's report. Format YYYY-MM."""
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+    if not (len(month) == 7 and month[4] == "-" and month[:4].isdigit() and month[5:].isdigit()):
+        raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM.")
+    r = await _ensure_monthly_report(user["id"], month)
+    if not r:
+        raise HTTPException(status_code=404, detail="No report available for this month yet.")
+    return {"report": r}
+
+
 @api.patch("/harmonic-blueprint/profile/{profile_id}/gaps")
 async def update_profile_gaps(
     profile_id: str,
@@ -2742,6 +3068,12 @@ class JourneyLogIn(BaseModel):
     extended: bool = False
     ended_early: bool = False
     agent_initiated: bool = False
+    # Phase 12c — flag set by the client when the session was triggered by an
+    # HB gap recommendation or a Wellness Assistant suggestion that referenced
+    # a resonance gap. Powers the 24h impact-rating follow-up and the
+    # "Your Most Effective Frequencies" aggregation.
+    hb_recommended: bool = False
+    hb_source: Optional[str] = Field(default=None, max_length=32)   # e.g. 'hb_gap' | 'assistant_gap'
 
 
 class JourneyReflectionIn(BaseModel):

@@ -24,6 +24,7 @@ import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
 import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
 import NotificationBell from '@/components/NotificationBell';
+import SessionImpactPrompt from '@/components/SessionImpactPrompt';
 import NotificationPreferencesModal from '@/components/NotificationPreferencesModal';
 import PushOptInSlip, { requestPushOptInIfWarm } from '@/components/PushOptInSlip';
 import ListeningGuide, { HeadphoneReminder, useHeadphoneReminder } from '@/components/ListeningGuide';
@@ -427,6 +428,12 @@ export default function Dashboard({ onOpenAccount }) {
         extended: false,           // wired for future Extend +5 chip
         ended_early,
         agent_initiated: !!assistantOwnedRef.current,
+        // Phase 12c — mark sessions triggered by the Wellness Assistant as
+        // HB-recommended when the user is a Pro (Assistant weighs HB gaps
+        // in its suggestions). The 24-hour follow-up prompt reads this
+        // flag to decide whether to ask the impact-rating question.
+        hb_recommended: !!(assistantOwnedRef.current && isPro),
+        hb_source: assistantOwnedRef.current ? 'assistant_gap' : undefined,
       };
       const { data } = await api.post('/me/journey/log', payload);
       if (data && data.ok && data.entry && data.entry.id) {
@@ -2390,6 +2397,11 @@ export default function Dashboard({ onOpenAccount }) {
         onOpenAccount={onOpenAccount}
         initialData={hbInitialData}
       />
+
+      {/* Phase 12c — Session Impact Rating prompt. Fires on app open when
+          the user has HB-recommended sessions from ≥24h ago without a
+          rating. Self-fetches, self-dismisses, silent when nothing pending. */}
+      <SessionImpactPrompt isPro={isPro} />
 
       {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus
           copyable deep-link URLs (/play?preset=…) for hands-free playback. */}

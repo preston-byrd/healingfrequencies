@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Sparkles, Anchor, X, Waves, Clock, Trash2, RotateCcw, TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react';
+import { Sparkles, Anchor, X, Waves, Clock, Trash2, RotateCcw, TrendingUp, TrendingDown, Minus, Activity, Award, FileText } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import BeforeAfterMap from './BeforeAfterMap';
+import MonthlyReportCard from './MonthlyReportCard';
 
 /**
  * Phase 4 — Harmonic Blueprint section for the Account dashboard.
@@ -28,6 +29,9 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
   const [summary, setSummary] = useState(null);
   const [history, setHistory] = useState([]);
   const [progress, setProgress] = useState(null);
+  const [effective, setEffective] = useState([]);
+  const [monthly, setMonthly] = useState(null);        // { report, available_months }
+  const [reportOpen, setReportOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -36,7 +40,7 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
     setError('');
     setLoading(true);
     try {
-      const [s, h, p] = await Promise.all([
+      const [s, h, p, e, m] = await Promise.all([
         api.get('/harmonic-blueprint/summary'),
         isPro
           ? api.get('/harmonic-blueprint/history').catch(() => ({ data: { history: [] } }))
@@ -44,10 +48,18 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
         isPro
           ? api.get('/harmonic-blueprint/gap-progress').catch(() => ({ data: null }))
           : Promise.resolve({ data: null }),
+        isPro
+          ? api.get('/hb/effective-frequencies').catch(() => ({ data: { frequencies: [] } }))
+          : Promise.resolve({ data: { frequencies: [] } }),
+        isPro
+          ? api.get('/hb/monthly-report').catch(() => ({ data: null }))
+          : Promise.resolve({ data: null }),
       ]);
       setSummary(s.data || null);
       setHistory((h.data && h.data.history) || []);
       setProgress(p.data || null);
+      setEffective((e.data && e.data.frequencies) || []);
+      setMonthly(m.data || null);
     } catch (e) {
       setError(formatApiError(e));
     } finally {
@@ -178,6 +190,20 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
             <BeforeAfterMap />
           )}
 
+          {/* Phase 12c — Your Most Effective Frequencies */}
+          {isPro && effective && effective.length > 0 && (
+            <EffectiveFrequenciesCard frequencies={effective} />
+          )}
+
+          {/* Phase 12d — Monthly Report entry point */}
+          {isPro && monthly && monthly.report && (
+            <MonthlyReportEntry
+              report={monthly.report}
+              availableMonths={monthly.available_months || []}
+              onOpen={() => setReportOpen(true)}
+            />
+          )}
+
           {/* Recent Eigenmode Journey */}
           {summary.latest_journey && (
             <RecentJourneyCard journey={summary.latest_journey} onOpen={onOpenSheet} />
@@ -188,6 +214,14 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
             <DriftHistoryCard history={history} />
           )}
         </>
+      )}
+
+      {/* Phase 12d — Full-screen monthly report modal, rendered lazily. */}
+      {reportOpen && monthly && monthly.report && (
+        <MonthlyReportCard
+          report={monthly.report}
+          onClose={() => setReportOpen(false)}
+        />
       )}
     </div>
   );
@@ -387,11 +421,92 @@ function RecentJourneyCard({ journey, onOpen }) {
   );
 }
 
-// ---------- Gap Closure Progress + Resonance Timeline (Phase 12) -----------
-// Shows longitudinal movement of each confirmed resonance gap across all HB
-// sessions, alongside the user's overall Resonance Score timeline. Rendered
-// only when the user has at least one non-baseline capture with computed
-// severity data.
+// ---------- Phase 12c/d: Effective Frequencies + Monthly Report -----------
+
+function EffectiveFrequenciesCard({ frequencies }) {
+  return (
+    <div
+      className="rounded-xl p-5 border border-[rgba(114,194,172,0.25)] bg-[rgba(114,194,172,0.02)]"
+      data-testid="effective-frequencies-card"
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <Award size={13} className="text-[#72C2AC]" />
+        <div className="label-tiny text-[#72C2AC]">Your most effective frequencies</div>
+      </div>
+      <div className="text-[#8A9A92] text-xs mb-4 leading-relaxed">
+        Based on how you felt after each recommended session, these frequencies
+        seem to move the needle for you.
+      </div>
+      <ul className="space-y-2.5">
+        {frequencies.map((f, i) => (
+          <li
+            key={f.frequency}
+            data-testid={`effective-frequencies-row-${f.frequency}`}
+            className="flex items-baseline justify-between rounded-lg bg-[rgba(8,18,15,0.4)] border border-[rgba(114,194,172,0.12)] px-3 py-2.5"
+          >
+            <div className="flex items-baseline gap-3">
+              <span className="text-[10px] font-mono text-[#8A9A92]">#{i + 1}</span>
+              <span>
+                <div className="text-[#E8E3D9] text-sm">{f.label}</div>
+                <div className="text-[10px] font-mono text-[#8A9A92]">
+                  {f.frequency} Hz · {f.sample_count} rated session{f.sample_count === 1 ? '' : 's'}
+                </div>
+              </span>
+            </div>
+            <div className="text-right">
+              <div className="text-[#72C2AC] text-sm font-mono">{f.score}%</div>
+              <div className="text-[9px] text-[#8A9A92] uppercase tracking-wide">effectiveness</div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+
+function MonthlyReportEntry({ report, availableMonths, onOpen }) {
+  const monthCount = availableMonths.length || 1;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      data-testid="monthly-report-entry"
+      className="w-full text-left rounded-xl p-5 border border-[rgba(196,166,122,0.3)] bg-[rgba(196,166,122,0.03)] hover:bg-[rgba(196,166,122,0.06)] hover:border-[rgba(196,166,122,0.5)] transition group"
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <FileText size={13} className="text-[#C4A67A]" />
+        <div className="label-tiny text-[#C4A67A]">Monthly Blueprint report</div>
+      </div>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[#E8E3D9] text-sm font-display">
+            {report.title}
+          </div>
+          <div className="text-[#8A9A92] text-xs mt-1">
+            {report.total_sessions} sessions · score {report.resonance_score_current}
+            {report.resonance_score_delta !== null && report.resonance_score_delta !== undefined && (
+              <span className={report.resonance_score_delta >= 0 ? 'text-[#72C2AC] ml-1.5' : 'text-[#D9A45C] ml-1.5'}>
+                {report.resonance_score_delta >= 0 ? '+' : ''}{report.resonance_score_delta} vs last month
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="text-[#C4A67A] text-xs group-hover:translate-x-0.5 transition">
+          View →
+        </div>
+      </div>
+      {monthCount > 1 && (
+        <div className="text-[10px] text-[#8A9A92] mt-3">
+          {monthCount} monthly reports available
+        </div>
+      )}
+    </button>
+  );
+}
+
+
+
 
 const _TREND_META = {
   improving: {
