@@ -100,7 +100,17 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
         if (pRes.status === 'fulfilled') {
           profileData = pRes.value.data || profileData;
         } else if (pRes.reason && pRes.reason.response && pRes.reason.response.status !== 402) {
-          throw pRes.reason;
+          // Only escalate to the error step for genuine 4xx client failures
+          // (e.g. 401 unauth). Server-side hiccups (5xx, Cloudflare 502/520/
+          // 522, transient 404 from a mid-deploy backend) or network drops
+          // fall through so the user can still enter the intro / capture
+          // flow with a soft inline banner. Prevents a Cloudflare error
+          // page from filling the sheet.
+          const s = pRes.reason.response.status;
+          const isTransient = !s || s >= 500 || s === 404;
+          if (!isTransient) throw pRes.reason;
+          // Show a subtle inline notice but keep the sheet usable.
+          setError(formatApiError(pRes.reason));
         }
         setExisting(profileData.profile || null);
         setEigenmode(profileData.eigenmode || null);

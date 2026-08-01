@@ -61,6 +61,27 @@ export function formatApiError(err) {
       return "We couldn't reach the server. Check your connection and try again.";
     }
   }
+  // Status-code-driven fallbacks for edge/CDN failures where the response
+  // body is either an HTML error page (Cloudflare 502/520 etc.) or a stub
+  // FastAPI missing-route body. Without this, `err.message` (e.g. "Request
+  // failed with status code 502") or a raw HTML string can leak into the UI.
+  const status = err?.response?.status;
+  const rawData = err?.response?.data;
+  const looksLikeHtml = typeof rawData === 'string' &&
+    /^\s*<(!doctype html|html|head|body)/i.test(rawData);
+  if (status && (looksLikeHtml || (status >= 500 && status !== 502 ? false : false))) {
+    // handled below
+  }
+  if (status === 502 || status === 503 || status === 504 || status === 520 || status === 521 || status === 522) {
+    return "The server is having a moment — please try again shortly.";
+  }
+  if (status === 404 && (looksLikeHtml || typeof rawData !== 'object')) {
+    return "That feature isn't available right now. Please refresh and try again.";
+  }
+  if (looksLikeHtml) {
+    // Any other non-JSON HTML body: never leak raw markup.
+    return "Something went wrong on the server. Please try again shortly.";
+  }
   const d = err?.response?.data?.detail;
   if (d == null) return err?.message || 'Something went wrong';
   if (typeof d === 'string') return d;
