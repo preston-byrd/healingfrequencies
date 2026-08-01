@@ -22,25 +22,32 @@ api.interceptors.request.use((config) => {
 });
 
 // One-shot retry for transient network errors (mobile LTE hiccups, cold
-// starts, brief DNS failures). Only retries idempotent requests OR the
-// login/register endpoints — never blindly retries destructive mutations.
+// starts, brief DNS failures) AND for transient edge/CDN errors (502/520/522
+// = origin briefly unreachable, 503/504 = overloaded). Only retries idempotent
+// requests OR the login/register endpoints — never blindly retries
+// destructive mutations.
 const RETRY_SAFE_METHODS = new Set(['get', 'head', 'options']);
 const RETRY_ALLOWLIST_PATHS = ['/auth/login', '/auth/register', '/auth/me'];
+const RETRY_EDGE_STATUSES = new Set([502, 503, 504, 520, 521, 522]);
 
 api.interceptors.response.use(
   (r) => r,
   async (error) => {
     const cfg = error && error.config;
     const isNetwork = error && (error.code === 'ECONNABORTED' || error.message === 'Network Error');
-    if (cfg && isNetwork && !cfg.__retried) {
+    const status = error?.response?.status;
+    const isTransientEdge = status && RETRY_EDGE_STATUSES.has(status);
+    if (cfg && (isNetwork || isTransientEdge) && !cfg.__retried) {
       const method = (cfg.method || 'get').toLowerCase();
       const path = (cfg.url || '').replace(cfg.baseURL || '', '');
       const canRetry = RETRY_SAFE_METHODS.has(method) ||
         RETRY_ALLOWLIST_PATHS.some((p) => path.startsWith(p));
       if (canRetry) {
         cfg.__retried = true;
-        // Short backoff so we don't hammer a struggling backend.
-        await new Promise((r) => setTimeout(r, 800));
+        // Slightly longer backoff for edge errors so a cold origin has
+        // time to spin up before the second attempt.
+        const delay = isTransientEdge ? 1400 : 800;
+        await new Promise((r) => setTimeout(r, delay));
         return api.request(cfg);
       }
     }
