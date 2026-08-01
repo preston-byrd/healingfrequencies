@@ -2756,6 +2756,30 @@ _MILESTONES = {
 }
 
 
+async def _recent_milestone_for_agent(user_id: str) -> Optional[dict]:
+    """Return the most recent milestone earned by the user within the past
+    3 days (celebrated or not), or None. Used by the Wellness Assistant to
+    weave a warm reference into its greeting when the moment fits.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    doc = await db.hb_milestones.find_one(
+        {"user_id": user_id, "achieved_at": {"$gte": cutoff}},
+        {"_id": 0, "key": 1, "achieved_at": 1},
+        sort=[("achieved_at", -1)],
+    )
+    if not doc:
+        return None
+    cat = _MILESTONES.get(doc["key"], {})
+    if not cat:
+        return None
+    return {
+        "key": doc["key"],
+        "title": cat.get("title", doc["key"]),
+        "message": cat.get("message", ""),
+        "achieved_at": doc.get("achieved_at") or "",
+    }
+
+
 async def _detect_milestones(user_id: str) -> list[dict]:
     """Return the list of milestone keys the user has EVER earned. Pure
     detection — writes nothing. Callers decide when to persist. Order
@@ -3588,6 +3612,25 @@ async def agent_chat(body: AgentChatIn, request: Request, user: dict = Depends(g
             parts.append(pat_block)
     except Exception as exc:
         logger.warning("[agent_chat] user_patterns block failed: %s", exc)
+
+    # Phase 12f: recent milestone reference. If the user earned a milestone
+    # in the last 3 days (celebrated OR not), invite the assistant to
+    # reference it once, warmly, if the moment fits. Never a canned prompt.
+    try:
+        recent_ms = await _recent_milestone_for_agent(user["id"])
+        if recent_ms:
+            parts.append(
+                f"RECENT_MILESTONE: The user recently reached the milestone "
+                f"\"{recent_ms['title']}\" — {recent_ms['message']} — on "
+                f"{recent_ms['achieved_at'][:10]}. If — and ONLY if — the "
+                f"moment feels right in your reply (e.g. warm greeting or "
+                f"acknowledging progress), weave ONE brief, human sentence "
+                f"referencing it. Vary wording every time. Never bracket or "
+                f"parenthesise. Never repeat it verbatim. If it doesn't "
+                f"fit the emotional register of your reply, OMIT it entirely."
+            )
+    except Exception as exc:
+        logger.warning("[agent_chat] recent milestone block failed: %s", exc)
 
     history = body.history or []
     for turn in history[-10:]:  # cap context window

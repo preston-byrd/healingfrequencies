@@ -461,3 +461,10 @@
 1. Hook "last used config" into localStorage (no backend change needed)
 2. Add A/B switch for 432Hz reference
 3. Daily streak counter (new MongoDB collection)
+
+- **Phase 12f — Assistant milestone reference (Feb 2026, iter 62b)**: The Wellness Assistant now weaves fresh milestones into its greetings.
+  - **New helper** `_recent_milestone_for_agent(user_id)` in `backend/server.py` returns the most recent milestone (≤ 3 days old) from `hb_milestones` for the user, or `None`.
+  - **Agent chat prompt block** — `agent_chat` inserts a `RECENT_MILESTONE:` context line right before conversation history when a fresh milestone exists. Instructs Claude to weave ONE brief, warm sentence referencing it if the emotional register fits; otherwise omit entirely. Never bracket/canned, wording varies every time.
+  - **Verified**: turn 1 with a `streak_30` milestone produced *"Hey MilestoneAgent! Thirty days of showing up for yourself — that's beautiful. How are you feeling right now?"* Turn 2 with user stress ("a bit tense") correctly OMITTED the milestone reference. Different milestone (`first_gap_closed`) produced *"I noticed something's coming back into balance for you — that's beautiful."*
+  - **Files** — `backend/server.py` (helper + one prompt block in `agent_chat`), `backend/tests/test_milestones.py` (added `test_recent_milestone_helper_returns_fresh_earned`).
+
