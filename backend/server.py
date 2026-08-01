@@ -2701,22 +2701,40 @@ async def _compose_monthly_report(user_id: str, month_key: str) -> Optional[dict
 async def _ensure_monthly_report(user_id: str, month_key: str) -> Optional[dict]:
     """Return the stored report for (user, month) or lazily compose+persist
     a new one on first access. Returns None when the user doesn't yet
-    qualify (< 2 sessions that month)."""
-    existing = await db.hb_monthly_reports.find_one(
-        {"user_id": user_id, "month": month_key}, {"_id": 0},
-    )
-    if existing:
-        return existing
+    qualify (< 2 sessions that month).
+
+    For the **still-in-progress** current month we always recompute (and
+    upsert) so mid-month captures aren't shown against a stale snapshot.
+    Completed months are cached forever — those numbers can no longer
+    change.
+    """
+    is_current_month = month_key == _month_key(datetime.now(timezone.utc))
+    if not is_current_month:
+        existing = await db.hb_monthly_reports.find_one(
+            {"user_id": user_id, "month": month_key}, {"_id": 0},
+        )
+        if existing:
+            return existing
     payload = await _compose_monthly_report(user_id, month_key)
     if not payload:
         return None
-    doc = {**payload, "user_id": user_id, "id": uuid.uuid4().hex}
     try:
-        await db.hb_monthly_reports.insert_one(doc)
+        # Upsert so the in-progress month refreshes in place and completed
+        # months persist the first snapshot forever.
+        await db.hb_monthly_reports.update_one(
+            {"user_id": user_id, "month": month_key},
+            {
+                "$set": {**payload, "user_id": user_id},
+                "$setOnInsert": {"id": uuid.uuid4().hex},
+            },
+            upsert=True,
+        )
     except Exception as exc:  # noqa: BLE001 — race with another request
-        logger.warning("[monthly_report] insert failed for %s %s: %s", user_id, month_key, exc)
-    doc.pop("_id", None)
-    return doc
+        logger.warning("[monthly_report] upsert failed for %s %s: %s", user_id, month_key, exc)
+    stored = await db.hb_monthly_reports.find_one(
+        {"user_id": user_id, "month": month_key}, {"_id": 0},
+    )
+    return stored or {**payload, "user_id": user_id}
 
 
 @api.get("/hb/monthly-report")
@@ -5168,9 +5186,13 @@ async def _generate_recommendation_notification(user_id: str) -> Optional[dict]:
         settings = udoc.get("assistant_settings") or {}
         hb_enabled = bool(settings.get("harmonic_influence_enabled", True))
         for p in pats or []:
-            if _pattern_key(p) in dismissed: continue
+            if p.get("key") in dismissed: continue
             cta = p.get("cta") or {}
-            hz = cta.get("arm_frequency")
+            # Pattern CTAs are `{"action": "arm_frequency", "frequency": hz}`
+            # — we only surface as a start-there recommendation when the
+            # user can be armed to a concrete Hz.
+            if cta.get("action") != "arm_frequency": continue
+            hz = cta.get("frequency")
             if not hz: continue
             msg = (p.get("message") or "").strip()
             if not msg: continue
@@ -5181,7 +5203,7 @@ async def _generate_recommendation_notification(user_id: str) -> Optional[dict]:
                 "title": "A gentle suggestion",
                 "body": body[:180],
                 "destination": f"/play?frequency={hz}",
-                "meta": {"source": "pattern", "pattern_key": _pattern_key(p), "arm_frequency": hz},
+                "meta": {"source": "pattern", "pattern_key": p.get("key"), "arm_frequency": hz},
             }
     except Exception as exc:
         logger.warning("[notif][rec] pattern read failed: %s", exc)
