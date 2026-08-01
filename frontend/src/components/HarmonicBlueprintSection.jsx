@@ -3,6 +3,7 @@ import { Sparkles, Anchor, X, Waves, Clock, Trash2, RotateCcw, TrendingUp, Trend
 import api, { formatApiError } from '@/lib/api';
 import BeforeAfterMap from './BeforeAfterMap';
 import MonthlyReportCard from './MonthlyReportCard';
+import MyMilestones from './MyMilestones';
 
 /**
  * Phase 4 — Harmonic Blueprint section for the Account dashboard.
@@ -203,6 +204,9 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
               onOpen={() => setReportOpen(true)}
             />
           )}
+
+          {/* Phase 12e — My Milestones (also self-triggers celebration overlay) */}
+          {isPro && <MyMilestones />}
 
           {/* Recent Eigenmode Journey */}
           {summary.latest_journey && (

@@ -2724,6 +2724,240 @@ async def hb_monthly_report_by_month(
     return {"report": r}
 
 
+# ---------------- Phase 12e: Milestone celebrations ----------------
+
+# Milestone catalogue. Each entry maps to a deterministic detector + a warm
+# celebration message that the frontend renders verbatim.
+_MILESTONES = {
+    "first_eigenmode": {
+        "title": "Your Harmonic Blueprint is set",
+        "message": "This is the beginning of your resonance journey.",
+    },
+    "first_gap_closed": {
+        "title": "A frequency range has returned to alignment",
+        "message": "A frequency range that was drifting has returned to alignment. Your practice is working.",
+    },
+    "streak_7": {
+        "title": "Seven days of consistent practice",
+        "message": "Seven days of consistent practice. Your nervous system is noticing.",
+    },
+    "streak_30": {
+        "title": "Thirty days of returning to resonance",
+        "message": "Thirty days of returning to resonance. Your commitment to your sound practice is remarkable.",
+    },
+    "resonance_90": {
+        "title": "Deeply aligned with your natural tuning",
+        "message": "You are deeply aligned with your natural tuning today.",
+    },
+    "full_spectrum_improvement": {
+        "title": "Your entire harmonic spectrum has improved",
+        "message": "Your entire harmonic spectrum shows improvement since your first baseline. A profound achievement.",
+    },
+}
+
+
+async def _detect_milestones(user_id: str) -> list[dict]:
+    """Return the list of milestone keys the user has EVER earned. Pure
+    detection — writes nothing. Callers decide when to persist. Order
+    matches the sequence users would typically experience so newly-awarded
+    milestones surface in a natural order.
+    """
+    earned: list[dict] = []
+
+    # 1. First eigenmode
+    eigen = await db.resonance_profiles.find_one(
+        {"user_id": user_id, "is_eigenmode": True}, {"_id": 0, "id": 1, "created_at": 1},
+    )
+    if eigen:
+        earned.append({"key": "first_eigenmode", "achieved_at": eigen.get("created_at"),
+                       "meta": {"profile_id": eigen.get("id")}})
+
+    # 2. Resonance ≥ 90 on any capture
+    hi = await db.resonance_profiles.find_one(
+        {"user_id": user_id, "resonance_score": {"$gte": 90}},
+        {"_id": 0, "id": 1, "created_at": 1, "resonance_score": 1},
+        sort=[("created_at", 1)],
+    )
+    if hi:
+        earned.append({"key": "resonance_90", "achieved_at": hi.get("created_at"),
+                       "meta": {"profile_id": hi.get("id"),
+                                "score": int(hi.get("resonance_score", 90))}})
+
+    # 3. First gap closed — any historically-confirmed gap whose severity in a
+    # LATER capture is below the 2 dB alignment threshold. We walk profiles
+    # chronologically and look for the first later profile where the gap
+    # became aligned.
+    if eigen:
+        ebands = _band_map(eigen.get("bands", []))  # need eigenmode bands for delta math
+        # Refetch eigen with bands (previous find had a projection)
+        eigen_full = await db.resonance_profiles.find_one(
+            {"id": eigen["id"]}, {"_id": 0, "bands": 1},
+        )
+        ebands = _band_map((eigen_full or {}).get("bands", []))
+        profiles = await db.resonance_profiles.find(
+            {"user_id": user_id, "is_eigenmode": {"$ne": True}},
+            {"_id": 0},
+        ).sort("created_at", 1).to_list(200)
+        # Union of every gap the user has ever confirmed
+        ever_confirmed_keys: set[str] = set()
+        first_seen_at: dict[str, str] = {}
+        for p in profiles:
+            for g in (p.get("confirmed_gaps") or []):
+                k = g.get("key")
+                if not k:
+                    continue
+                ever_confirmed_keys.add(k)
+                first_seen_at.setdefault(k, p.get("created_at") or "")
+        for k in ever_confirmed_keys:
+            for p in profiles:
+                if (p.get("created_at") or "") < first_seen_at.get(k, ""):
+                    continue
+                cur = _band_map(p.get("bands", []))
+                if k not in cur or k not in ebands:
+                    continue
+                try:
+                    delta = abs(float(cur[k].get("db", -60))
+                                - float(ebands[k].get("db", -60)))
+                except (TypeError, ValueError):
+                    continue
+                if delta < 2.0:
+                    earned.append({"key": "first_gap_closed",
+                                   "achieved_at": p.get("created_at"),
+                                   "meta": {"band": k, "profile_id": p.get("id")}})
+                    break
+            if any(e["key"] == "first_gap_closed" for e in earned):
+                break
+
+    # 4/5. Streak milestones — reads current + longest so a user who
+    # already crossed the threshold once earns permanently.
+    streak = await db.streaks.find_one({"user_id": user_id}, {"_id": 0}) or {}
+    peak = max(int(streak.get("longest", 0)), int(streak.get("current", 0)))
+    if peak >= 7:
+        earned.append({"key": "streak_7",
+                       "achieved_at": streak.get("last_checkin_date") or streak.get("updated_at"),
+                       "meta": {"days": peak}})
+    if peak >= 30:
+        earned.append({"key": "streak_30",
+                       "achieved_at": streak.get("last_checkin_date") or streak.get("updated_at"),
+                       "meta": {"days": peak}})
+
+    # 6. Full spectrum improvement — every tracked band's |delta| in the
+    # LATEST capture is smaller than its |delta| in the FIRST non-baseline
+    # capture. Requires ≥ 2 non-baseline captures to reason about
+    # "improvement since first baseline".
+    if eigen:
+        eigen_full = await db.resonance_profiles.find_one(
+            {"id": eigen["id"]}, {"_id": 0, "bands": 1},
+        )
+        ebands = _band_map((eigen_full or {}).get("bands", []))
+        non_baseline = await db.resonance_profiles.find(
+            {"user_id": user_id, "is_eigenmode": {"$ne": True}},
+            {"_id": 0, "id": 1, "bands": 1, "created_at": 1},
+        ).sort("created_at", 1).to_list(200)
+        if len(non_baseline) >= 2 and ebands:
+            first_p, last_p = non_baseline[0], non_baseline[-1]
+            fbands = _band_map(first_p.get("bands", []))
+            lbands = _band_map(last_p.get("bands", []))
+            def _sev(bmap: dict, key: str) -> Optional[float]:
+                if key not in bmap or key not in ebands:
+                    return None
+                try:
+                    return abs(float(bmap[key].get("db", -60))
+                               - float(ebands[key].get("db", -60)))
+                except (TypeError, ValueError):
+                    return None
+            all_improved = True
+            checked = 0
+            for key in _BAND_ORDER:
+                fs = _sev(fbands, key)
+                ls = _sev(lbands, key)
+                if fs is None or ls is None:
+                    continue
+                checked += 1
+                # Every band must be strictly better OR already aligned
+                # (severity < 2 dB is effectively perfect).
+                if ls >= fs and ls >= 2.0:
+                    all_improved = False
+                    break
+            if checked >= 4 and all_improved:
+                earned.append({"key": "full_spectrum_improvement",
+                               "achieved_at": last_p.get("created_at"),
+                               "meta": {"profile_id": last_p.get("id"),
+                                        "bands_checked": checked}})
+
+    return earned
+
+
+@api.get("/hb/milestones")
+async def hb_milestones_list(user: dict = Depends(get_current_user)):
+    """Return the user's milestone timeline. Runs detection, persists any
+    newly-earned milestones (idempotent — a `(user_id, key)` uniqueness
+    guard prevents duplicates), and reports which ones haven't been
+    celebrated yet so the frontend can surface the overlay.
+    """
+    detected = await _detect_milestones(user["id"])
+    stored = await db.hb_milestones.find(
+        {"user_id": user["id"]}, {"_id": 0},
+    ).sort("achieved_at", 1).to_list(50)
+    stored_by_key = {m["key"]: m for m in stored}
+
+    new_docs: list[dict] = []
+    for d in detected:
+        if d["key"] in stored_by_key:
+            continue
+        doc = {
+            "id": uuid.uuid4().hex,
+            "user_id": user["id"],
+            "key": d["key"],
+            "achieved_at": d.get("achieved_at") or datetime.now(timezone.utc).isoformat(),
+            "celebrated_at": None,
+            "meta": d.get("meta") or {},
+        }
+        try:
+            await db.hb_milestones.insert_one(doc)
+            doc.pop("_id", None)
+            new_docs.append(doc)
+        except Exception as exc:  # duplicate-key race
+            logger.warning("[milestones] insert failed for %s %s: %s",
+                          user["id"], d["key"], exc)
+
+    all_docs = list(stored_by_key.values()) + new_docs
+    all_docs.sort(key=lambda m: m.get("achieved_at") or "")
+
+    for m in all_docs:
+        cat = _MILESTONES.get(m["key"], {})
+        m["title"] = cat.get("title", m["key"])
+        m["message"] = cat.get("message", "")
+
+    # A milestone is "new" (celebration overlay eligible) when it has never
+    # been celebrated yet. Surface the OLDEST un-celebrated first so the
+    # user experiences milestones in the order they earned them.
+    pending = [m for m in all_docs if not m.get("celebrated_at")]
+    return {
+        "milestones": all_docs,
+        "pending_celebration": pending,
+    }
+
+
+@api.post("/hb/milestones/{key}/celebrate")
+async def hb_milestones_celebrate(
+    key: str,
+    user: dict = Depends(get_current_user),
+):
+    """Mark a milestone as celebrated so it no longer surfaces the overlay
+    on future app opens."""
+    if key not in _MILESTONES:
+        raise HTTPException(status_code=400, detail="Unknown milestone key.")
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.hb_milestones.update_one(
+        {"user_id": user["id"], "key": key},
+        {"$set": {"celebrated_at": now}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Milestone not yet earned.")
+    return {"ok": True, "celebrated_at": now}
+
+
 @api.patch("/harmonic-blueprint/profile/{profile_id}/gaps")
 async def update_profile_gaps(
     profile_id: str,
@@ -6335,6 +6569,9 @@ async def _lifespan_startup():
     await db.notification_events.create_index([("user_id", 1), ("created_at", -1)])
     await db.notification_events.create_index([("event", 1), ("category", 1)])
     await db.push_subscriptions.create_index([("user_id", 1), ("endpoint", 1)], unique=True)
+    # Phase 12e — one milestone doc per (user, key)
+    await db.hb_milestones.create_index([("user_id", 1), ("key", 1)], unique=True)
+    await db.hb_monthly_reports.create_index([("user_id", 1), ("month", 1)], unique=True)
     await db.feature_announcements.create_index([("active", 1), ("published_at", -1)])
     # Seed default feature announcements the first time the app boots (idempotent).
     seed_anns = [

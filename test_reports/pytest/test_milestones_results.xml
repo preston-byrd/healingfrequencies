@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="9" time="4.265" timestamp="2026-08-01T05:26:56.236573+00:00" hostname="agent-env-ecc48b74-f010-4ac4-ad40-4999b9ebdf0d"><testcase classname="tests.test_milestones" name="test_milestones_requires_auth" time="0.004" /><testcase classname="tests.test_milestones" name="test_milestones_empty_for_new_user" time="0.600" /><testcase classname="tests.test_milestones" name="test_first_eigenmode_and_resonance_90_awarded" time="0.495" /><testcase classname="tests.test_milestones" name="test_streak_milestones" time="0.497" /><testcase classname="tests.test_milestones" name="test_first_gap_closed" time="0.501" /><testcase classname="tests.test_milestones" name="test_full_spectrum_improvement" time="0.262"><failure message="requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login">tests/test_milestones.py:171: in test_full_spectrum_improvement
+    tok = _login(email, pw)
+          ^^^^^^^^^^^^^^^^^
+tests/test_milestones.py:61: in _login
+    r.raise_for_status()
+/root/.venv/lib/python3.11/site-packages/requests/models.py:1167: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login</failure></testcase><testcase classname="tests.test_milestones" name="test_milestone_persistence_is_idempotent" time="0.258"><failure message="requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login">tests/test_milestones.py:186: in test_milestone_persistence_is_idempotent
+    tok = _login(email, pw)
+          ^^^^^^^^^^^^^^^^^
+tests/test_milestones.py:61: in _login
+    r.raise_for_status()
+/root/.venv/lib/python3.11/site-packages/requests/models.py:1167: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login</failure></testcase><testcase classname="tests.test_milestones" name="test_celebrate_endpoint_marks_and_removes_from_pending" time="0.252"><failure message="requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login">tests/test_milestones.py:204: in test_celebrate_endpoint_marks_and_removes_from_pending
+    tok = _login(email, pw)
+          ^^^^^^^^^^^^^^^^^
+tests/test_milestones.py:61: in _login
+    r.raise_for_status()
+/root/.venv/lib/python3.11/site-packages/requests/models.py:1167: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login</failure></testcase><testcase classname="tests.test_milestones" name="test_celebrate_endpoint_error_paths" time="0.250"><failure message="requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login">tests/test_milestones.py:221: in test_celebrate_endpoint_error_paths
+    tok = _login(email, pw)
+          ^^^^^^^^^^^^^^^^^
+tests/test_milestones.py:61: in _login
+    r.raise_for_status()
+/root/.venv/lib/python3.11/site-packages/requests/models.py:1167: in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+E   requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: http://localhost:8001/api/auth/login</failure></testcase></testsuite></testsuites>

@@ -25,6 +25,7 @@ import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
 import NotificationBell from '@/components/NotificationBell';
 import SessionImpactPrompt from '@/components/SessionImpactPrompt';
+import MyMilestones from '@/components/MyMilestones';
 import NotificationPreferencesModal from '@/components/NotificationPreferencesModal';
 import PushOptInSlip, { requestPushOptInIfWarm } from '@/components/PushOptInSlip';
 import ListeningGuide, { HeadphoneReminder, useHeadphoneReminder } from '@/components/ListeningGuide';
@@ -2402,6 +2403,11 @@ export default function Dashboard({ onOpenAccount }) {
           the user has HB-recommended sessions from ≥24h ago without a
           rating. Self-fetches, self-dismisses, silent when nothing pending. */}
       <SessionImpactPrompt isPro={isPro} />
+
+      {/* Phase 12e — Milestone celebrations. `showInlineCard={false}` so we
+          only mount the overlay here; the inline "My Milestones" card lives
+          exclusively in the Harmonic Blueprint profile section. */}
+      {isPro && <MyMilestones showInlineCard={false} />}
 
       {/* Voice Shortcuts — Siri / Google Assistant setup instructions plus
           copyable deep-link URLs (/play?preset=…) for hands-free playback. */}

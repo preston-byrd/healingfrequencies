@@ -1,0 +1,43 @@
+{
+  "summary": "Phase 12e Milestone Celebrations — backend + frontend E2E verified. All 9 pytest cases in /app/backend/tests/test_milestones.py pass (run sequentially with delay to avoid /auth/login rate-limit cascade). Seeded UI Pro user (mileui@example.com / Mile9!Mile9!) surfaces all 6 milestone keys via GET /api/hb/milestones with exact-spec titles + messages. Frontend celebration overlay auto-mounts on Dashboard, cycles all 6 milestones on Continue click, unmounts after last, and does not re-appear after reload. My Milestones card renders on Account with all 6 rows, correct check icons, formatted dates. Copy in every card matches spec verbatim.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/login", "issue": "Existing 8-req/IP/5min rate limit makes the milestones pytest suite (9 logins) fail with 429s when run in parallel (pytest-xdist default). Ran sequentially with 45s delay per test — all pass. Recommend adding a small login helper cache or bumping the rate limit in test envs to make CI reliable."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "My Milestones (Account/HB section)", "issues": ["Rows are ordered by achieved_at ISO ascending as spec requires, but when several milestones fall on the SAME calendar date (e.g. streak_7 and streak_30 both awarded today) streak_30 is displayed before streak_7 because it happens to be inserted first. Semantically minor / cosmetic — a secondary sort by milestone 'rank' or key would read more naturally."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_milestones.py",
+    "/app/backend/tests/seed_milestones_ui_user.py",
+    "/app/test_reports/pytest/test_milestones_results.xml",
+    "/app/test_reports/pytest/mile_run.log",
+    "/app/test_reports/my_milestones_card.png",
+    "/app/test_reports/mc_overlay.png"
+  ],
+  "action_items": [
+    "(Optional) Sort inline My Milestones card by (achieved_at, milestone rank) so streak_7 precedes streak_30 when they share a date.",
+    "(Optional) Consider whitelisting or raising the /auth/login rate limit in dev/test — the milestones suite triggers 429s under parallel execution."
+  ],
+  "critical_code_review_comments": [
+    "Backend endpoint pair implements idempotent unique index (user_id, key) — good.",
+    "MilestoneCelebration overlay uses z-index 85 which sits above ai-agent-sheet as designed; Continue button is directly clickable through the sheet.",
+    "MyMilestones component silently swallows API errors on load and celebrate — acceptable for this UX but a subtle debug log would help field diagnosis."
+  ],
+  "updated_files": [
+    "/app/backend/tests/seed_milestones_ui_user.py (new — seeder for UI test Pro user with all 6 milestones staged)"
+  ],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100%"},
+  "test_credentials": "UI test user seeded: mileui@example.com / Mile9!Mile9! (Pro, 30d pro_until, 1 eigenmode + 2 non-baseline profiles staged for first_gap_closed + full_spectrum_improvement, streaks doc current=30/longest=30). Cleanup: seed script deletes prior version before re-inserting.",
+  "seed_data_creation": "Added /app/backend/tests/seed_milestones_ui_user.py — reusable seeder mirroring the test_milestones.py pattern; creates user + profiles + streaks so all 6 milestones fire on next GET.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Milestones feature is fully functional. If revisiting, avoid running test_milestones.py in parallel (xdist) — the 9 fresh logins burst past /auth/login rate limit; run with `-o addopts=''` (kills xdist) and a small delay per test, or run one test at a time. UI test navigation to Account: click [data-testid=account-button] then [data-testid=account-menu-account] — do NOT use hash routing (# routes don't switch views). Wellness Assistant sheet still auto-opens on Dashboard; close via [data-testid=ai-agent-sheet] svg.lucide-x before other interactions.",
+  "rca of the issue": "N/A — no bugs found."
+}
