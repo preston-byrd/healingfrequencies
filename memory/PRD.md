@@ -415,6 +415,17 @@
 
 
 ## Backlog (P1 → P2)
+
+- **Phase 12b — Before/After Frequency Map (Feb 2026, iter 60)**: Side-by-side visual comparison of the user's first eigenmode baseline vs latest reading, plus a gentle progress celebration every 5th capture.
+  - **New endpoint** `GET /api/harmonic-blueprint/before-after` (Pro-gated) returns baseline, latest, per-band `band_deltas` (with alignment classification `aligned` / `near` / `drift` + `improved` flag), a plain-language `summary_text` beneath the visualisation, `session_count`, and a `show_celebration` boolean that flips true every 5th non-baseline session.
+  - **New shared component** `BeforeAfterMap.jsx` (default `BeforeAfterMap`, named `BeforeAfterCelebration`) — two side-by-side frequency panels labelled 'Your first baseline · {date}' and 'Your latest reading · {date}'. Baseline uses neutral gold bars. Latest uses TEAL (#72C2AC) for aligned bands, GOLD (#C4A67A) for near bands, and AMBER (#D9A45C) for drift bands. Delta pill (`Δ -5.0 dB`) shown for non-aligned latest bands.
+  - **Two mount points**:
+    - `HarmonicBlueprintSection.jsx` — surfaces the map inside Account → Harmonic Blueprint for anytime review.
+    - `HarmonicBlueprintSheet.jsx` `confirmFindings()` — after saving a profile, fetches `/before-after` and mounts `<BeforeAfterCelebration />` (dismissible overlay with a "Continue your journey" CTA) when `show_celebration===true`.
+  - **Summary phrasing** matches spec: "Your {band-labels} frequencies have strengthened significantly since you began. Your {band-labels} range continues to show some drift and remains a focus area." Falls back to "holding steady" when everything is aligned.
+  - **Tests** — `backend/tests/test_before_after.py` (6 cases: auth gate, free-user gate, empty state, eigenmode-only, full shape + classification, celebration flag). All passing individually.
+  - **Files** — `backend/server.py` (new endpoint + `_band_alignment` + `_describe_before_after`), `frontend/src/components/BeforeAfterMap.jsx` (new), `frontend/src/components/HarmonicBlueprintSection.jsx` (import + mount), `frontend/src/components/HarmonicBlueprintSheet.jsx` (celebrationData state, post-save fetch, overlay render), `backend/tests/test_before_after.py` (new, 6 cases).
+
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
 - P2: Optional sleep timer (fade-out over N min)
