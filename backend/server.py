@@ -123,15 +123,57 @@ def _metric_summary(name: str) -> dict:
 
 
 def _client_ip(request: Request) -> str:
-    # Trust the first IP from X-Forwarded-For (set by the Emergent ingress);
-    # fall back to direct client. Truncate to keep audit rows compact.
-    xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    if xff:
-        return xff[:64]
+    """Best-effort client IP derivation with XFF spoofing mitigation.
+
+    SECURITY: Naively trusting the FIRST value in `X-Forwarded-For` lets an
+    attacker put an arbitrary value there and get a fresh rate-limit bucket
+    (bypassing per-IP login/register throttles) plus pollute audit logs.
+
+    Mitigation: only trust XFF at all when the direct peer (`request.client`)
+    is our known proxy hop. The Emergent ingress terminates client
+    connections and adds its own XFF header, so from the app's POV the
+    direct peer is a private-range IP. When that's true, we take the
+    RIGHT-MOST public IP in the chain — that's the one added by the
+    outermost trusted proxy and cannot be spoofed by clients further out
+    (they can only append; they can't rewrite what the proxy prepends).
+
+    When the direct peer is a public IP (e.g. running the pod locally
+    without a proxy), we ignore XFF entirely and use `request.client.host`.
+    """
+    peer = ""
     try:
-        return (request.client.host or "unknown")[:64]
+        peer = (request.client.host or "")
     except Exception:
-        return "unknown"
+        peer = ""
+    trust_xff = _is_private_peer(peer)
+    if trust_xff:
+        xff = request.headers.get("x-forwarded-for") or ""
+        # Walk right-to-left, skip the private-range hops that our own
+        # proxies added, and return the last PUBLIC address before them.
+        candidates = [c.strip() for c in xff.split(",") if c.strip()]
+        for ip in reversed(candidates):
+            if not _is_private_peer(ip):
+                return ip[:64]
+        # All entries were private — fall through to peer.
+    return (peer or "unknown")[:64]
+
+
+def _is_private_peer(ip: str) -> bool:
+    """True when `ip` is empty, loopback, RFC1918 private, link-local, or
+    a Kubernetes cluster CIDR (fc00::/7, ::1). Used to decide whether the
+    direct peer is our trusted proxy or a public client."""
+    if not ip:
+        return True
+    try:
+        import ipaddress
+        obj = ipaddress.ip_address(ip)
+        return (obj.is_private or obj.is_loopback
+                or obj.is_link_local or obj.is_reserved
+                or obj.is_multicast or obj.is_unspecified)
+    except ValueError:
+        # Non-parseable string (e.g. "unknown") — treat as private so we
+        # don't accidentally trust it as a public client.
+        return True
 
 
 async def _audit(
@@ -6586,6 +6628,49 @@ if _use_wildcard:
 else:
     _cors_kwargs["allow_origins"] = origins
 app.add_middleware(CORSMiddleware, **_cors_kwargs)
+
+
+# --- Security headers -------------------------------------------------------
+# Adds defense-in-depth HTTP headers to every response. Kept intentionally
+# strict but compatible with the SPA's needs:
+#
+#   • X-Content-Type-Options: nosniff — blocks MIME-sniffing based attacks
+#   • X-Frame-Options: DENY           — mitigates clickjacking on API responses
+#   • Referrer-Policy: strict-origin-when-cross-origin — hides paths from
+#                                                        cross-origin referrers
+#   • Strict-Transport-Security: HSTS with a 6-month max-age. Only sent
+#                                when the request came in over TLS so local
+#                                dev over http://localhost isn't affected.
+#   • Permissions-Policy: minimises what iframed pages could request from
+#                          the browser. Microphone is intentionally allowed
+#                          because the Harmonic Blueprint records audio.
+#   • Content-Security-Policy: an API-side CSP is a light backstop — the
+#                              real CSP for the SPA is applied by the
+#                              frontend host (nginx / Cloudflare). We
+#                              publish `frame-ancestors 'none'` here as a
+#                              second clickjacking guard.
+@app.middleware("http")
+async def _security_headers_middleware(request: Request, call_next):
+    resp: Response = await call_next(request)
+    h = resp.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), camera=(), microphone=(self), "
+        "payment=(self), usb=(), interest-cohort=()",
+    )
+    h.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    # HSTS only when the request itself arrived over TLS. The Emergent
+    # ingress sets X-Forwarded-Proto=https for external traffic.
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).lower()
+    if proto == "https":
+        h.setdefault(
+            "Strict-Transport-Security",
+            "max-age=15552000; includeSubDomains",
+        )
+    return resp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
