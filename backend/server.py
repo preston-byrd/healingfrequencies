@@ -4416,13 +4416,91 @@ def _pattern_priority(p: dict) -> int:
     return order.get(p.get("kind", ""), 0)
 
 
+# Number of *new* wellness_journey sessions that must accumulate after a
+# pattern is dismissed before it becomes eligible to naturally re-surface
+# (only if the underlying behaviour is still present in detection).
+PATTERN_REDISMISS_SESSION_WINDOW = 7
+
+
+async def _wellness_session_count(user_id: str) -> int:
+    """Return the count of wellness_journey rows for this user. This is
+    the "session count" that drives the 7-session re-evaluation window
+    for dismissed patterns. Errors are swallowed and return 0 so the
+    dismissal logic degrades gracefully rather than crashing the whole
+    /me/patterns read."""
+    try:
+        return int(await db.wellness_journey.count_documents({"user_id": user_id}))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[patterns] session_count failed for %s: %s", user_id, exc)
+        return 0
+
+
+async def _effective_dismissed_pattern_keys(
+    user_id: str, session_count: Optional[int] = None,
+) -> set:
+    """Return the set of pattern keys that are *currently* considered
+    dismissed for this user, after applying the 7-session auto
+    re-evaluation window.
+
+    Reads both the modern `dismissed_patterns_v2` map ({key: session_count})
+    and the legacy `dismissed_patterns` list. Any legacy list entries
+    are migrated into `dismissed_patterns_v2` (stamped with the current
+    session count) on first read so they get exactly one grace window
+    and then follow the normal 7-session re-evaluation like everything
+    else.
+
+    A key is auto-un-dismissed once `current_sessions - dismissed_at >= 7`.
+    """
+    if session_count is None:
+        session_count = await _wellness_session_count(user_id)
+    try:
+        doc = await db.users.find_one(
+            {"id": user_id},
+            {"dismissed_patterns": 1, "dismissed_patterns_v2": 1},
+        ) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[patterns] effective_dismissed lookup failed for %s: %s", user_id, exc)
+        return set()
+
+    v2 = doc.get("dismissed_patterns_v2") or {}
+    legacy = doc.get("dismissed_patterns") or []
+
+    # Migrate any legacy list entries into v2 with the current session
+    # count so they enter the normal 7-session window. Best-effort; a
+    # failure here does not block the read.
+    if legacy:
+        try:
+            v2_updates: dict = {}
+            for k in legacy:
+                if isinstance(v2, dict) and k in v2:
+                    continue
+                v2_updates[f"dismissed_patterns_v2.{k}"] = session_count
+                if isinstance(v2, dict):
+                    v2[k] = session_count
+            update_doc: dict = {"$unset": {"dismissed_patterns": ""}}
+            if v2_updates:
+                update_doc["$set"] = v2_updates
+            await db.users.update_one({"id": user_id}, update_doc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[patterns] legacy migration failed for %s: %s", user_id, exc)
+
+    still_dismissed: set = set()
+    for k, at in (v2.items() if isinstance(v2, dict) else []):
+        try:
+            at_i = int(at)
+        except (TypeError, ValueError):
+            at_i = 0
+        if session_count - at_i < PATTERN_REDISMISS_SESSION_WINDOW:
+            still_dismissed.add(k)
+    return still_dismissed
+
+
 async def _user_patterns_prompt_block(user_id: str) -> str:
     """Assemble a compact `USER_PATTERNS` block for the agent_chat LLM
     prompt. Only non-dismissed, top-3-by-priority patterns are included so
     we don't drown the model in signals it already gets from journey rows."""
     try:
-        user = await db.users.find_one({"id": user_id}, {"dismissed_patterns": 1})
-        dismissed = set((user or {}).get("dismissed_patterns") or [])
+        dismissed = await _effective_dismissed_pattern_keys(user_id)
         patterns = await _cached_detect_wellness_patterns(user_id)
     except Exception as exc:
         logger.warning("[patterns] prompt build failed: %s", exc)
@@ -4506,35 +4584,83 @@ async def _invalidate_patterns_cache(user_id: str) -> None:
 
 @api.get("/me/patterns")
 async def patterns_list(user: dict = Depends(get_current_user)):
-    """Return the user's currently-detected patterns, plus their dismissal
-    list. The client sorts / picks which chip to show. Uses the 15-min
-    patterns_cache to keep the greeting chip snappy on mobile."""
+    """Return the user's currently-detected patterns, plus their effective
+    dismissal list (after applying the 7-session auto re-evaluation
+    window). The client sorts / picks which chip to show. Uses the 15-min
+    patterns_cache to keep the greeting chip snappy on mobile.
+
+    Dismissed patterns naturally re-surface once
+    `current_sessions - dismissed_at_session_count >= 7` — no manual
+    reset required. If the underlying behaviour is no longer present in
+    detection, the key stays hidden regardless.
+    """
+    session_count = await _wellness_session_count(user["id"])
     patterns = await _cached_detect_wellness_patterns(user["id"])
-    doc = await db.users.find_one({"id": user["id"]}, {"dismissed_patterns": 1})
-    dismissed = list((doc or {}).get("dismissed_patterns") or [])
-    return {"patterns": patterns, "dismissed": dismissed}
+    dismissed_set = await _effective_dismissed_pattern_keys(user["id"], session_count)
+
+    # Opportunistically prune expired v2 entries so the doc doesn't grow
+    # unbounded. Legacy list entries are already drained during the
+    # `_effective_dismissed_pattern_keys` call above. Best-effort; a
+    # failure here does not break the read.
+    try:
+        doc = await db.users.find_one(
+            {"id": user["id"]}, {"dismissed_patterns_v2": 1},
+        ) or {}
+        v2 = doc.get("dismissed_patterns_v2") or {}
+        stale_v2 = [
+            k for k, at in (v2.items() if isinstance(v2, dict) else [])
+            if (session_count - (int(at) if str(at).lstrip("-").isdigit() else 0))
+            >= PATTERN_REDISMISS_SESSION_WINDOW
+        ]
+        if stale_v2:
+            await db.users.update_one(
+                {"id": user["id"]},
+                {"$unset": {f"dismissed_patterns_v2.{k}": "" for k in stale_v2}},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[patterns] prune failed for %s: %s", user["id"], exc)
+
+    return {
+        "patterns": patterns,
+        "dismissed": list(dismissed_set),
+        "session_count": session_count,
+        "redismiss_window_sessions": PATTERN_REDISMISS_SESSION_WINDOW,
+    }
 
 
 @api.post("/me/patterns/{pattern_key:path}/dismiss")
 async def pattern_dismiss(pattern_key: str, user: dict = Depends(get_current_user)):
-    """Mark a pattern key as dismissed for this user. Idempotent — repeats
-    are a no-op. `path` converter is used because keys contain ':' and '@'.
+    """Mark a pattern key as dismissed for this user, stamped with the
+    user's current wellness_journey session count so the pattern can be
+    auto re-evaluated after `PATTERN_REDISMISS_SESSION_WINDOW` new
+    sessions. Idempotent — repeats update the stamp to "now" so a fresh
+    dismissal restarts the countdown. `path` converter is used because
+    keys contain ':' and '@'.
     """
     if not pattern_key or len(pattern_key) > 120:
         raise HTTPException(status_code=400, detail="Invalid pattern key")
+    session_count = await _wellness_session_count(user["id"])
     await db.users.update_one(
         {"id": user["id"]},
-        {"$addToSet": {"dismissed_patterns": pattern_key}},
+        {
+            "$set": {f"dismissed_patterns_v2.{pattern_key}": session_count},
+            # Drop any legacy list entry for this key so the two stores
+            # don't disagree.
+            "$pull": {"dismissed_patterns": pattern_key},
+        },
     )
-    return {"ok": True, "dismissed": pattern_key}
+    return {"ok": True, "dismissed": pattern_key, "session_count": session_count}
 
 
 @api.post("/me/patterns/clear")
 async def patterns_clear(user: dict = Depends(get_current_user)):
-    """Clear all dismissals so all currently-active patterns can re-surface."""
+    """Manual reset — clears every dismissal (both legacy list and the
+    v2 session-stamped map) so all currently-active patterns re-surface
+    immediately. Exposed as "Reset patterns" in the section's settings
+    menu; the normal path is the automatic 7-session re-evaluation."""
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"dismissed_patterns": []}},
+        {"$set": {"dismissed_patterns": [], "dismissed_patterns_v2": {}}},
     )
     return {"ok": True}
 
@@ -5036,11 +5162,9 @@ async def _generate_recommendation_notification(user_id: str) -> Optional[dict]:
     """
     # 1) Detected pattern with a start-there CTA is the strongest signal.
     try:
-        pats, _ = await _cached_detect_wellness_patterns(user_id)
-        dismissed = set()
-        udoc = await db.users.find_one({"id": user_id}, {"dismissed_patterns": 1, "assistant_settings": 1}) or {}
-        for k in (udoc.get("dismissed_patterns") or []):
-            dismissed.add(k)
+        pats = await _cached_detect_wellness_patterns(user_id)
+        dismissed = await _effective_dismissed_pattern_keys(user_id)
+        udoc = await db.users.find_one({"id": user_id}, {"assistant_settings": 1}) or {}
         settings = udoc.get("assistant_settings") or {}
         hb_enabled = bool(settings.get("harmonic_influence_enabled", True))
         for p in pats or []:

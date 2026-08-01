@@ -1,12 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Waves, Sparkles, Sunrise, Repeat, Clock, EyeOff, Loader2, Trash2 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Waves, Sparkles, Sunrise, Repeat, Clock, EyeOff, Loader2, Settings2, RotateCcw } from 'lucide-react';
 import api from '@/lib/api';
 
 /**
  * MyPatternsSection — surfaces the recurring behaviours the Wellness
  * Assistant has detected across the user's journey. Each pattern can be
- * dismissed individually, and a "Clear all" button restores every previously
- * dismissed pattern (they'll surface again on the greeting chip on next open).
+ * dismissed individually; dismissed patterns automatically re-evaluate
+ * themselves after 7 new sessions and re-surface if the underlying
+ * behaviour is still present. A subtle settings gear tucked in the top
+ * right exposes a manual "Reset patterns" escape hatch for the rare
+ * case a user wants everything back immediately.
  *
  * The section stays quiet for cold-start users (server floors at ≥ 3 rows)
  * — an empty state explains what will show up here as the user builds a
@@ -33,8 +36,10 @@ export default function MyPatternsSection() {
   const [patterns, setPatterns] = useState(null);
   const [dismissed, setDismissed] = useState(new Set());
   const [busyKey, setBusyKey] = useState(null);
-  const [clearing, setClearing] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [err, setErr] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
@@ -49,13 +54,31 @@ export default function MyPatternsSection() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Close the settings popover on outside click / Escape so it feels
+  // like every other quiet menu in the app.
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDocClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
+
   const active = useMemo(() => {
     if (!Array.isArray(patterns)) return [];
     return patterns.filter((p) => !dismissed.has(p.key));
   }, [patterns, dismissed]);
 
-  const hiddenCount = useMemo(
-    () => (Array.isArray(patterns) ? patterns.length - active.length : 0),
+  const hasDismissed = useMemo(
+    () => (Array.isArray(patterns) ? patterns.length - active.length : 0) > 0,
     [patterns, active],
   );
 
@@ -73,13 +96,14 @@ export default function MyPatternsSection() {
     finally { setBusyKey(null); }
   };
 
-  const handleClearAll = async () => {
-    setClearing(true);
+  const handleReset = async () => {
+    setResetting(true);
     try {
       await api.post('/me/patterns/clear');
       setDismissed(new Set());
+      setMenuOpen(false);
     } catch (_) { /* graceful */ }
-    finally { setClearing(false); }
+    finally { setResetting(false); }
   };
 
   return (
@@ -89,18 +113,44 @@ export default function MyPatternsSection() {
           <Sparkles size={14} className="text-[#C4A67A]" />
           <div className="label-tiny text-[#C4A67A]">My Patterns</div>
         </div>
-        {hiddenCount > 0 && (
+        <div className="relative" ref={menuRef}>
           <button
             type="button"
-            onClick={handleClearAll}
-            disabled={clearing}
-            data-testid="my-patterns-clear-all"
-            className="text-[11px] uppercase tracking-[0.14em] text-[#C4A67A]/80 hover:text-[#C4A67A] transition-colors inline-flex items-center gap-1 disabled:opacity-40"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-label="Pattern settings"
+            data-testid="my-patterns-settings-toggle"
+            className="inline-flex items-center justify-center w-7 h-7 rounded-full text-[#8A9A92] hover:text-[#C4A67A] hover:bg-[#C4A67A]/8 transition-colors"
           >
-            {clearing ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
-            Clear all ({hiddenCount})
+            <Settings2 size={13} />
           </button>
-        )}
+          {menuOpen && (
+            <div
+              role="menu"
+              data-testid="my-patterns-settings-menu"
+              className="absolute right-0 top-full mt-2 min-w-[220px] rounded-md border border-[#C4A67A]/25 bg-[#0E1414]/95 backdrop-blur-md shadow-lg z-20 py-1"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleReset}
+                disabled={resetting || !hasDismissed}
+                data-testid="my-patterns-reset"
+                className="w-full text-left px-3 py-2 text-[12.5px] text-[#E8E3D9] hover:bg-[#C4A67A]/10 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-2 transition-colors"
+                title={hasDismissed
+                  ? 'Un-dismiss every pattern so they re-surface now'
+                  : 'Nothing to reset — no patterns are currently dismissed'}
+              >
+                {resetting ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} className="text-[#C4A67A]" />}
+                Reset patterns
+              </button>
+              <div className="px-3 pt-1 pb-2 text-[10.5px] text-[#5A6B65] leading-snug">
+                Dismissed patterns re-evaluate on their own after 7 new sessions.
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {patterns === null && (
@@ -124,8 +174,9 @@ export default function MyPatternsSection() {
 
       {patterns && patterns.length > 0 && active.length === 0 && (
         <div className="py-4 text-[13px] text-[#8A9A92] leading-relaxed" data-testid="my-patterns-all-dismissed">
-          You've dismissed every pattern for now. Clear all above to let
-          them surface again as fresh sessions come in.
+          You've dismissed every pattern for now. Each one will quietly
+          re-evaluate itself after 7 new sessions and surface again if
+          the behaviour is still present.
         </div>
       )}
 
