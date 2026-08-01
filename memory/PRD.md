@@ -426,6 +426,20 @@
   - **Tests** — `backend/tests/test_before_after.py` (6 cases: auth gate, free-user gate, empty state, eigenmode-only, full shape + classification, celebration flag). All passing individually.
   - **Files** — `backend/server.py` (new endpoint + `_band_alignment` + `_describe_before_after`), `frontend/src/components/BeforeAfterMap.jsx` (new), `frontend/src/components/HarmonicBlueprintSection.jsx` (import + mount), `frontend/src/components/HarmonicBlueprintSheet.jsx` (celebrationData state, post-save fetch, overlay render), `backend/tests/test_before_after.py` (new, 6 cases).
 
+- **Phase 12c — Session Impact Rating (Feb 2026, iter 61)**: Post-session follow-up prompt + personal effectiveness map.
+  - **New endpoints**: `GET /api/hb/pending-impact-ratings` (HB-recommended journey entries ≥24h old without ratings), `POST /api/hb/impact-rating` (idempotent persistence of `clear_shift` | `subtle_difference` | `not_sure`), `GET /api/hb/effective-frequencies` (Pro-gated aggregation: weights 3/1/0, min 2 samples, normalised to 0-100, top 5).
+  - **JourneyLogIn** extended with `hb_recommended: bool` + `hb_source: Optional[str]`. `Dashboard.logJourneyEntry` sets `hb_recommended=true` when `agent_initiated && isPro` and `hb_source='assistant_gap'` to bridge the client → server signal.
+  - **New frontend components**: `SessionImpactPrompt.jsx` (dismissible modal auto-mounted in Dashboard; self-fetches; cycles through pending entries) and `EffectiveFrequenciesCard` (inline card in HB Account section listing top freqs with effectiveness %).
+
+- **Phase 12d — Monthly Harmonic Blueprint Report (Feb 2026, iter 61)**: Beautifully designed full-screen monthly summary.
+  - **New collection** `hb_monthly_reports` with lazy generation — endpoint composes + persists on first access whenever the user crosses the 2-session threshold for a given month.
+  - **New endpoints**: `GET /api/hb/monthly-report` (returns latest + list of available months; prefers last completed calendar month) and `GET /api/hb/monthly-report/{YYYY-MM}` (specific month; 400 for bad format, 404 for empty months).
+  - **Report payload**: title (`Your {MonthName} Resonance Journey`), total_sessions, resonance_score_current/previous/delta, most_improved_ranges (top 3 with closure_db>0.5), most_persistent_gaps (top 3 with current_severity≥3), recommended_frequencies (centre Hz of persistent gaps), listening_seconds/minutes over `hb_recommended` journey entries.
+  - **New frontend components**: `MonthlyReportCard.jsx` (full-screen overlay with warm headline, stat tiles, section blocks, gold "Continue your journey" CTA) + `MonthlyReportEntry` inline card in HB Account section that opens the modal on click.
+  - **Tests** — 9 cases in `backend/tests/test_impact_and_report.py` (impact-rating filter + persistence + validation + Pro gate; monthly-report Pro gate + empty state + lazy generation + bad format + 404). All passing.
+  - **Files** — `backend/server.py` (Phase 12c/d endpoints + helpers `_month_key`, `_month_bounds`, `_friendly_month_title`, `_compose_monthly_report`, `_ensure_monthly_report`, `_RATING_WEIGHTS`), `frontend/src/components/SessionImpactPrompt.jsx` (new), `frontend/src/components/MonthlyReportCard.jsx` (new), `frontend/src/components/HarmonicBlueprintSection.jsx` (fetch + `EffectiveFrequenciesCard` + `MonthlyReportEntry` + modal mount), `frontend/src/components/Dashboard.jsx` (SessionImpactPrompt mount + journey-log payload extension), `backend/tests/test_impact_and_report.py` (new, 9 cases).
+
+
 - P1: Persisted "last used config" auto-restore on login
 - P1: A/B switch between equal-temperament and Verdi-A=432 reference
 - P2: Optional sleep timer (fade-out over N min)
