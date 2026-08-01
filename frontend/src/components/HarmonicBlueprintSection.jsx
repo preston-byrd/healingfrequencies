@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Sparkles, Anchor, X, Waves, Clock, Trash2, RotateCcw } from 'lucide-react';
+import { Sparkles, Anchor, X, Waves, Clock, Trash2, RotateCcw, TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 
 /**
@@ -26,6 +26,7 @@ import api, { formatApiError } from '@/lib/api';
 export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet }) {
   const [summary, setSummary] = useState(null);
   const [history, setHistory] = useState([]);
+  const [progress, setProgress] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -34,14 +35,18 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
     setError('');
     setLoading(true);
     try {
-      const [s, h] = await Promise.all([
+      const [s, h, p] = await Promise.all([
         api.get('/harmonic-blueprint/summary'),
         isPro
           ? api.get('/harmonic-blueprint/history').catch(() => ({ data: { history: [] } }))
           : Promise.resolve({ data: { history: [] } }),
+        isPro
+          ? api.get('/harmonic-blueprint/gap-progress').catch(() => ({ data: null }))
+          : Promise.resolve({ data: null }),
       ]);
       setSummary(s.data || null);
       setHistory((h.data && h.data.history) || []);
+      setProgress(p.data || null);
     } catch (e) {
       setError(formatApiError(e));
     } finally {
@@ -153,6 +158,19 @@ export default function HarmonicBlueprintSection({ isPro = false, onOpenSheet })
             busy={busy}
             onRemove={removeGap}
           />
+
+          {/* Gap Closure Progress (Pro only, when we have gaps tracked) */}
+          {isPro && progress && progress.gaps && progress.gaps.length > 0 && (
+            <GapClosureProgressCard gaps={progress.gaps} />
+          )}
+
+          {/* Resonance Progress Timeline (Pro only) */}
+          {isPro && progress && progress.timeline && progress.timeline.length > 0 && (
+            <ResonanceTimelineCard
+              timeline={progress.timeline}
+              summary={progress.summary}
+            />
+          )}
 
           {/* Recent Eigenmode Journey */}
           {summary.latest_journey && (
@@ -362,6 +380,208 @@ function RecentJourneyCard({ journey, onOpen }) {
     </div>
   );
 }
+
+// ---------- Gap Closure Progress + Resonance Timeline (Phase 12) -----------
+// Shows longitudinal movement of each confirmed resonance gap across all HB
+// sessions, alongside the user's overall Resonance Score timeline. Rendered
+// only when the user has at least one non-baseline capture with computed
+// severity data.
+
+const _TREND_META = {
+  improving: {
+    label: 'Improving',
+    color: '#72C2AC',
+    Icon: TrendingDown, // severity going DOWN is good
+  },
+  stable: {
+    label: 'Stable',
+    color: '#C4A67A',
+    Icon: Minus,
+  },
+  attention: {
+    label: 'Needs attention',
+    color: '#D9A45C',
+    Icon: TrendingUp, // severity going UP is worse
+  },
+};
+
+function GapClosureProgressCard({ gaps }) {
+  return (
+    <div
+      className="rounded-xl p-5 border border-[rgba(114,194,172,0.2)]"
+      data-testid="harmonic-blueprint-section-gap-progress"
+    >
+      <div className="flex items-center gap-2 mb-4">
+        <Activity size={13} className="text-[#72C2AC]" />
+        <div className="label-tiny text-[#72C2AC]">Gap closure progress</div>
+      </div>
+      <div className="text-[#8A9A92] text-xs mb-5 leading-relaxed">
+        Each confirmed resonance point tracked across your sessions. Progress
+        bars fill as the gap narrows toward your baseline eigenmode.
+      </div>
+      <ul className="space-y-4">
+        {gaps.map((g) => (
+          <GapProgressRow key={g.key} gap={g} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function GapProgressRow({ gap }) {
+  const meta = _TREND_META[gap.trend] || _TREND_META.stable;
+  const Icon = meta.Icon;
+  // Progress = how much of the original severity has been closed. Clamp to
+  // [0, 100] so bars stay readable even when a gap has widened (attention).
+  const progress = Math.max(0, Math.min(100, gap.closure_pct));
+  const closureText = gap.closure_pct >= 0
+    ? `${gap.closure_pct.toFixed(1)}% closer`
+    : `${Math.abs(gap.closure_pct).toFixed(1)}% wider`;
+
+  return (
+    <li data-testid={`harmonic-blueprint-section-gap-row-${gap.key}`}>
+      <div className="flex items-baseline justify-between gap-2 flex-wrap mb-2">
+        <div className="text-[#E8E3D9] text-sm">
+          {gap.label}
+          <span className="text-[#8A9A92] font-mono ml-2 text-xs">
+            {gap.lo}–{gap.hi} Hz
+          </span>
+        </div>
+        <div
+          className="inline-flex items-center gap-1.5 text-xs"
+          style={{ color: meta.color }}
+          data-testid={`harmonic-blueprint-section-gap-trend-${gap.key}`}
+        >
+          <Icon size={12} />
+          <span>{meta.label}</span>
+        </div>
+      </div>
+      <div className="h-2 bg-[rgba(196,166,122,0.06)] rounded-full overflow-hidden">
+        <div
+          className="h-full transition-all duration-500 rounded-full"
+          style={{
+            width: `${progress}%`,
+            background: `linear-gradient(90deg, ${meta.color} 0%, rgba(114,194,172,0.7) 100%)`,
+          }}
+        />
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-[#8A9A92] font-mono mt-1.5">
+        <span>{gap.first_severity.toFixed(1)} dB at start</span>
+        <span style={{ color: meta.color }}>{closureText}</span>
+        <span>{gap.latest_severity.toFixed(1)} dB now</span>
+      </div>
+    </li>
+  );
+}
+
+function ResonanceTimelineCard({ timeline, summary }) {
+  // SVG timeline of resonance scores across all sessions. Uses the calm
+  // gold/teal palette + gentle curve rendering — encouraging, not clinical.
+  const w = 320, h = 96, padX = 8, padY = 12;
+  const scores = timeline.map((t) => t.score);
+  // Fixed 0–100 vertical range so the chart reads consistently across users.
+  const yMin = 0, yMax = 100;
+  const step = timeline.length > 1 ? (w - padX * 2) / (timeline.length - 1) : 0;
+
+  const toPoint = (score, i) => {
+    const x = padX + i * step;
+    const y = padY + (1 - (score - yMin) / (yMax - yMin)) * (h - padY * 2);
+    return { x, y };
+  };
+
+  const points = timeline.map((t, i) => toPoint(t.score, i));
+  const path = points.map((p, i) =>
+    `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`
+  ).join(' ');
+
+  // Area fill under the line for a calmer, more encouraging feel.
+  const areaPath = points.length >= 2
+    ? `${path} L${points[points.length - 1].x.toFixed(1)},${(h - padY).toFixed(1)} L${points[0].x.toFixed(1)},${(h - padY).toFixed(1)} Z`
+    : '';
+
+  const summaryLine = summary && summary.improvement_pct !== 0
+    ? (summary.improvement_pct > 0
+        ? `Your resonance alignment has improved ${summary.improvement_pct.toFixed(0)}% since your first session.`
+        : `Your resonance alignment has softened ${Math.abs(summary.improvement_pct).toFixed(0)}% since your first session — gentle re-tuning may help.`)
+    : (summary && summary.session_count >= 1
+        ? 'Keep capturing sessions — your resonance timeline will unfold here.'
+        : null);
+
+  return (
+    <div
+      className="rounded-xl p-5 border border-[rgba(196,166,122,0.25)] bg-[rgba(196,166,122,0.02)]"
+      data-testid="harmonic-blueprint-section-timeline"
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles size={13} className="text-[#C4A67A]" />
+        <div className="label-tiny text-[#C4A67A]">Resonance progress timeline</div>
+      </div>
+      {summaryLine && (
+        <div
+          className="text-[#E8E3D9] text-sm mb-4 leading-relaxed"
+          data-testid="harmonic-blueprint-section-timeline-summary"
+        >
+          {summaryLine}
+        </div>
+      )}
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-auto max-w-md" role="img" aria-label="Resonance score over time">
+        {/* subtle horizontal reference lines */}
+        {[25, 50, 75].map((v) => {
+          const y = padY + (1 - v / 100) * (h - padY * 2);
+          return (
+            <line
+              key={v}
+              x1={padX} x2={w - padX}
+              y1={y} y2={y}
+              stroke="rgba(196,166,122,0.08)"
+              strokeDasharray="2 3"
+            />
+          );
+        })}
+        {areaPath && (
+          <path d={areaPath} fill="url(#resonance-area-fill)" opacity="0.35" />
+        )}
+        <defs>
+          <linearGradient id="resonance-area-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#C4A67A" stopOpacity="0.6" />
+            <stop offset="100%" stopColor="#72C2AC" stopOpacity="0.05" />
+          </linearGradient>
+        </defs>
+        {points.length >= 2 && (
+          <path d={path} fill="none" stroke="#C4A67A" strokeWidth="1.5" strokeLinejoin="round" />
+        )}
+        {timeline.map((t, i) => {
+          const p = points[i];
+          const isEigen = !!t.is_eigenmode;
+          return (
+            <g key={t.id}>
+              <circle
+                cx={p.x} cy={p.y}
+                r={isEigen ? 4 : 3}
+                fill={isEigen ? '#C4A67A' : '#72C2AC'}
+                stroke="rgba(8,18,15,0.9)"
+                strokeWidth="1"
+              />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="flex items-center justify-between text-[10px] text-[#8A9A92] font-mono mt-2">
+        <span>baseline</span>
+        <span>score {timeline[timeline.length - 1].score}/100</span>
+      </div>
+      <div className="flex items-center gap-4 text-[10px] text-[#8A9A92] mt-3">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-[#C4A67A]" /> Eigenmode
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-[#72C2AC]" /> Session
+        </span>
+      </div>
+    </div>
+  );
+}
+
 
 function DriftHistoryCard({ history }) {
   // Simple SVG sparkline of drift_score over time. Handles single-entry data

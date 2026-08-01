@@ -2072,6 +2072,160 @@ async def harmonic_blueprint_history(user: dict = Depends(get_current_user)):
     return {"history": entries, "eigenmode_id": eigen.get("id")}
 
 
+@api.get("/harmonic-blueprint/gap-progress")
+async def harmonic_blueprint_gap_progress(user: dict = Depends(get_current_user)):
+    """Track each **confirmed resonance gap** in the user's latest profile across
+    every historical capture. For each gap we compute its severity (|delta_db|
+    from the eigenmode baseline in that gap's band) at every session, then
+    classify the movement as improving / stable / needs attention.
+
+    Also returns the resonance-score timeline alongside the eigenmode baseline
+    so the frontend can render the "Resonance Progress Timeline" chart from
+    the same payload.
+
+    Pro-gated to match the rest of the Harmonic Blueprint surface.
+    """
+    if not _is_pro(user):
+        raise HTTPException(status_code=402, detail="Harmonic Blueprint is a Pro feature.")
+
+    eigen = await _ensure_eigenmode(user["id"])
+    if not eigen:
+        return {
+            "gaps": [],
+            "timeline": [],
+            "eigenmode_id": None,
+            "summary": None,
+        }
+
+    docs = await db.resonance_profiles.find(
+        {"user_id": user["id"]},
+        {"_id": 0, "id": 1, "bands": 1, "created_at": 1, "is_eigenmode": 1,
+         "resonance_score": 1, "confirmed_gaps": 1},
+    ).sort("created_at", 1).to_list(200)
+
+    if not docs:
+        return {
+            "gaps": [],
+            "timeline": [],
+            "eigenmode_id": eigen.get("id"),
+            "summary": None,
+        }
+
+    ebands = _band_map(eigen.get("bands", []))
+
+    # Active confirmed gaps come from the latest profile — those are what the
+    # user has affirmed as personally relevant. Fall back to underrepresented
+    # bands only if there are no confirmed gaps at all.
+    latest_doc = docs[-1]
+    active_gaps = list(latest_doc.get("confirmed_gaps") or [])
+
+    def _severity_at(doc: dict, band_key: str) -> Optional[float]:
+        cur = _band_map(doc.get("bands", []))
+        if band_key not in cur or band_key not in ebands:
+            return None
+        try:
+            delta = float(cur[band_key].get("db", -60)) - float(ebands[band_key].get("db", -60))
+        except (TypeError, ValueError):
+            return None
+        return round(abs(delta), 2)
+
+    gap_rows = []
+    for g in active_gaps[:16]:
+        key = g.get("key")
+        if not key:
+            continue
+        history_points = []
+        for d in docs:
+            sev = _severity_at(d, key)
+            if sev is None:
+                continue
+            history_points.append({
+                "profile_id": d.get("id"),
+                "at": d.get("created_at"),
+                "severity": sev,
+                "is_eigenmode": bool(d.get("is_eigenmode")),
+            })
+        if not history_points:
+            continue
+
+        # First severity is the first NON-eigenmode reading (baseline is 0 by
+        # definition and would inflate "improvement" numbers). Fall back to
+        # the first available point if the user only has an eigenmode.
+        non_baseline = [p for p in history_points if not p["is_eigenmode"]]
+        first_pt = non_baseline[0] if non_baseline else history_points[0]
+        last_pt = history_points[-1]
+
+        first_sev = first_pt["severity"]
+        latest_sev = last_pt["severity"]
+
+        # Closure percentage: positive means gap is getting smaller (closer to
+        # eigenmode). Guard against division by zero.
+        if first_sev > 0.01:
+            closure_pct = round(((first_sev - latest_sev) / first_sev) * 100, 1)
+        else:
+            closure_pct = 0.0
+
+        # Trend classification — hysteresis around ±10% keeps it from
+        # flipping on tiny measurement noise.
+        if closure_pct >= 10:
+            trend = "improving"
+        elif closure_pct <= -10:
+            trend = "attention"
+        else:
+            trend = "stable"
+
+        gap_rows.append({
+            "key": key,
+            "label": g.get("label") or key,
+            "lo": g.get("lo"),
+            "hi": g.get("hi"),
+            "direction": g.get("direction"),
+            "first_severity": first_sev,
+            "latest_severity": latest_sev,
+            "closure_pct": closure_pct,
+            "trend": trend,
+            "sample_count": len(history_points),
+            "history": history_points,
+        })
+
+    # Resonance-score timeline for the "Resonance Progress Timeline" chart.
+    timeline = [
+        {
+            "id": d.get("id"),
+            "score": int(d.get("resonance_score")) if d.get("resonance_score") is not None else None,
+            "at": d.get("created_at"),
+            "is_eigenmode": bool(d.get("is_eigenmode")),
+        }
+        for d in docs if d.get("resonance_score") is not None
+    ]
+
+    # Overall summary — improvement in resonance score since the first
+    # non-baseline session. Falls back gracefully if the user only has an
+    # eigenmode + one follow-up.
+    non_eigen_timeline = [t for t in timeline if not t["is_eigenmode"]]
+    summary = None
+    if len(non_eigen_timeline) >= 1:
+        first_score = non_eigen_timeline[0]["score"]
+        latest_score = non_eigen_timeline[-1]["score"]
+        if first_score and first_score > 0:
+            pct = round(((latest_score - first_score) / first_score) * 100, 1)
+        else:
+            pct = 0.0
+        summary = {
+            "first_score": first_score,
+            "latest_score": latest_score,
+            "improvement_pct": pct,
+            "session_count": len(non_eigen_timeline),
+        }
+
+    return {
+        "gaps": gap_rows,
+        "timeline": timeline,
+        "eigenmode_id": eigen.get("id"),
+        "summary": summary,
+    }
+
+
 class GapEditIn(BaseModel):
     confirmed_gaps: list[dict] = Field(default_factory=list, max_length=16)
 
