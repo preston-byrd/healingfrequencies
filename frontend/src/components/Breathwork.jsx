@@ -42,17 +42,19 @@ export default function Breathwork({ active }) {
 
   return (
     <div
-      className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none pb-64 sm:pb-40"
+      className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none pt-32 pb-64 sm:pt-20 sm:pb-40"
       data-testid="breathwork-overlay"
     >
-      {/* Breathing orb — the phase word sits inside the circle so it never
-          collides with the transport (Play/Pause + timer) that anchors at
-          the bottom of the visualizer. The generous bottom padding above
-          shifts the flex-centering up so on portrait mobile the orb
-          always sits well above the timer + Fading pill rather than
-          overlapping them at short viewport heights. */}
+      {/* Breathing orb — sits in the middle band between the "Now Tuning"
+          frequency label (top ≈120 px tall) and the bottom transport
+          (timer + play + chips ≈240 px tall on mobile). The asymmetric
+          padding (pt-32 pb-64 on mobile) is the whole trick: flex-
+          centering inside that reserved zone lands the 112 px orb
+          exactly halfway between the frequency label's bottom edge and
+          the timer's top edge — no overlap with either. Tablet+ (sm) has
+          more room so the reserve shrinks. */}
       <div
-        className="relative w-40 h-40 sm:w-48 sm:h-48 rounded-full border border-[#72C2AC]/50 flex items-center justify-center"
+        className="relative w-28 h-28 sm:w-40 sm:h-40 md:w-48 md:h-48 rounded-full border border-[#72C2AC]/50 flex items-center justify-center"
         style={{
           transform: `scale(${scale})`,
           transition: 'transform 0.1s linear',
@@ -61,7 +63,7 @@ export default function Breathwork({ active }) {
       >
         <div
           data-testid="breath-phase"
-          className="text-[13px] sm:text-[11px] tracking-[0.24em] uppercase font-semibold text-[#C9DED6] drop-shadow-[0_1px_6px_rgba(0,0,0,0.55)]"
+          className="text-[10px] sm:text-[11px] tracking-[0.24em] uppercase font-semibold text-[#C9DED6] drop-shadow-[0_1px_6px_rgba(0,0,0,0.55)]"
           style={{ transform: `scale(${1 / scale})`, transition: 'transform 0.1s linear' }}
         >
           {PHASES[phaseIdx].name}

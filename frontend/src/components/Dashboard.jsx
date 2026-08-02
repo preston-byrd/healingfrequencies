@@ -1864,7 +1864,15 @@ export default function Dashboard({ onOpenAccount }) {
         </aside>
 
         {/* CENTER — Visualizer + transport */}
-        <main className="flex-1 relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/30 min-h-[480px] lg:min-h-0">
+        <main className="flex-1 relative rounded-3xl overflow-hidden border border-[rgba(92,158,140,0.15)] bg-black/30 min-h-[560px] lg:min-h-0">
+          {/* Bump `min-h` on mobile from 480 → 560 so the visualizer has
+              real breathing room between the "Now Tuning" frequency label
+              (top) and the bottom transport (timer + play + chips). At
+              480 px the vertical middle band was ~110 px — barely enough
+              for the Breathwork orb (112 px) and forced a permanent
+              collision with either the frequency name above OR the timer
+              below on portrait mobile. Above `lg` the sidebars appear so
+              min-h reverts to 0 (flex-1 handles the growth). */}
           <Visualizer playing={state.playing} frequency={state.frequency} mode={visualMode} />
           <Breathwork active={breathwork && state.playing} />
           <WellnessCheckinCard

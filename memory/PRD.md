@@ -528,3 +528,10 @@
   - **Files** — `frontend/src/components/Dashboard.jsx` (new `startBreathworkFromNotification`, simplified `toggleBreathwork`, wired `startBreathworkNotifRef`, transport wrap tweak), `frontend/src/components/AIAgentSheet.jsx` (new `isAffirmative` regex, `lastActionableSuggestion` helper, `send()` guardrail auto-apply), `frontend/src/components/Breathwork.jsx` (bottom padding on outer container).
   - **NOTE** — production-observable regression. Redeploy required to reach solarisound.com.
 
+
+- **Breathwork mobile positioning — round 2 fix (Feb 2026, iter 65b)**: iter-65's `pb-64` push worked but over-corrected — on the 480 px mobile visualizer the orb now landed on top of the "Now Tuning · 432.0 Hz · Earth" frequency label. Root cause: at `min-h-[480px]` the middle band between the freq label (~120 px) and the transport (~240 px) was only ~120 px tall, which forced the 112–160 px orb to collide with one side or the other regardless of padding.
+  - **Fix** — two-part change: **(a)** raised the mobile visualizer floor from `min-h-[480px]` → `min-h-[560px]` (`main` element in `Dashboard.jsx`) so the middle band widens by 80 px on portrait phones. **(b)** switched Breathwork outer padding from `pb-64 sm:pb-40` → `pt-32 pb-64 sm:pt-20 sm:pb-40` and shrank the orb from `w-40 h-40` → `w-28 h-28 sm:w-40 sm:h-40 md:w-48 md:h-48` so the flex-centering lands the orb exactly halfway between the label bottom and the timer top with breathing room on both sides.
+  - **Verified** — smoke screenshot on 390×844 (iPhone 14 Pro) after starting playback + toggling breathwork ON. Measured `breath-phase` text top at 55 px below the frequency label and 45 px above the timer — clean gaps on both sides. Screenshot shows "INHALE" text inside a clearly separated orb with no visual collision at either end.
+  - **Files** — `frontend/src/components/Dashboard.jsx` (`main` min-h), `frontend/src/components/Breathwork.jsx` (padding + orb size).
+  - **NOTE** — production-observable regression, redeploy required.
+
