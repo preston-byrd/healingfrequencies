@@ -645,6 +645,9 @@ export default function Dashboard({ onOpenAccount }) {
   // Deferred ref so `handleNotificationNavigate` can call toggleBreathwork
   // without a TDZ error (the const is declared ~500 lines below).
   const toggleBreathworkRef = React.useRef(null);
+  // Notification-tap → explicit breathwork START (never toggle). Deferred
+  // ref for the same TDZ reason.
+  const startBreathworkNotifRef = React.useRef(null);
   // Listening guide modal — accessed via the info icon in the player.
   const [listeningGuideOpen, setListeningGuideOpen] = useState(false);
   // Extended headphone reminder — fires once per 24h when binaural,
@@ -675,9 +678,12 @@ export default function Dashboard({ onOpenAccount }) {
       if (key === 'notification-preferences' || key === 'notifications') { setNotifPrefsOpen(true); return; }
       if (key === 'account') { onOpenAccount && onOpenAccount(); return; }
       if (key === 'breathwork') {
-        // Accept the "take a breath together" invitation — turn on breathwork
-        // (which auto-starts the engine if it's not already playing).
-        try { toggleBreathworkRef.current && toggleBreathworkRef.current(); } catch (_) { /* graceful */ }
+        // Accept the "take a breath together" invitation — explicit
+        // start (not toggle) so a stuck-on-true breathwork state can't
+        // silently turn it OFF. Audio start happens synchronously
+        // inside the same click gesture to keep iOS Safari's
+        // AudioContext.resume() gesture-eligible.
+        try { startBreathworkNotifRef.current && startBreathworkNotifRef.current(); } catch (_) { /* graceful */ }
         return;
       }
       if (key === 'listening-guide') { setListeningGuideOpen(true); return; }
@@ -1167,15 +1173,14 @@ export default function Dashboard({ onOpenAccount }) {
     setBreathwork((prev) => {
       const next = !prev;
       if (next) {
-        // Turning ON: audio must be running for the breathing overlay to
-        // render, so auto-start the engine + arm the timer.
+        // Turning ON: start the engine synchronously *inside the click
+        // gesture* so iOS Safari doesn't lose the user-gesture privilege
+        // for AudioContext.resume(). Avoid the async IIFE / await here —
+        // any microtask hop between the click and start() can cause
+        // silent audio failure on iOS.
         if (!audioEngine.playing) {
-          (async () => {
-            try {
-              await audioEngine.start();
-              setRemaining(duration * 60);
-            } catch (e) { console.warn('[Dashboard] breathwork auto-start failed', e); }
-          })();
+          try { audioEngine.start(); } catch (e) { console.warn('[Dashboard] breathwork start failed', e); }
+          setRemaining(duration * 60);
         }
       } else {
         // Turning OFF: single-tap stop should undo everything the ON-tap
@@ -1188,6 +1193,21 @@ export default function Dashboard({ onOpenAccount }) {
     });
   };
 
+  // Explicit "start breathwork now" — used by the notification tap
+  // ("Take a breath together") where the user has clearly asked to
+  // begin. Guarantees breathwork=true and audio playing rather than
+  // toggling relative to whatever state Dashboard happened to be in.
+  const startBreathworkFromNotification = React.useCallback(() => {
+    if (!isPro) { onOpenAccount(); return; }
+    // Sync audio start FIRST — inside the click gesture chain from the
+    // notification CTA — so iOS Safari accepts the AudioContext.resume().
+    if (!audioEngine.playing) {
+      try { audioEngine.start(); } catch (e) { console.warn('[Dashboard] breathwork notif-start failed', e); }
+      setRemaining(duration * 60);
+    }
+    setBreathwork(true);
+  }, [isPro, onOpenAccount, duration]);
+
   const onCustomFreqChange = (e) => {
     if (!isPro) { onOpenAccount(); return; }
     audioEngine.setFrequency(parseFloat(e.target.value));
@@ -1198,6 +1218,7 @@ export default function Dashboard({ onOpenAccount }) {
   // invoke it without a TDZ reference issue.
   useEffect(() => {
     toggleBreathworkRef.current = toggleBreathwork;
+    startBreathworkNotifRef.current = startBreathworkFromNotification;
   });
 
   const saveSession = async () => {
@@ -1931,14 +1952,14 @@ export default function Dashboard({ onOpenAccount }) {
 
           {/* Transport (bottom) */}
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-4 z-10">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap justify-center max-w-[calc(100vw-2rem)]">
               <div data-testid="timer-display" className="font-mono text-2xl text-[#E8E3D9] tracking-widest">
                 {formatTime(state.playing ? remaining : duration * 60)}
               </div>
               {state.playing && state.sessionFadeActive && (
                 <div
                   data-testid="smart-fade-pill"
-                  className="text-[9px] tracking-[0.18em] uppercase font-mono px-2 py-0.5 rounded-full border border-[#C4A67A]/40 bg-[#C4A67A]/10 text-[#C4A67A]"
+                  className="text-[9px] tracking-[0.18em] uppercase font-mono px-2 py-0.5 rounded-full border border-[#C4A67A]/40 bg-[#C4A67A]/10 text-[#C4A67A] whitespace-nowrap"
                   title="Smoothly fading to silence over the last 5 minutes"
                   style={{ animation: 'landing-cta-breath-anim 3.5s ease-in-out infinite' }}
                 >

@@ -1,0 +1,64 @@
+{
+  "summary": "Frontend-only verification of three production fixes on Solarisound (mobile 375-390px). Issues 1, 2, and 3 all VERIFIED FIXED. Logged in as admin (Pro), reproduced each user flow end-to-end against the preview URL.",
+  "issues_verified": {
+    "issue_1_notification_cta_starts_breathwork": {
+      "status": "FIXED",
+      "evidence": "Opened Notification Bell -> tapped 'A quiet moment awaits' -> reader panel -> tapped 'Take a breath together' CTA. Result: window.__audioEngine.playing=true, breathwork-overlay rendered, play-pause-button shows Pause glyph (rect icon), timer-display counting down. No further user tap required.",
+      "engine_state_after_cta": {"playing": true, "freq": 432}
+    },
+    "issue_2_affirmative_reply_auto_applies": {
+      "status": "FIXED",
+      "evidence": "Sent 'Can you play me some rain sounds?' -> LLM returned agent-suggestion-soundscape-0 (Rain). Sent 'yes' -> engine playing=true, ambient.rain.volume=0.6, ai-agent-sheet closed automatically. Also validated: regex correctly matches yes/sure/let's do it/go for it/sounds good/perfect/great AND rejects 'maybe later', 'no thanks', 'not now'.",
+      "final_state": {"playing": true, "rain_volume": 0.6, "sheet_open": false},
+      "regex_matrix": {"lets_do_it": true, "yes": true, "sure": true, "go_for_it": true, "sounds_good": true, "maybe_later": false, "no_thanks": false, "not_now": false}
+    },
+    "issue_3_breathwork_mobile_no_overlap": {
+      "status": "FIXED",
+      "viewport": "375x812",
+      "evidence": "pb-64 sm:pb-40 class applied on breathwork-overlay container. Actual breath-orb (parent of breath-phase) bottom=486px, timer-display top=531px -> gap=45px, NO overlap. Transport row parent has 'flex-wrap' so the Fading pill wraps or sits inline with timer. smart-fade-pill was visible in-frame alongside timer without collision.",
+      "measurements": {"orb_bottom": 486.4, "timer_top": 531.4, "gap_px": 45.0, "phase_to_timer_gap_px": 115.25}
+    }
+  },
+  "regressions_checked": {
+    "breathwork_toggle_button": "Manually tapping data-testid=breathwork-toggle also works (verified via notification path which routes to startBreathworkFromNotification). Engine state transitions cleanly.",
+    "aiagent_suggestion_tap": "applySuggestion() still fires when a suggestion card is tapped directly (previous iteration coverage) and now ALSO fires via affirmative-reply guardrail when suggestions=[] in the follow-up.",
+    "toggle_pause": "play-pause-button toggles engine.playing correctly."
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Visualizer / Breathwork overlay",
+        "issue": "Minor visual overlap between the frequency-name label ('Earth') coming from Visualizer and the breath-phase text ('HOLD') inside the orb — they render on nearly the same Y coordinate (~397px) at 375px width. Not part of the original reported Issue 3 but worth polishing.",
+        "selector": "data-testid=breath-phase overlaps Visualizer freq-name label",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "AIAgentSheet affirmative regex — typographic apostrophe",
+        "issue": "The _AFFIRMATIVE_RE regex uses ASCII apostrophe only (let'?s). iOS Safari + iOS keyboard auto-convert straight quotes to curly ones (U+2019). So a user who types 'Let\u2019s do it' on iPhone would NOT match the regex and the auto-apply guardrail would silently fail — reproducing exactly the original bug for iOS users. Recommend widening the regex to accept both apostrophes: use `let[\u2019']?s` (or normalise the text via .replace(/\u2019/g, \"'\") before test).",
+        "affected_selectors": ["data-testid=agent-input", "AIAgentSheet.jsx line ~105"],
+        "priority": "HIGH"
+      }
+    ],
+    "design_issues": []
+  },
+  "backend_issues": {"critical": [], "minor": []},
+  "critical_code_review_comments": [
+    "AIAgentSheet.jsx: _AFFIRMATIVE_RE does not tolerate U+2019 (curly apostrophe). iOS auto-corrects straight ' to curly \u2019 on mobile, so mobile users tapping 'Let's do it' will still fall through to the LLM without triggering auto-apply. Fix: normalise input before regex test, or expand the character class.",
+    "Dashboard.jsx (line ~1934 transport area): flex-wrap is applied to timer container which is good; but the smart-fade-pill sits next to timer only when there's horizontal room. On 375px, both fit inline. Confirmed via bounding boxes.",
+    "React warning observed in console: 'Cannot update a component while rendering a different component' when clicking breathwork-toggle. Not blocking but indicates a setState-during-render somewhere in the toggle chain — worth chasing."
+  ],
+  "action_items": [
+    "Widen AIAgentSheet _AFFIRMATIVE_RE to accept typographic apostrophe (U+2019) so iOS Safari users' auto-corrected 'Let\u2019s do it' triggers the auto-apply guardrail. This is the same real-world bug users reported — just for iOS.",
+    "Investigate the React 'setState-during-render' warning fired on the breathwork-toggle click path (likely from a parent re-render inside toggleBreathwork's setBreathwork callback that also updates ambient state)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend-only)", "frontend": "100% for the three reported fixes; 1 iOS-apostrophe follow-up recommended"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 from /app/memory/test_credentials.md",
+  "seed_data_creation": "Used existing 'A quiet moment awaits' checkin notifications already present in the account (5 seeded). Did not create new data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All 3 primary fixes work end-to-end via preview URL. The only follow-up is the iOS curly-apostrophe regex miss. Test method: login as admin@example.com (Pro), open Notification Bell, click 'A quiet moment awaits' -> reader -> 'Take a breath together' to reproduce Issue 1 in one path. For Issue 2, open Wellness Assistant, ask 'Can you play me some rain sounds?', then reply 'yes'. For Issue 3, measure actual orb (parent of [data-testid=breath-phase]) bbox vs timer-display bbox — do NOT measure the [data-testid=breathwork-overlay] container which uses inset-0 and always spans the whole visualizer.",
+  "rca_of_the_issue": "Issues 1 & 2 were caused by the app narrating actions without actually invoking the audio engine after a user consent moment (notification tap or affirmative chat reply). Fix in Dashboard.jsx adds startBreathworkFromNotification called synchronously inside the notification-click gesture so iOS AudioContext.resume() is gesture-eligible. Fix in AIAgentSheet.jsx.send() detects affirmative replies (isAffirmative + lastActionableSuggestion) and calls applySuggestion() when the LLM confirmation returns no re-attached suggestion. Issue 3 was pure layout — pb-64 sm:pb-40 padding-bottom on the breathwork-overlay container shifts the flex-centered orb upward so the transport at bottom-6 has clear space. All three fixes are correctly deployed on the preview."
+}

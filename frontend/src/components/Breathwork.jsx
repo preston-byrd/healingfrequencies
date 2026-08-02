@@ -41,10 +41,16 @@ export default function Breathwork({ active }) {
   else scale = 1.0 - 0.3 * progress;
 
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+    <div
+      className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none pb-64 sm:pb-40"
+      data-testid="breathwork-overlay"
+    >
       {/* Breathing orb — the phase word sits inside the circle so it never
           collides with the transport (Play/Pause + timer) that anchors at
-          the bottom of the visualizer, especially on mobile viewports. */}
+          the bottom of the visualizer. The generous bottom padding above
+          shifts the flex-centering up so on portrait mobile the orb
+          always sits well above the timer + Fading pill rather than
+          overlapping them at short viewport heights. */}
       <div
         className="relative w-40 h-40 sm:w-48 sm:h-48 rounded-full border border-[#72C2AC]/50 flex items-center justify-center"
         style={{

@@ -97,6 +97,29 @@ export default function AIAgentSheet({
     return '';
   };
 
+  // Detect an affirmative reply so we can auto-apply the previous
+  // assistant turn's suggestion if the LLM's confirmation reply forgets
+  // to re-attach the actionable card. Keep the list conservative — only
+  // strings that unambiguously mean "yes, do that". A false positive
+  // here would surprise the user with unexpected audio.
+  const _AFFIRMATIVE_RE = /^(yes\b|yeah\b|yep\b|yup\b|sure\b|ok\b|okay\b|k\b|please\b|sounds good\b|let'?s do it\b|let'?s go\b|do it\b|start\b|go for it\b|go ahead\b|go\b|great\b|perfect\b)([\s.!?]|$)/i;
+  const isAffirmative = (text) => _AFFIRMATIVE_RE.test(String(text || '').trim());
+
+  // Pick the most recent assistant turn's *actionable* suggestion — one
+  // we know how to execute in applySuggestion. Ignores plain informational
+  // suggestions with no kind we handle.
+  const lastActionableSuggestion = (msgs) => {
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i];
+      if (m.role !== 'assistant' || !Array.isArray(m.suggestions)) continue;
+      const s = m.suggestions.find((x) => (
+        x && (x.kind === 'preset' || x.kind === 'soundscape' || x.kind === 'sleep' || x.kind === 'haptic_combo' || x.kind === 'ai_prescription')
+      ));
+      if (s) return s;
+    }
+    return null;
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text || loading) return;
@@ -112,18 +135,35 @@ export default function AIAgentSheet({
         history,
         session_id: sessionIdRef.current,
       });
+      const suggestions = data.suggestions || [];
       setMessages((prev) => [
         ...prev,
         {
           id: mkId(),
           role: 'assistant',
           text: data.message,
-          suggestions: data.suggestions || [],
+          suggestions,
           // Phase 9 — LLM was invited to weave a gentle HB setup nudge. UI
           // reflects this with a soft "not now" affordance on the message.
           hbNudgeShown: !!data.hb_nudge_shown,
         },
       ]);
+      // Guardrail: if the user just replied affirmatively (e.g. "Let's
+      // do it") to a prior suggestion, and the LLM's follow-up talks
+      // as if action was taken ("Perfect! Starting Rain for you now")
+      // but forgot to re-attach the actionable suggestion, auto-apply
+      // the pending one so playback actually starts. Without this, the
+      // Assistant becomes a chat that *narrates* actions instead of
+      // *taking* them, which is the bug users report as "Rain never
+      // played after I said Let's do it".
+      if (isAffirmative(text) && suggestions.length === 0) {
+        const pending = lastActionableSuggestion(nextMessages);
+        if (pending) {
+          // applySuggestion also closes the sheet, so the user sees the
+          // main player fire up rather than staying trapped in chat.
+          await applySuggestion(pending);
+        }
+      }
     } catch (e) {
       const msg = e?.response?.data?.detail || e?.message || 'Could not reach the agent';
       setErr(typeof msg === 'string' ? msg : 'Agent error');
