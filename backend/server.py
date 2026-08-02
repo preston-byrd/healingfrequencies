@@ -2363,9 +2363,20 @@ async def harmonic_blueprint_before_after(user: dict = Depends(get_current_user)
             "show_celebration": False,
         }
 
-    # Latest non-eigenmode capture. If none exists yet, latest == baseline.
+    # "Latest" must be a capture that is *actually after* the baseline —
+    # not just any non-eigenmode row. If the user manually promoted a
+    # later capture to be their eigenmode (via POST
+    # /harmonic-blueprint/eigenmode/promote/{id}) then older captures
+    # still exist as non-eigenmodes; without this guard we'd display an
+    # older reading as "latest" and end up with baseline > latest by
+    # calendar date, which is impossible by definition.
+    eigen_created_at = eigen.get("created_at") or ""
     latest = await db.resonance_profiles.find_one(
-        {"user_id": user["id"], "is_eigenmode": {"$ne": True}},
+        {
+            "user_id": user["id"],
+            "is_eigenmode": {"$ne": True},
+            "created_at": {"$gt": eigen_created_at},
+        },
         {"_id": 0},
         sort=[("created_at", -1)],
     )
@@ -2389,6 +2400,7 @@ async def harmonic_blueprint_before_after(user: dict = Depends(get_current_user)
     session_count = await db.resonance_profiles.count_documents({
         "user_id": user["id"],
         "is_eigenmode": {"$ne": True},
+        "created_at": {"$gt": eigen_created_at},
     })
 
     ebands = _band_map(eigen.get("bands", []))

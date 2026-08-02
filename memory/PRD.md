@@ -504,3 +504,11 @@
   - **Verified** — new pytest `backend/tests/test_code_review_fixes.py` (3/3 pass): pattern recommendation notification actually fires for a user with a matching top_frequency pattern, dismissed patterns are respected (7-session window enforced), current-month report recomputes on new capture while completed-month snapshots stay stable.
   - **Files** — `backend/server.py` (`_generate_recommendation_notification` lines 5188-5203, `_ensure_monthly_report` lines 2701-2739), `backend/tests/test_code_review_fixes.py` (new).
 
+
+- **Before/After Map — baseline-after-latest date impossibility fix (Feb 2026, iter 63c)**: A user reported the Before/After Frequency Map showing "Your first baseline: Aug 1, 2026" alongside "Your latest reading: Jul 31, 2026" — an impossible ordering (latest before baseline).
+  - **Root cause** — `GET /api/harmonic-blueprint/before-after` picked "latest" as the most recent capture where `is_eigenmode != True`, but never verified that the picked row was actually newer than the baseline. When a user manually promotes a newer capture as their eigenmode (via `POST /harmonic-blueprint/eigenmode/promote/{id}`), any pre-existing non-eigenmode row from an earlier date becomes the "latest" — displayed as newer than the baseline in the UI, but actually older in wall time.
+  - **Fix** — added `"created_at": {"$gt": eigen_created_at}` to both the `latest` lookup and the `session_count` aggregation. If no capture is newer than the baseline, the endpoint returns the same clean "Your baseline is captured. Take a fresh Harmonic Blueprint reading…" empty state as a brand-new user (latest=null, band_deltas=[]).
+  - **Verified** — 2 new regressions in `backend/tests/test_before_after.py`: `test_before_after_ignores_captures_older_than_baseline` (single older non-eigenmode row + newer eigenmode → latest=null) and `test_before_after_uses_only_post_baseline_captures` (older row + eigenmode + newer row → latest is the newer one, session_count=1). All 8 tests pass.
+  - **Files** — `backend/server.py:2367-2409` (`harmonic_blueprint_before_after`), `backend/tests/test_before_after.py` (2 new tests).
+  - **NOTE** — this is a production-observable bug. Redeploy required to reach solarisound.com.
+

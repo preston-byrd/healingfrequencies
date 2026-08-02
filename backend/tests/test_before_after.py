@@ -200,3 +200,92 @@ def test_before_after_celebration_flag_on_fifth_session(pro_user):
                        headers={"Authorization": f"Bearer {tok}"}).json()
     assert body["session_count"] == 5
     assert body["show_celebration"] is True
+
+
+
+def test_before_after_ignores_captures_older_than_baseline(pro_user):
+    """Regression: when the user's eigenmode is a *newer* capture than
+    some non-eigenmode row (e.g. they manually promoted via
+    /harmonic-blueprint/eigenmode/promote/{id}, or a race left an older
+    non-eigenmode row behind), the endpoint must NOT display the older
+    row as "latest reading" — that would render a before/after map
+    where baseline is dated AFTER latest, which is impossible by
+    definition.
+
+    Expected behaviour: `latest` is None and the summary tells the user
+    to take a fresh reading, matching the "eigenmode-only" empty state.
+    """
+    email, pw, uid = pro_user
+    now = datetime.now(timezone.utc)
+    older_ts = (now - timedelta(days=1)).isoformat()
+    newer_ts = now.isoformat()
+    # Simulate the "user promoted a newer capture as baseline" flow:
+    # the eigenmode row is the newer one, and an older non-eigenmode row
+    # is still around.
+    _mongo_col("resonance_profiles").insert_many([
+        {
+            "id": f"old-{uuid.uuid4().hex[:8]}", "user_id": uid,
+            "created_at": older_ts,
+            "is_eigenmode": False, "resonance_score": 74,
+            "bands": _bands({"sub": -2, "mid": -1}),
+            "spectrum": [], "confirmed_gaps": [],
+        },
+        {
+            "id": f"eig-{uuid.uuid4().hex[:8]}", "user_id": uid,
+            "created_at": newer_ts,
+            "is_eigenmode": True, "resonance_score": 100,
+            "bands": _bands({}), "spectrum": [], "confirmed_gaps": [],
+        },
+    ])
+    tok = _login(email, pw)
+    body = requests.get(f"{API}/harmonic-blueprint/before-after",
+                       headers={"Authorization": f"Bearer {tok}"}).json()
+    assert body["baseline"] is not None
+    assert body["baseline"]["created_at"] == newer_ts
+    assert body["latest"] is None, (
+        "A capture older than the baseline must NOT be shown as 'latest'; "
+        "got: %r" % body["latest"]
+    )
+    assert body["session_count"] == 0
+    assert body["show_celebration"] is False
+
+
+def test_before_after_uses_only_post_baseline_captures(pro_user):
+    """When both older and newer non-eigenmode captures exist around a
+    manually-promoted eigenmode, only the newer captures are considered
+    for the 'latest reading' AND for session_count."""
+    email, pw, uid = pro_user
+    now = datetime.now(timezone.utc)
+    eigen_ts = (now - timedelta(days=2)).isoformat()
+    _mongo_col("resonance_profiles").insert_many([
+        # Older-than-baseline capture (should be ignored)
+        {
+            "id": f"pre-{uuid.uuid4().hex[:8]}", "user_id": uid,
+            "created_at": (now - timedelta(days=5)).isoformat(),
+            "is_eigenmode": False, "resonance_score": 70,
+            "bands": _bands({}), "spectrum": [], "confirmed_gaps": [],
+        },
+        # The eigenmode
+        {
+            "id": f"eig-{uuid.uuid4().hex[:8]}", "user_id": uid,
+            "created_at": eigen_ts,
+            "is_eigenmode": True, "resonance_score": 100,
+            "bands": _bands({}), "spectrum": [], "confirmed_gaps": [],
+        },
+        # Newer-than-baseline capture (this must be picked as 'latest')
+        {
+            "id": f"post-{uuid.uuid4().hex[:8]}", "user_id": uid,
+            "created_at": (now - timedelta(days=1)).isoformat(),
+            "is_eigenmode": False, "resonance_score": 82,
+            "bands": _bands({"mid": 3}), "spectrum": [], "confirmed_gaps": [],
+        },
+    ])
+    tok = _login(email, pw)
+    body = requests.get(f"{API}/harmonic-blueprint/before-after",
+                       headers={"Authorization": f"Bearer {tok}"}).json()
+    assert body["latest"] is not None, body
+    assert body["latest"]["created_at"] > body["baseline"]["created_at"], (
+        "latest must be strictly newer than baseline"
+    )
+    # Only the ONE post-baseline capture counts toward session_count.
+    assert body["session_count"] == 1
