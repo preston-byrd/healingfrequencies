@@ -97,16 +97,8 @@ export default function BeforeAfterMap({ data: injected = null, compact = false 
   const latestDate = _fmtDate(data.latest.created_at);
 
   return (
-    <div
-      className="rounded-xl border border-[rgba(196,166,122,0.2)] bg-[rgba(196,166,122,0.02)] p-5"
-      data-testid="before-after-map"
-    >
-      <div className="flex items-center gap-2 mb-4">
-        <Sparkles size={13} className="text-[#C4A67A]" />
-        <div className="label-tiny text-[#C4A67A]">Before &amp; after frequency map</div>
-      </div>
-
-      <div className={`grid gap-4 ${compact ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 md:grid-cols-2'}`}>
+    <Frame>
+      <div className={`grid gap-4 mt-1 ${compact ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1 md:grid-cols-2'}`}>
         <FrequencyMapPanel
           title="Your first baseline"
           subtitle={baseDate}
@@ -143,7 +135,7 @@ export default function BeforeAfterMap({ data: injected = null, compact = false 
           {data.summary_text}
         </div>
       )}
-    </div>
+    </Frame>
   );
 }
 

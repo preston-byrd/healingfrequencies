@@ -512,3 +512,10 @@
   - **Files** — `backend/server.py:2367-2409` (`harmonic_blueprint_before_after`), `backend/tests/test_before_after.py` (2 new tests).
   - **NOTE** — this is a production-observable bug. Redeploy required to reach solarisound.com.
 
+
+- **Before/After Map — always-visible card in Account section (Feb 2026, iter 63d)**: After the iter-63c backend fix (filter `latest` by `created_at > eigen.created_at`), users whose only extra captures were older than their promoted baseline hit the `!data.latest` branch of `BeforeAfterMap.jsx`. That branch previously rendered as bare tiny gray text (`text-[#8A9A92] text-xs`) with no card wrapper — so from the user's point of view the whole section vanished from the Account view.
+  - **Fix** — extracted a shared `Frame` wrapper inside `BeforeAfterMap.jsx` that renders the standard rounded card with border, padding, `Sparkles` + "Before & after frequency map" title. Applied to all four states: loading, error, empty (no baseline), no-latest (baseline only). The populated (both-panels) state also now uses `Frame` for consistency, eliminating the previous duplicated header markup. Added a small `Baseline · <date>` footer line to the no-latest state so users see when their baseline was set even when no comparison is available yet.
+  - **Verified** — testing agent iter 64 (frontend-only): 100% pass on both scenarios — SC1 (eigenmode only → framed card with `data-testid='before-after-map-no-latest'`, "take a fresh reading" copy, baseline date footer) and SC2 (eigenmode + newer capture → full framed card with both panels, legend, deltas rendering correctly). Backend regression sanity via API also PASS.
+  - **Files** — `frontend/src/components/BeforeAfterMap.jsx` (added `Frame` wrapper, applied to all states, added baseline-date footer to no-latest state).
+  - **NOTE** — production-observable regression. Redeploy required to reach solarisound.com.
+
