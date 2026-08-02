@@ -1,0 +1,66 @@
+{
+  "summary": "Frontend-only verification of the BeforeAfterMap visibility fix in the Account section. Seeded admin (Pro) with (1) only an eigenmode resonance_profile row, and (2) eigenmode + a newer non-eigenmode row. Navigated Dashboard → Account menu → Account view and confirmed the 'Before & after frequency map' card is always visible. Both scenarios pass all data-testid + copy/date-format assertions. Backend regression (baseline+latest=null vs baseline+latest populated) confirmed via API before UI checks. Seed data cleaned up.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_scenarios": [
+    {
+      "name": "SC1 — eigenmode-only (no-latest state)",
+      "seed": "1 doc with is_eigenmode=True, created_at=2026-08-01T12:00:00Z",
+      "expected_testid": "before-after-map-no-latest",
+      "result": "PASS",
+      "asserted": {
+        "card_title_present": true,
+        "baseline_footer_present": true,
+        "date_formatted_Aug_1_2026": true,
+        "summary_text_mentions_fresh_reading": true,
+        "full_map_testid_absent": true
+      },
+      "rendered_text": "Before & after frequency map — Your baseline is captured. Take a fresh Harmonic Blueprint reading to unlock your first side-by-side map. Baseline · Aug 1, 2026"
+    },
+    {
+      "name": "SC2 — eigenmode + newer non-eigenmode (populated state)",
+      "seed": "eigen 2026-08-01 + non-eigen 2026-08-05 (deltas across bands)",
+      "expected_testid": "before-after-map with panels",
+      "result": "PASS",
+      "asserted": {
+        "before-after-map": true,
+        "before-after-panel-baseline": true,
+        "before-after-panel-latest": true,
+        "before-after-map-summary": true,
+        "baseline_date_Aug_1_2026": true,
+        "latest_date_Aug_5_2026": true,
+        "all_6_bands_baseline_rendered": true,
+        "all_6_bands_latest_rendered": true,
+        "legend_visible": true,
+        "no_latest_state_absent": true
+      },
+      "notes": "Latest panel correctly shows Δ +6.0 dB (sub drift) and Δ -5.0 dB (upper-mid drift). Aligned bands render in teal (lower grounding, warm-body, mid, presence) matching |delta|<2 dB rule."
+    }
+  ],
+  "backend_regression_api_check": {
+    "endpoint": "GET /api/harmonic-blueprint/before-after",
+    "sc1_response": "baseline populated (id, created_at, bands), latest=null, summary_text mentions 'Take a fresh Harmonic Blueprint reading'",
+    "sc2_response": "baseline + latest both populated with created_at ordering baseline < latest, band_deltas array present",
+    "result": "PASS (behaviour unchanged from previous iteration's backend fix)"
+  },
+  "navigation_path": "Login → Dashboard loads (dismiss milestone celebration modals via 'Continue my journey') → header data-testid='account-button' → data-testid='account-menu-account' → scroll down to Harmonic Blueprint section → 'BEFORE & AFTER FREQUENCY MAP' card. Direct URL navigation to /account works but launches milestone celebrations first which must be dismissed. Not a bug, prior behaviour.",
+  "test_report_links": [
+    "/app/scripts/seed_before_after.py"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "BeforeAfterMap.jsx duplicates the header markup (Sparkles + title) in the Frame component and inline in the populated branch (lines 100-107). Minor DRY nit — could wrap the populated branch in the Frame component too. Not a bug.",
+    "HarmonicBlueprintSection mounts <BeforeAfterMap /> only when `isPro && hasBaseline` (line ~191). Free users with a baseline will never see this card. If that's intentional (Pro-gated feature) it's fine; if not, gate should be reconsidered. Current fix scope is only about visibility for the Pro user path."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "100% (regression sanity)", "frontend": "100% (both UI states)" },
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Used /app/scripts/seed_before_after.py which seeds resonance_profiles for admin then cleans. Post-test: `python /app/scripts/seed_before_after.py clean` executed — 0 residual test rows in DB.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The BeforeAfterMap card is now always visible for Pro+baseline users via the shared Frame wrapper. To reproduce either state, use /app/scripts/seed_before_after.py with args 'eigen' (no-latest) / 'both' (populated) / 'clean'. Navigate via account-button → account-menu-account (URL /account alone leaves user on Dashboard until milestone modals are dismissed). Note that seeding an eigenmode triggers milestone celebration modals ('Your Harmonic Blueprint is set' + 'Deeply aligned with your natural tuning') that overlay the app — dismiss with 'Continue my journey' button before interacting with the account view."
+}

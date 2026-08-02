@@ -40,30 +40,56 @@ export default function BeforeAfterMap({ data: injected = null, compact = false 
     return () => { alive = false; };
   }, [injected]);
 
+  // Shared card frame so every render (loading, error, empty, populated)
+  // keeps the section visible in the Account layout. Previously the
+  // empty states returned bare gray text which visually looked like
+  // the whole section had disappeared.
+  const Frame = ({ children, testid = 'before-after-map' }) => (
+    <div
+      className="rounded-xl border border-[rgba(196,166,122,0.2)] bg-[rgba(196,166,122,0.02)] p-5"
+      data-testid={testid}
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <Sparkles size={13} className="text-[#C4A67A]" />
+        <div className="label-tiny text-[#C4A67A]">Before &amp; after frequency map</div>
+      </div>
+      {children}
+    </div>
+  );
+
   if (loading) {
     return (
-      <div className="text-[#8A9A92] text-xs" data-testid="before-after-map-loading">
-        Loading before-and-after map…
-      </div>
+      <Frame testid="before-after-map-loading">
+        <div className="text-[#8A9A92] text-xs">Loading before-and-after map…</div>
+      </Frame>
     );
   }
   if (error) {
     return (
-      <div className="text-[#D9A45C] text-xs" data-testid="before-after-map-error">{error}</div>
+      <Frame testid="before-after-map-error">
+        <div className="text-[#D9A45C] text-xs">{error}</div>
+      </Frame>
     );
   }
   if (!data || !data.baseline) {
     return (
-      <div className="text-[#8A9A92] text-xs" data-testid="before-after-map-empty">
-        {data?.summary_text || 'Capture your baseline eigenmode to unlock your before-and-after map.'}
-      </div>
+      <Frame testid="before-after-map-empty">
+        <div className="text-[#8A9A92] text-sm leading-relaxed">
+          {data?.summary_text || 'Capture your baseline eigenmode to unlock your before-and-after map.'}
+        </div>
+      </Frame>
     );
   }
   if (!data.latest) {
     return (
-      <div className="text-[#8A9A92] text-xs" data-testid="before-after-map-no-latest">
-        {data.summary_text}
-      </div>
+      <Frame testid="before-after-map-no-latest">
+        <div className="text-[#8A9A92] text-sm leading-relaxed">
+          {data.summary_text || 'Your baseline is captured. Take a fresh Harmonic Blueprint reading to unlock your first side-by-side map.'}
+        </div>
+        <div className="text-[10px] font-mono text-[#8A9A92] mt-3">
+          Baseline · {_fmtDate(data.baseline.created_at)}
+        </div>
+      </Frame>
     );
   }
 
