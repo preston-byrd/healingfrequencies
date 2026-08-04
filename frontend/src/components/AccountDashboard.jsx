@@ -66,10 +66,15 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
   const [annual, setAnnual] = useState('');
   const [trial, setTrial] = useState('');
 
-  // admin users panel
+  // admin users panel — paginated so we can page through every registered
+  // user rather than truncating at the top 100 rows. Test seeds
+  // (@example.com) are hidden by default; toggle `showTestUsers` to
+  // include them.
   const [users, setUsers] = useState([]);
   const [userQuery, setUserQuery] = useState('');
   const [grantDays, setGrantDays] = useState({});
+  const [usersMeta, setUsersMeta] = useState({ total: 0, offset: 0, limit: 100, filtered_test_count: 0 });
+  const [showTestUsers, setShowTestUsers] = useState(false);
 
   // admin security tile — counters + recent audit events + new-user badge
   const [security, setSecurity] = useState(null);
@@ -87,10 +92,30 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
     }
   };
 
-  const loadUsers = async (q = '') => {
+  const loadUsers = async (q = '', offset = 0, includeTest = showTestUsers) => {
     try {
-      const { data } = await api.get('/admin/users', { params: q ? { q } : {} });
-      setUsers(data);
+      const params = {
+        offset,
+        limit: 100,
+        include_test: includeTest ? 'true' : 'false',
+      };
+      if (q) params.q = q;
+      const { data } = await api.get('/admin/users', { params });
+      // Server switched from a bare list → {items,total,offset,limit,...}.
+      // Support the legacy shape too so a mid-deploy hiccup doesn't wipe
+      // the panel.
+      if (Array.isArray(data)) {
+        setUsers(data);
+        setUsersMeta({ total: data.length, offset: 0, limit: data.length, filtered_test_count: 0 });
+      } else {
+        setUsers(data?.items || []);
+        setUsersMeta({
+          total: data?.total || 0,
+          offset: data?.offset || 0,
+          limit: data?.limit || 100,
+          filtered_test_count: data?.filtered_test_count || 0,
+        });
+      }
     } catch (e) { console.warn('[AccountDashboard] loadUsers failed (likely non-admin)', e); }
   };
 
@@ -1010,9 +1035,43 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
         {/* Admin: user management */}
         {sub.is_admin && (
           <div className="glass p-6 border border-[#C4A67A]/30 mt-6" data-testid="admin-users-card">
-            <div className="flex items-center gap-2 mb-4">
-              <Users size={14} className="text-[#C4A67A]" />
-              <div className="label-tiny text-[#C4A67A]">Admin · User Management</div>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-2">
+                <Users size={14} className="text-[#C4A67A]" />
+                <div className="label-tiny text-[#C4A67A]">Admin · User Management</div>
+              </div>
+              {/* Real-count header — surface how many users match the
+                  current filter so the admin knows they're seeing
+                  everyone, not a silently-truncated slice. */}
+              <div className="flex items-center gap-3 text-[11px] text-[#8A9A92]" data-testid="admin-users-total">
+                <span>
+                  Showing{' '}
+                  <span className="text-[#E8E3D9]">
+                    {users.length ? `${usersMeta.offset + 1}–${usersMeta.offset + users.length}` : '0'}
+                  </span>
+                  {' of '}
+                  <span className="text-[#C4A67A]">{usersMeta.total}</span>
+                  {userQuery ? ' matching' : ' registered'}
+                </span>
+                {usersMeta.filtered_test_count > 0 && (
+                  <label
+                    className="inline-flex items-center gap-1 cursor-pointer select-none"
+                    title={`Include ${usersMeta.filtered_test_count} @example.com pytest-seeded users`}
+                  >
+                    <input
+                      type="checkbox"
+                      data-testid="admin-users-include-test"
+                      checked={showTestUsers}
+                      onChange={(e) => {
+                        setShowTestUsers(e.target.checked);
+                        loadUsers(userQuery, 0, e.target.checked);
+                      }}
+                      className="accent-[#C4A67A]"
+                    />
+                    include test ({usersMeta.filtered_test_count})
+                  </label>
+                )}
+              </div>
             </div>
 
             <form onSubmit={searchUsers} className="flex items-center gap-2 mb-4 max-w-md">
@@ -1100,6 +1159,37 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+            {/* Pagination — only meaningful when there's more than one
+                page. Prev/Next drive `loadUsers(userQuery, offset,
+                showTestUsers)` so search + include-test filters carry
+                across pages. */}
+            {usersMeta.total > usersMeta.limit && (
+              <div className="flex items-center justify-between mt-4" data-testid="admin-users-pagination">
+                <button
+                  type="button"
+                  data-testid="admin-users-prev"
+                  onClick={() => loadUsers(userQuery, Math.max(0, usersMeta.offset - usersMeta.limit), showTestUsers)}
+                  disabled={usersMeta.offset === 0}
+                  className="text-[11px] uppercase tracking-[0.12em] text-[#C4A67A] hover:text-[#72C2AC] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  ← Prev
+                </button>
+                <div className="text-[10px] text-[#8A9A92] uppercase tracking-wider">
+                  Page {Math.floor(usersMeta.offset / usersMeta.limit) + 1}
+                  {' of '}
+                  {Math.max(1, Math.ceil(usersMeta.total / usersMeta.limit))}
+                </div>
+                <button
+                  type="button"
+                  data-testid="admin-users-next"
+                  onClick={() => loadUsers(userQuery, usersMeta.offset + usersMeta.limit, showTestUsers)}
+                  disabled={usersMeta.offset + users.length >= usersMeta.total}
+                  className="text-[11px] uppercase tracking-[0.12em] text-[#C4A67A] hover:text-[#72C2AC] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >
+                  Next →
+                </button>
               </div>
             )}
           </div>

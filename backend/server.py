@@ -6162,19 +6162,63 @@ class GrantProIn(BaseModel):
 @api.get("/admin/users")
 async def admin_list_users(
     q: str = "",
+    offset: int = 0,
+    limit: int = 100,
+    include_test: bool = False,
     user: dict = Depends(get_current_user),
 ):
+    """List all registered users for the Admin User Management view.
+
+    Returns `{items, total, offset, limit, filtered_test_count}` so the
+    UI can page through and surface how many users exist in total. This
+    replaces the previous flat-list-of-200 shape that silently hid every
+    user beyond the 200th row (a real problem once we crossed ~1600
+    seeded rows in preview).
+
+    - `q`: substring email search (regex-escaped, capped at 100 chars).
+    - `offset` / `limit`: pagination; `limit` capped at 500 to protect
+      the response size / mongo memory.
+    - `include_test`: when False (default) we hide pytest-seeded
+      `@example.com` addresses so the admin sees real registered users
+      first. Set true to see everything (used only when the admin
+      explicitly asks via a checkbox).
+    """
     _require_admin(user)
-    query = {}
+    limit = max(1, min(int(limit or 100), 500))
+    offset = max(0, int(offset or 0))
+
+    query: dict = {}
     if q:
         # SECURITY: escape regex metacharacters from user input to prevent
         # ReDoS / regex injection. Admin-only but defense in depth.
-        safe_q = re.escape(q.strip())
-        if len(safe_q) > 100:
-            safe_q = safe_q[:100]
-        query = {"email": {"$regex": safe_q, "$options": "i"}}
-    cursor = db.users.find(query, {"_id": 0, "password_hash": 0}).sort("created_at", -1).limit(200)
-    items = await cursor.to_list(200)
+        safe_q = re.escape(q.strip())[:100]
+        query["email"] = {"$regex": safe_q, "$options": "i"}
+    if not include_test:
+        # `@example.com` is an IANA-reserved test domain. Nobody registers
+        # with it in production — everything under that domain is pytest
+        # seed data leftover from CI runs. Exclude by default so the
+        # admin sees real signups, not thousands of fixture rows.
+        query["email"] = {**(query.get("email") or {}), "$not": {"$regex": r"@example\.com$", "$options": "i"}}
+
+    total = await db.users.count_documents(query)
+    # Also expose how many synthetic rows we're hiding by default so the
+    # admin knows the "total in DB" if they care.
+    filtered_test_count = 0
+    if not include_test:
+        try:
+            filtered_test_count = await db.users.count_documents({
+                "email": {"$regex": r"@example\.com$", "$options": "i"},
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    cursor = (
+        db.users.find(query, {"_id": 0, "password_hash": 0})
+        .sort("created_at", -1)
+        .skip(offset)
+        .limit(limit)
+    )
+    items = await cursor.to_list(limit)
     now = datetime.now(timezone.utc)
     for u in items:
         pu = u.get("pro_until")
@@ -6191,7 +6235,13 @@ async def admin_list_users(
         u["pro"] = is_pro
         u["days_left"] = days_left
         u["plan"] = u.get("plan") or ("pro" if is_pro else "basic")
-    return items
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "filtered_test_count": filtered_test_count,
+    }
 
 
 @api.post("/admin/users/{user_id}/grant-pro")
