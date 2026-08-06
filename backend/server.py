@@ -1702,17 +1702,23 @@ HARMONIC_JOURNEY_CATALOG = [
     {"id": "solf-963", "type": "solfeggio", "name": "963 Hz Unity",
      "freq": 963, "duration_seconds": 300, "targets_bands": ["presence"],
      "tagline": "Pure being · crown brightness"},
-    # Sound Baths — richer immersive textures (`ref` matches soundBathEngine.js).
+    # Sound Baths — richer immersive textures (`ref` MUST exactly match a
+    # key in soundBathEngine.js `PRESETS`; a bad ref makes the journey
+    # player silently no-op that track because `getSoundBath.start(ref)`
+    # can't find the preset. Previously "aurora"/"grounding"/"solfeggio"
+    # were used here but the actual PRESETS keys are the *_bath /
+    # solfeggio_wash form — so the Eigenmode Journey looked like it was
+    # playing but produced no bath audio.
     {"id": "bath-grounding", "type": "soundbath", "name": "Grounding Bath",
-     "ref": "grounding", "freq": 174, "duration_seconds": 600,
+     "ref": "grounding_bath", "freq": 174, "duration_seconds": 600,
      "targets_bands": ["sub", "low"],
      "tagline": "Deep-earth drone bath for anchoring"},
     {"id": "bath-solfeggio", "type": "soundbath", "name": "Solfeggio Wash",
-     "ref": "solfeggio", "freq": 528, "duration_seconds": 600,
+     "ref": "solfeggio_wash", "freq": 528, "duration_seconds": 600,
      "targets_bands": ["mid", "lowmid"],
      "tagline": "Layered solfeggio harmonics for the heart-mid range"},
     {"id": "bath-aurora", "type": "soundbath", "name": "Aurora Bath",
-     "ref": "aurora", "freq": 741, "duration_seconds": 600,
+     "ref": "aurora_bath", "freq": 741, "duration_seconds": 600,
      "targets_bands": ["uppermid", "presence"],
      "tagline": "Shimmering high-band aurora sweeps"},
     # Flow Mode journeys — 3-stage guided crossfades (`ref` = JOURNEYS key).

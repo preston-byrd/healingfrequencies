@@ -134,7 +134,19 @@ class SoundBathEngine {
   snapshot() { return { active: this.active, preset: this.currentPresetKey }; }
 
   async start(presetKey) {
-    if (!BATH_PRESETS[presetKey]) return;
+    if (!BATH_PRESETS[presetKey]) {
+      // Log the miss so future backend/frontend key drift is loud
+      // instead of silent no-op audio (this was how the Eigenmode
+      // Journey's Aurora/Grounding/Solfeggio Wash tracks stayed mute
+      // for weeks: the backend catalog referenced ref="aurora" but the
+      // frontend key is "aurora_bath").
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[soundBathEngine] Unknown preset "${presetKey}" — no bath will play. `
+        + `Valid keys: ${Object.keys(BATH_PRESETS).join(', ')}`,
+      );
+      return;
+    }
     // Re-starting = new arrangement. Stop the current bath cleanly first so
     // scheduled notes finish naturally rather than piling on top of the new
     // preset.
