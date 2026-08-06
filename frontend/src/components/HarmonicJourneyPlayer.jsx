@@ -79,6 +79,17 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
     await new Promise((r) => setTimeout(r, 900));
     try {
       if (track.type === 'soundbath' && track.ref) {
+        // CRITICAL: start audioEngine first so its AudioContext stays
+        // "running" (not suspended by the browser after `stopEverything()`
+        // and the 900 ms wait). Without this, `getSoundBath.start()` calls
+        // `_ensureCtx()` which tries `ctx.resume()` — but resume() requires
+        // a live user gesture, which we've already lost through the async
+        // sleep. Result: on mobile Safari the context stays suspended and
+        // the bath schedules notes into silence. Dashboard's SoundBathPanel
+        // does the same thing (see clickPreset). The main oscillator sits
+        // at zero gain and produces no audible tone — it just keeps the
+        // context alive so the bath's oscillators can be heard.
+        try { await audioEngine.start(); } catch (e) { /* graceful */ }
         await getSoundBath(audioEngine).start(track.ref);
       } else {
         // Set the target frequency FIRST so audioEngine.start() picks it up
