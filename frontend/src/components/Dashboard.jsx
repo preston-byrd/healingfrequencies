@@ -152,7 +152,16 @@ export default function Dashboard({ onOpenAccount }) {
   const { isPro, refresh: refreshSub, sub } = useSubscription();
   const [state, setState] = useState(audioEngine.getState());
   const [duration, setDuration] = useState(10); // minutes
-  const [remaining, setRemaining] = useState(0); // seconds; 0 = not running
+  // Restore `remaining` from `audioEngine.sessionEndAt` on mount so the
+  // countdown survives Dashboard being unmounted (e.g. user visited
+  // /account mid-session and came back). Without this, the timer
+  // display renders 00:00 while the audio is still playing — the
+  // singleton has kept going but React state was thrown away.
+  const [remaining, setRemaining] = useState(() => {
+    const endAt = audioEngine.sessionEndAt || 0;
+    if (!endAt || endAt <= Date.now()) return 0;
+    return Math.max(0, Math.round((endAt - Date.now()) / 1000));
+  }); // seconds; 0 = not running
   const [breathwork, setBreathwork] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [saveName, setSaveName] = useState('');
@@ -319,6 +328,21 @@ export default function Dashboard({ onOpenAccount }) {
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.playing, remaining > 0]);
+
+  // Persist the session's wall-clock end time on the audioEngine
+  // singleton so the countdown can be restored when Dashboard remounts
+  // (e.g. after the user detours through /account mid-session). The
+  // singleton outlives React state; without this, `remaining` would
+  // reset to 0 on remount while audio kept playing — the reported bug.
+  // When `remaining` drops to 0 we clear the anchor so a fresh mount
+  // doesn't see stale data.
+  useEffect(() => {
+    if (state.playing && remaining > 0) {
+      audioEngine.sessionEndAt = Date.now() + remaining * 1000;
+    } else if (!state.playing) {
+      audioEngine.sessionEndAt = 0;
+    }
+  }, [state.playing, remaining]);
 
   // Reset the fade-arm flag whenever playback stops or a fresh session starts.
   // Without this, a session shorter than 5min would never re-arm because the

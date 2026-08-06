@@ -843,6 +843,7 @@ function FreePreviewPanel({ journey, journeyLoading, journeyError, isPro, onUpgr
           isPro={isPro}
           onUpgrade={onUpgrade}
           onRegenerate={onRegenerate}
+          regenerating={journeyLoading}
         />
       )}
     </div>
@@ -1040,6 +1041,7 @@ function ResultsPanel({ profile, eigenmode, journey, journeyLoading, journeyErro
           isPro={isPro}
           onUpgrade={onOpenAccount}
           onRegenerate={onGenerateJourney}
+          regenerating={journeyLoading}
         />
       ) : (
         <div className="glass p-6" data-testid="harmonic-journey-cta">

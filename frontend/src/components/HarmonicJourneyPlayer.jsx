@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, Square, Sparkles, Lock, Clock, Waves } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, Square, Sparkles, Lock, Clock, Waves, Loader2 } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
@@ -16,12 +16,17 @@ import { getSoundBath } from '@/lib/soundBathEngine';
  *   isPro       — bool. Only affects the upgrade CTA / preview badge.
  *   onUpgrade   — () => void. Routes to the paywall for free users.
  *   onRegenerate — () => void. Requests a new journey.
+ *   regenerating — bool. When true, the Regenerate button shows a
+ *                  spinner + "Regenerating…" label and is disabled so
+ *                  the user gets clear feedback while the server-side
+ *                  playlist composer runs (can take 15–20 s on cold
+ *                  Claude calls).
  *
  * The component owns its playback state locally; audioEngine + soundBath
  * are global singletons so playback survives step changes within the sheet,
  * but stops when the parent sheet unmounts (matches Dashboard behaviour).
  */
-export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onRegenerate }) {
+export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onRegenerate, regenerating = false }) {
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -202,9 +207,11 @@ export default function HarmonicJourneyPlayer({ journey, isPro, onUpgrade, onReg
             data-testid="harmonic-journey-regenerate-button"
             type="button"
             onClick={onRegenerate}
-            className="text-[#8A9A92] hover:text-[#72C2AC] text-xs tracking-widest uppercase transition-colors"
+            disabled={regenerating}
+            className="text-[#8A9A92] hover:text-[#72C2AC] text-xs tracking-widest uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
           >
-            Regenerate
+            {regenerating && <Loader2 size={11} className="animate-spin" />}
+            {regenerating ? 'Regenerating…' : 'Regenerate'}
           </button>
         </div>
       </div>

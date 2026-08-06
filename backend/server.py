@@ -2381,6 +2381,25 @@ async def harmonic_blueprint_before_after(user: dict = Depends(get_current_user)
         sort=[("created_at", -1)],
     )
     if not latest:
+        # Differentiate "first-time user" vs "user who reset their
+        # baseline after having built a side-by-side map before". The
+        # only signal is whether ANY non-eigenmode capture (even one
+        # older than the current eigenmode, i.e. left over from before
+        # the reset) exists.
+        prior_readings = await db.resonance_profiles.count_documents({
+            "user_id": user["id"],
+            "is_eigenmode": {"$ne": True},
+        })
+        if prior_readings > 0:
+            summary = (
+                "You've reset your baseline. Take a fresh Harmonic "
+                "Blueprint reading to unlock your updated side-by-side map."
+            )
+        else:
+            summary = (
+                "Your baseline is captured. Take a fresh Harmonic Blueprint "
+                "reading to unlock your first side-by-side map."
+            )
         return {
             "baseline": {
                 "id": eigen.get("id"),
@@ -2389,10 +2408,7 @@ async def harmonic_blueprint_before_after(user: dict = Depends(get_current_user)
             },
             "latest": None,
             "band_deltas": [],
-            "summary_text": (
-                "Your baseline is captured. Take a fresh Harmonic Blueprint "
-                "reading to unlock your first side-by-side map."
-            ),
+            "summary_text": summary,
             "session_count": 0,
             "show_celebration": False,
         }

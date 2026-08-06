@@ -70,6 +70,12 @@ class AudioEngine {
     this._mediaSessionBound = false;
 
     this.playing = false;
+    // Wall-clock timestamp (ms since epoch) at which the current session's
+    // Smart-Fade timer is scheduled to hit 00:00. Kept on the singleton
+    // (not React state) so Dashboard.jsx can restore the correct
+    // countdown after remounting — e.g. when the user visits /account
+    // mid-session and comes back. `0` means "no active session countdown".
+    this.sessionEndAt = 0;
     this.listeners = new Set();
   }
 
@@ -756,6 +762,9 @@ class AudioEngine {
     // anything between now and then should stay silent.
     this._sessionFadeActive = false;
     this._sessionFadeEndsAt = 0;
+    // Clear the persisted timer end so a fresh remount doesn't restore a
+    // stale countdown after the user has stopped the session.
+    this.sessionEndAt = 0;
     // Capture the CURRENT oscillators locally and null the instance refs immediately
     // so that a subsequent start() (within the cleanup window) doesn't get its
     // brand-new oscillator clobbered when the cleanup timeout fires.

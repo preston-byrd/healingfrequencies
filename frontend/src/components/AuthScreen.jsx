@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
-import { formatApiError } from '@/lib/api';
+import { formatApiError, warmBackend } from '@/lib/api';
 import ForgotPasswordModal from '@/components/ForgotPasswordModal';
 import { LOGIN } from '@/constants/testIds/auth';
 
@@ -28,6 +28,15 @@ export default function AuthScreen() {
   const [canRetry, setCanRetry] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
+
+  // Warm the backend the moment the sign-in screen mounts so DNS + TLS
+  // + any Cloudflare/cold-start latency happens while the user is
+  // typing their credentials, not during the actual login POST. On
+  // cellular this often turns a would-be "Network Error" (first-POST
+  // race with the origin still spinning up) into a successful sign-in.
+  useEffect(() => {
+    warmBackend();
+  }, []);
 
   const attempt = async () => {
     setErr('');

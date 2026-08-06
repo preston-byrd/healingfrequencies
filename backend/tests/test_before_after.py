@@ -289,3 +289,46 @@ def test_before_after_uses_only_post_baseline_captures(pro_user):
     )
     # Only the ONE post-baseline capture counts toward session_count.
     assert body["session_count"] == 1
+
+
+def test_before_after_first_time_vs_reset_baseline_copy(pro_user):
+    """The `summary_text` in the empty (`latest=None`) branch must differ
+    for a brand-new user vs a user who has RESET their baseline after
+    having generated side-by-side maps before. Regression against
+    "Your first side-by-side map" showing for someone who has clearly
+    already had one.
+    """
+    email, pw, uid = pro_user
+    now = datetime.now(timezone.utc)
+    # Scenario A — brand new: only an eigenmode, no other captures.
+    _mongo_col("resonance_profiles").insert_one({
+        "id": f"eig-{uuid.uuid4().hex[:8]}", "user_id": uid,
+        "created_at": now.isoformat(),
+        "is_eigenmode": True, "resonance_score": 100,
+        "bands": _bands({}), "spectrum": [], "confirmed_gaps": [],
+    })
+    tok = _login(email, pw)
+    body = requests.get(f"{API}/harmonic-blueprint/before-after",
+                       headers={"Authorization": f"Bearer {tok}"}).json()
+    assert body["latest"] is None
+    assert "first side-by-side" in body["summary_text"].lower(), body["summary_text"]
+
+    # Scenario B — user had prior comparisons then reset baseline.
+    # Simulate by inserting an OLDER non-eigenmode capture (which the
+    # `latest` query correctly ignores since it's not newer than the
+    # eigenmode) plus keeping the same newer eigenmode.
+    _mongo_col("resonance_profiles").insert_one({
+        "id": f"old-{uuid.uuid4().hex[:8]}", "user_id": uid,
+        "created_at": (now - timedelta(days=10)).isoformat(),
+        "is_eigenmode": False, "resonance_score": 78,
+        "bands": _bands({"mid": 2}), "spectrum": [], "confirmed_gaps": [],
+    })
+    body2 = requests.get(f"{API}/harmonic-blueprint/before-after",
+                        headers={"Authorization": f"Bearer {tok}"}).json()
+    assert body2["latest"] is None, body2
+    # New copy explicitly acknowledges the reset flow.
+    assert "reset your baseline" in body2["summary_text"].lower(), body2["summary_text"]
+    assert "updated side-by-side" in body2["summary_text"].lower(), body2["summary_text"]
+    # And the "first side-by-side" phrase must NOT appear anymore.
+    assert "first side-by-side" not in body2["summary_text"].lower(), body2["summary_text"]
+

@@ -1,0 +1,23 @@
+{
+  "summary": "Verified all four production fixes on solarisound.com (Issues 1-4). Backend: 9/9 before-after pytest tests pass including the new reset-baseline copy regression. Frontend E2E: (a) AuthScreen mount fires exactly 1 GET /api/health warmup, (b) simulated Network Error on /api/auth/login triggers exactly 3 retry attempts with 500ms/1500ms backoff and surfaces the friendly error, (c) Dashboard timer persists correctly across Account navigation (04:57 -> 04:47 after ~10s on /account, audio continued playing). Regenerate button code inspection confirmed spinner+disabled state passed via regenerating={journeyLoading} on both FreePreviewPanel (line 845-846) and ResultsPanel (line 1042-1044) call sites; HarmonicJourneyPlayer renders <Loader2 animate-spin/> + 'Regenerating...' text and disables the button.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_before_after.py",
+    "/app/test_reports/pytest/iter67_before_after.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Dashboard.jsx is 2522 lines — well over the 700-line guideline. Consider splitting into sub-components (timer, presets, sound-bath, soundscapes) in a follow-up.",
+    "audioEngine.sessionEndAt is a plain field on the singleton; it correctly survives Dashboard unmount. The `useEffect([state.playing, remaining])` correctly re-anchors it on every tick which is a bit chatty (writes every second) but harmless.",
+    "api.js LOGIN_MAX_ATTEMPTS=3 with backoffs [500, 1500] correctly totals 3 attempts (initial + 2 retries) — verified by counting page.route abort invocations."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100% (Issues 1,3,4 verified end-to-end; Issue 2 also covered by backend test)"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (Pro)",
+  "seed_data_creation": "None (pytest fixtures create/cleanup ephemeral pro_user rows in resonance_profiles).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 4 solarisound.com production issues fixed in iteration 67 verified: (1) HarmonicJourneyPlayer regenerate spinner+disabled, (2) reset-baseline empty-state copy differs from first-time copy, (3) Dashboard timer restores from audioEngine.sessionEndAt on remount, (4) AuthScreen warms backend once and login POST retries 3x on Network Error. The window.solarisoundAudioEngine debug handle is NOT exposed globally — for future tests inspecting sessionEndAt directly, either expose it in dev builds or infer from timer-display text as done here.",
+  "rca of the issue": "Issue 3 root cause was that `remaining` was a plain React useState initialized to 0; when Dashboard unmounted on /account nav, the state was thrown away and re-initialized to 0 on remount even though audioEngine (module singleton) kept ticking. Fix: added audioEngine.sessionEndAt field, hydrated `remaining` useState initializer from it, and mirrored writes on every playing+remaining change. Issue 4 root cause was that cellular carriers (LTE/NAT/HTTP3) frequently drop the first POST /api/auth/login before TLS completes; the previous single-shot retry wasn't enough. Fix: /auth/login|register now get 3-attempt exponential-backoff budget on Network Error (500ms then 1500ms) plus an eager GET /api/health warmup on AuthScreen mount to pay DNS+TLS+cold-start cost before the user submits."
+}

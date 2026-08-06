@@ -26,9 +26,16 @@ api.interceptors.request.use((config) => {
 // = origin briefly unreachable, 503/504 = overloaded). Only retries idempotent
 // requests OR the login/register endpoints — never blindly retries
 // destructive mutations.
+//
+// Cellular login on iOS Safari is flaky enough (carrier NAT + HTTP/3 quirks
+// + bcrypt latency) that /auth/login gets a 3-attempt exponential-backoff
+// budget on Network Error before we surface the failure to the user. Other
+// paths keep the single-shot behaviour.
 const RETRY_SAFE_METHODS = new Set(['get', 'head', 'options']);
 const RETRY_ALLOWLIST_PATHS = ['/auth/login', '/auth/register', '/auth/me'];
 const RETRY_EDGE_STATUSES = new Set([502, 503, 504, 520, 521, 522]);
+const LOGIN_MAX_ATTEMPTS = 3;         // total attempts, incl. initial
+const LOGIN_BACKOFFS_MS = [500, 1500]; // between attempts 1→2, 2→3
 
 api.interceptors.response.use(
   (r) => r,
@@ -37,23 +44,52 @@ api.interceptors.response.use(
     const isNetwork = error && (error.code === 'ECONNABORTED' || error.message === 'Network Error');
     const status = error?.response?.status;
     const isTransientEdge = status && RETRY_EDGE_STATUSES.has(status);
-    if (cfg && (isNetwork || isTransientEdge) && !cfg.__retried) {
-      const method = (cfg.method || 'get').toLowerCase();
-      const path = (cfg.url || '').replace(cfg.baseURL || '', '');
-      const canRetry = RETRY_SAFE_METHODS.has(method) ||
-        RETRY_ALLOWLIST_PATHS.some((p) => path.startsWith(p));
-      if (canRetry) {
-        cfg.__retried = true;
-        // Slightly longer backoff for edge errors so a cold origin has
-        // time to spin up before the second attempt.
-        const delay = isTransientEdge ? 1400 : 800;
+    if (!cfg || (!isNetwork && !isTransientEdge)) return Promise.reject(error);
+    const method = (cfg.method || 'get').toLowerCase();
+    const path = (cfg.url || '').replace(cfg.baseURL || '', '');
+    const isLoginPath = path.startsWith('/auth/login') || path.startsWith('/auth/register');
+    const canRetry = RETRY_SAFE_METHODS.has(method) ||
+      RETRY_ALLOWLIST_PATHS.some((p) => path.startsWith(p));
+    if (!canRetry) return Promise.reject(error);
+
+    // Multi-attempt path — only for pure Network Error on /auth/login|register,
+    // where cellular carriers can drop the first (or second) POST before the
+    // TCP/TLS/HTTP round-trip completes. Give it a small budget of 3 total
+    // attempts with backoff before surrendering. Edge 5xx and non-auth paths
+    // stay on the classic single-retry to avoid amplifying real outages.
+    if (isNetwork && isLoginPath) {
+      cfg.__loginAttempt = (cfg.__loginAttempt || 1) + 1;
+      if (cfg.__loginAttempt <= LOGIN_MAX_ATTEMPTS) {
+        const delay = LOGIN_BACKOFFS_MS[cfg.__loginAttempt - 2] || 1500;
         await new Promise((r) => setTimeout(r, delay));
         return api.request(cfg);
       }
+      return Promise.reject(error);
     }
-    return Promise.reject(error);
+
+    // Classic single-shot retry for everything else that's retry-eligible.
+    if (cfg.__retried) return Promise.reject(error);
+    cfg.__retried = true;
+    const delay = isTransientEdge ? 1400 : 800;
+    await new Promise((r) => setTimeout(r, delay));
+    return api.request(cfg);
   },
 );
+
+// Silent backend warmup — fires a very-cheap GET to /api/health so DNS,
+// TLS, and any cold-start container spin-up happen while the user is
+// still typing their credentials rather than during the login POST
+// itself. On cellular this saves ~1–3 s on the first real request and
+// often turns a would-be "Network Error" into a successful sign-in.
+// Called once per browser session (see the `_warmed` guard).
+let _warmed = false;
+export function warmBackend() {
+  if (_warmed) return;
+  _warmed = true;
+  try {
+    api.get('/health', { timeout: 8000, __retried: true }).catch(() => { /* silent */ });
+  } catch (_) { /* silent */ }
+}
 
 export default api;
 
