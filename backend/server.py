@@ -125,36 +125,59 @@ def _metric_summary(name: str) -> dict:
 def _client_ip(request: Request) -> str:
     """Best-effort client IP derivation with XFF spoofing mitigation.
 
-    SECURITY: Naively trusting the FIRST value in `X-Forwarded-For` lets an
-    attacker put an arbitrary value there and get a fresh rate-limit bucket
-    (bypassing per-IP login/register throttles) plus pollute audit logs.
+    Priority order (most reliable first):
+      1. `CF-Connecting-IP` — Cloudflare's own header carrying the real
+         client IP. Cloudflare fronts solarisound.com so this is present
+         and cannot be spoofed by clients (only Cloudflare sets it).
+      2. `True-Client-IP` — Akamai/CF Enterprise variant, same trust
+         model as CF-Connecting-IP.
+      3. `X-Real-IP` — set by some ingress controllers (nginx-ingress)
+         to the immediate client.
+      4. `X-Forwarded-For` RIGHT-most public entry (walking r→l,
+         skipping private hops) — spoof-resistant fallback used only
+         when none of the 1–3 headers are present. On multi-hop
+         topologies this can land on our own outer LB (`34.160.64.205`
+         — which is why every audit-log row on solarisound.com had that
+         same IP before this fix), but that's still preferable to
+         trusting a left-most value that clients can prepend.
+      5. `request.client.host` — direct peer, only useful when nothing
+         else is present.
 
-    Mitigation: only trust XFF at all when the direct peer (`request.client`)
-    is our known proxy hop. The Emergent ingress terminates client
-    connections and adds its own XFF header, so from the app's POV the
-    direct peer is a private-range IP. When that's true, we take the
-    RIGHT-MOST public IP in the chain — that's the one added by the
-    outermost trusted proxy and cannot be spoofed by clients further out
-    (they can only append; they can't rewrite what the proxy prepends).
-
-    When the direct peer is a public IP (e.g. running the pod locally
-    without a proxy), we ignore XFF entirely and use `request.client.host`.
+    We only trust the headers when the direct peer is one of our known
+    proxy hops (private-range IP). If the pod is reached directly from
+    a public IP, we ignore all forwarded headers and use the peer.
     """
     peer = ""
     try:
         peer = (request.client.host or "")
     except Exception:
         peer = ""
-    trust_xff = _is_private_peer(peer)
-    if trust_xff:
-        xff = request.headers.get("x-forwarded-for") or ""
-        # Walk right-to-left, skip the private-range hops that our own
-        # proxies added, and return the last PUBLIC address before them.
-        candidates = [c.strip() for c in xff.split(",") if c.strip()]
-        for ip in reversed(candidates):
-            if not _is_private_peer(ip):
-                return ip[:64]
-        # All entries were private — fall through to peer.
+
+    # If the direct peer is public, we're not behind a trusted proxy
+    # (e.g. local dev without ingress). Ignore forwarded headers.
+    if not _is_private_peer(peer):
+        return (peer or "unknown")[:64]
+
+    # Behind a proxy — walk the trusted-header priority list.
+    for header in ("cf-connecting-ip", "true-client-ip", "x-real-ip"):
+        val = (request.headers.get(header) or "").strip()
+        if val and not _is_private_peer(val):
+            return val[:64]
+
+    # Fall back to XFF. Take the RIGHT-most public entry (walking right-
+    # to-left, skipping private hops) — that's the entry added by our
+    # outermost trusted proxy and cannot be spoofed by clients further
+    # out (they can only prepend; the proxy always appends). May still
+    # land on our own outer LB (`34.160.64.205`), but on solarisound.com
+    # the CF-Connecting-IP path above catches the real client first, so
+    # this XFF fallback only fires on edge cases (pod hit directly by an
+    # ingress that doesn't set X-Real-IP or CF headers).
+    xff = request.headers.get("x-forwarded-for") or ""
+    candidates = [c.strip() for c in xff.split(",") if c.strip()]
+    for ip in reversed(candidates):
+        if not _is_private_peer(ip):
+            return ip[:64]
+
     return (peer or "unknown")[:64]
 
 
