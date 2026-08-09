@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Inbox, RefreshCw, Search, Send, CheckCircle, Trash2, RotateCcw, Loader2, ChevronDown, ChevronRight, X } from 'lucide-react';
+import { Inbox, RefreshCw, Search, Send, CheckCircle, Trash2, RotateCcw, Loader2, ChevronDown, ChevronRight } from 'lucide-react';
 import api from '@/lib/api';
 
 /**
@@ -77,6 +77,11 @@ export default function AdminSupportInbox() {
 
   const switchTab = (tab) => {
     setStatus(tab);
+    // Collapse any open row when switching tabs — otherwise a ticket that
+    // was expanded on the previous tab appears expanded on the new tab too
+    // (e.g. resolve a ticket on Open → hop to Resolved → it's pre-expanded
+    // which reads as "why is this open?"). Cheap UX win.
+    setExpandedId(null);
     load(tab, query, 0);
   };
 
