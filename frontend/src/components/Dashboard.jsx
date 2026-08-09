@@ -7,6 +7,7 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
 import WellnessCheckinCard from '@/components/WellnessCheckinCard';
+import SessionShareCard from '@/components/SessionShareCard';
 import SessionUnlockCard from '@/components/SessionUnlockCard';
 import FlowModePanel from '@/components/FlowModePanel';
 import StreakPanel from '@/components/StreakPanel';
@@ -207,9 +208,20 @@ export default function Dashboard({ onOpenAccount }) {
   // the assistant flow gracefully.
   const assistantOwnedRef = React.useRef(false);
   const [checkinOpen, setCheckinOpen] = useState(false);
+  // Post-session share card — soft, optional "Share your session" overlay
+  // that surfaces below the check-in modal when the user taps the share
+  // affordance. `shareSession` is the frozen snapshot of the session that
+  // just wrapped (frequency, name, duration, visualizer, flow journey) so
+  // the card can render even if the user changes settings after the fade.
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareSession, setShareSession] = useState(null);
   // Flow Mode current stage — {stageIdx: 0|1|2, meta: {hz, name, sub}} while
   // a journey is running; null otherwise. Powers the visualiser overlay.
   const [flowStage, setFlowStage] = useState(null);
+  // Flow Mode journey descriptor — {key, label, ...} captured when a flow
+  // starts so the post-session share card can label Pro shares with the
+  // full journey name (e.g. "Deep Restore Journey · 60 min").
+  const [activeFlowJourney, setActiveFlowJourney] = useState(null);
   // Saved-session lock — free / trial-expired users can still see their
   // saved sessions (safely stored, never deleted) but tapping any of them
   // opens the SessionUnlockCard upgrade prompt instead of loading. Data is
@@ -474,6 +486,33 @@ export default function Dashboard({ onOpenAccount }) {
       // step 2 gracefully falls back to closing when entry_id is null.
       if (pendingCheckinRef.current) {
         pendingCheckinRef.current = false;
+        // Freeze the just-completed session's metadata so the optional
+        // "Share your session" card renders consistently even if the user
+        // changes frequency / visualizer between the check-in appearing
+        // and tapping share. Look-ups mirror the "Now Tuning" label logic
+        // (SOLFEGGIO/SPECIALS/soundscape/flow stage) so the card matches
+        // what the user saw on-screen during playback.
+        try {
+          const hz = Number(state.frequency);
+          const solf = SOLFEGGIO.find((p) => p.hz === Math.round(hz));
+          const spec = SPECIALS.find((p) => Math.abs(p.hz - hz) < 0.05);
+          const scape = activeSoundscape ? SOUNDSCAPES.find((s) => s.key === activeSoundscape) : null;
+          const flowMeta = flowStage?.meta || null;
+          const name = flowMeta?.name || scape?.name || solf?.name || spec?.name || `${hz.toFixed(1)} Hz`;
+          const desc = flowMeta?.sub || solf?.desc || spec?.desc || null;
+          const visLabelMap = { rings: 'Rings · Waves', chladni: 'Chladni · Cymatics', ripples: 'Ripples · Resonance' };
+          const flowJourneyLabel = activeFlowJourney?.label
+            ? `${activeFlowJourney.label} Journey`
+            : null;
+          setShareSession({
+            frequencyHz: Number.isFinite(hz) ? hz : 0,
+            frequencyName: name,
+            frequencyDesc: desc,
+            durationMin: Math.max(1, Math.round((actualMs || 0) / 60000)),
+            visualLabel: visLabelMap[visualMode] || 'Rings · Waves',
+            journeyLabel: flowJourneyLabel,
+          });
+        } catch (e) { console.warn('[Dashboard] share snapshot failed', e); }
         setCheckinOpen(true);
         // Also drop a post-session check-in nudge into the notification
         // center so users who dismiss the inline card can still find their
@@ -486,7 +525,7 @@ export default function Dashboard({ onOpenAccount }) {
         try { setTimeout(() => requestPushOptInIfWarm(), 4200); } catch (_) {}
       }
     }
-  }, [state.frequency, state.waveform, state.binaural, state.ambient, activeSoundscape]);
+  }, [state.frequency, state.waveform, state.binaural, state.ambient, activeSoundscape, visualMode, flowStage, activeFlowJourney]);
 
   useEffect(() => {
     if (state.playing && !sessionStart) {
@@ -1904,6 +1943,14 @@ export default function Dashboard({ onOpenAccount }) {
             onContinue={continueCheckin}
             onDone={dismissCheckin}
             journeyEntryId={lastJourneyEntryId}
+            onShare={shareSession ? () => setShareOpen(true) : undefined}
+          />
+          <SessionShareCard
+            open={shareOpen}
+            onClose={() => setShareOpen(false)}
+            isPro={isPro}
+            onUpgrade={onOpenAccount}
+            session={shareSession}
           />
           <SessionUnlockCard
             open={sessionUnlockOpen}
@@ -2268,11 +2315,12 @@ export default function Dashboard({ onOpenAccount }) {
           <FlowModePanel
             isPro={isPro}
             solfeggioList={SOLFEGGIO.map((p) => ({ hz: p.hz, label: p.name, sub: p.desc }))}
-            onFlowStart={(mins) => { setDuration(mins); setRemaining(mins * 60); }}
+            onFlowStart={(mins, journey) => { setDuration(mins); setRemaining(mins * 60); setActiveFlowJourney(journey || null); }}
             onFlowStop={() => {
               setRemaining(0);
               try { audioEngine.stop(); } catch (e) { /* graceful */ }
               setFlowStage(null);
+              setActiveFlowJourney(null);
             }}
             onStageChange={(stageIdx, meta) => {
               setFlowStage(meta ? { stageIdx, meta } : null);

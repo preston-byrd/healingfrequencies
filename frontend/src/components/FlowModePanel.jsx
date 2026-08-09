@@ -62,7 +62,11 @@ export default function FlowModePanel({
     // entry-fade kicks in.
     await new Promise((r) => setTimeout(r, 120));
     await flow.start(journey, mins);
-    onFlowStart && onFlowStart(mins);
+    // Pass the journey descriptor along so Dashboard can label the
+    // post-session share card with the exact flow the user just completed
+    // (e.g. "Deep Restore Journey · 60 min"). Older call-sites that only
+    // consume `mins` remain compatible thanks to positional arity.
+    onFlowStart && onFlowStart(mins, journey);
   };
 
   const clickJourney = (key) => {

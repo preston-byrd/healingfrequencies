@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { Heart, X, Sparkles, Loader2 } from 'lucide-react';
+import { Heart, X, Sparkles, Loader2, Share2 } from 'lucide-react';
 import api from '@/lib/api';
 
 /**
@@ -22,6 +22,9 @@ import api from '@/lib/api';
  *                     no reflection was submitted, closes silently.
  *   journeyEntryId  — id returned from POST /me/journey/log for the session
  *                     that just ended. When present, enables step 2.
+ *   onShare         — optional; when provided, renders a soft "Share your
+ *                     session" button below the two primary actions on
+ *                     step 1. Never a popup, always dismissable.
  */
 
 const REFLECTION_QUESTIONS = [
@@ -37,7 +40,7 @@ function pickQuestion() {
   return REFLECTION_QUESTIONS[Math.floor(Math.random() * REFLECTION_QUESTIONS.length)];
 }
 
-export default function WellnessCheckinCard({ open, onContinue, onDone, journeyEntryId }) {
+export default function WellnessCheckinCard({ open, onContinue, onDone, journeyEntryId, onShare }) {
   const [step, setStep] = useState(1);
   const [response, setResponse] = useState('');
   const [saving, setSaving] = useState(false);
@@ -133,6 +136,16 @@ export default function WellnessCheckinCard({ open, onContinue, onDone, journeyE
               >
                 I&rsquo;m good, thank you
               </button>
+              {onShare && (
+                <button
+                  data-testid="wellness-checkin-share"
+                  onClick={onShare}
+                  className="w-full mt-1 py-2 rounded-lg text-[#C4A67A] hover:text-[#E8B872] text-xs tracking-wide transition-colors inline-flex items-center justify-center gap-1.5"
+                >
+                  <Share2 size={12} />
+                  Share your session
+                </button>
+              )}
             </div>
           </>
         )}
