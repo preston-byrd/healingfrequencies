@@ -591,3 +591,11 @@
   - **Files** — `frontend/src/components/SessionShareCard.jsx` (new), `frontend/src/components/WellnessCheckinCard.jsx` (optional onShare prop + step-1 button), `frontend/src/components/Dashboard.jsx` (shareOpen/shareSession state, snapshot capture, share card render), `frontend/src/components/FlowModePanel.jsx` (onFlowStart passes journey descriptor).
   - **NOTE** — production-observable. Redeploy required to reach solarisound.com.
 
+
+- **Shareable Session Card — iOS Safari usability fix (Feb 2026, iter 71)**: User reported that on iOS Safari the native share sheet showed only Messages / AirDrop / Notes (no Instagram / TikTok / WhatsApp) and the card was not downloadable. Root cause: (a) Instagram, TikTok and WhatsApp deliberately do not register PNG file-share extensions from Safari's Web Share API — the omission is on their side, we can't force them into the sheet. (b) Our first pass rendered EITHER the Share button OR the Download button, so on iOS the Download path was unreachable. (c) Even when the Download button was reachable, iOS Safari ignores the `<a download>` attribute on `blob:` URLs.
+  - **Fix** — `SessionShareCard.jsx` now always renders the Download button in a second slot alongside Share (Share becomes primary, Download becomes secondary/subtle when Web Share is supported; Download becomes primary on desktop where Web Share is absent). Added a small helper tip line: *"Tip: for Instagram or TikTok, save the card and upload from your camera roll."* Rewrote `triggerDownload` to detect iOS Safari (`/iPad|iPhone|iPod/` UA + iPadOS's MacIntel+touch heuristic) and open the blob URL in a new tab (long-press → Save to Photos) instead of relying on the ignored `<a download>` attribute.
+  - **Verified** — testing_agent_v3_fork iter_69: 11/11 scenarios pass at 100%. Confirmed BOTH buttons render together when supported, tip line appears with the exact copy, iOS UA override triggers the new-tab code path (no phantom `<a download>` event), Pro/Free flags preserved, all three dismissal paths still work, canvas render still produces valid data URL.
+  - **Files** — `frontend/src/components/SessionShareCard.jsx` (triggerDownload iOS branch, button block refactor, tip line addition).
+  - **NOTE** — production-observable. Redeploy required.
+
+
