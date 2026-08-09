@@ -8,6 +8,7 @@ import AccountDashboard from '@/components/AccountDashboard';
 import LandingPage from '@/components/LandingPage';
 import PlayDeepLink from '@/components/PlayDeepLink';
 import ResetPasswordView from '@/components/ResetPasswordView';
+import SupportBubble from '@/components/SupportBubble';
 
 const LANDING_DISMISSED_KEY = 'solarisound:landing_dismissed';
 
@@ -103,18 +104,26 @@ function Shell() {
   }
 
   if (view === 'account') return (
-    <AccountDashboard
-      onBack={() => setView('main')}
-      onOpenHarmonicBlueprint={() => {
-        // Signal Dashboard to auto-open the HB sheet after we route back
-        // to the main view. Cheap cross-view handoff without adding a
-        // shared context just for this one action.
-        try { sessionStorage.setItem('solarisound:open_hb', '1'); } catch (_) {}
-        setView('main');
-      }}
-    />
+    <>
+      <AccountDashboard
+        onBack={() => setView('main')}
+        onOpenHarmonicBlueprint={() => {
+          // Signal Dashboard to auto-open the HB sheet after we route back
+          // to the main view. Cheap cross-view handoff without adding a
+          // shared context just for this one action.
+          try { sessionStorage.setItem('solarisound:open_hb', '1'); } catch (_) {}
+          setView('main');
+        }}
+      />
+      <SupportBubble />
+    </>
   );
-  return <Dashboard onOpenAccount={() => setView('account')} />;
+  return (
+    <>
+      <Dashboard onOpenAccount={() => setView('account')} />
+      <SupportBubble />
+    </>
+  );
 }
 
 export default function App() {

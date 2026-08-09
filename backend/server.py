@@ -823,6 +823,160 @@ async def me(user: dict = Depends(get_current_user)):
     return user
 
 
+# --- Support / contact form -------------------------------------------------
+# In-app floating "Support Bubble" — logged-in users can send a short message
+# to the Solarisound admin inbox picking one of six reasons. Delivered via
+# Resend (same transport used for admin sign-up notifications) with the
+# subject formatted as "[{Reason}] - Solarisound Support" per the product
+# spec. Rate-limited per user + IP to prevent abuse; the message body is
+# HTML-escaped before it hits the email template so nothing the user types
+# can break the layout or inject markup.
+
+_SUPPORT_REASONS = {
+    "report_issue":      "Report an Issue",
+    "share_feedback":    "Share Feedback",
+    "express_gratitude": "Express Gratitude",
+    "feature_request":   "Feature Request",
+    "billing_question":  "Billing Question",
+    "other":             "Other",
+}
+
+
+class SupportContactIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=10, max_length=4000)
+    # Name / email are pre-filled from /auth/me on the frontend but we accept
+    # user-provided overrides so someone signed in as one identity can still
+    # sign the message with a different display name if they want to.
+    name: Optional[str] = Field(default=None, max_length=120)
+    email: Optional[EmailStr] = None
+
+
+def _html_escape(s: str) -> str:
+    return (
+        (s or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+@api.post("/support/contact")
+async def support_contact(
+    body: SupportContactIn,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    reason_label = _SUPPORT_REASONS.get(body.reason)
+    if not reason_label:
+        raise HTTPException(status_code=400, detail="Unknown reason")
+
+    ip = _client_ip(request)
+    # Per-user AND per-IP rate limits — 3 messages / 10 minutes on each. The
+    # per-IP bucket catches shared-account abuse; the per-user bucket catches
+    # a single account rotating IPs. Refill = 1 per 200s → 3 in 10 minutes.
+    _rate_limit_or_429(f"support:user:{user['id']}", capacity=3, refill_per_sec=1 / 200, label="support message")
+    _rate_limit_or_429(f"support:ip:{ip}",           capacity=5, refill_per_sec=1 / 120, label="support message")
+
+    display_name = (body.name or user.get("name") or "").strip()[:120]
+    reply_email  = (body.email or user.get("email") or "").strip()[:200]
+    msg          = body.message.strip()
+    when_iso     = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Log to DB so admins have a searchable audit trail even if the Resend
+    # send fails (email is best-effort; the message is never lost).
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "user_name": user.get("name"),
+        "reason_key": body.reason,
+        "reason_label": reason_label,
+        "message": msg,
+        "reply_to_email": reply_email,
+        "reply_to_name": display_name,
+        "ip": ip,
+        "user_agent": (request.headers.get("user-agent") or "")[:512],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "delivered": False,
+        "provider": "resend" if (_resend and _RESEND_API_KEY) else "none",
+    }
+    try:
+        await db.support_messages.insert_one(doc)
+    except Exception as e:
+        logger.warning("[support] db insert failed: %s", type(e).__name__)
+
+    delivered = False
+    if _resend and _RESEND_API_KEY and _RESEND_ADMIN_RECIPIENT:
+        # Escape everything user-controlled before it hits the HTML template.
+        safe_name  = _html_escape(display_name or "(no name provided)")
+        safe_email = _html_escape(reply_email or "(no email provided)")
+        safe_msg   = _html_escape(msg).replace("\n", "<br/>")
+        safe_ip    = _html_escape(ip or "unknown")[:64]
+        safe_ua    = _html_escape((request.headers.get("user-agent") or "")[:256])
+        html = f"""
+        <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+          <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound · Support</td></tr>
+          <tr><td style="padding-top: 8px; font-size: 20px; font-weight: 500; color: #E8E3D9;">{_html_escape(reason_label)}</td></tr>
+          <tr><td style="padding-top: 4px; font-size: 13px; color: #8A9A92;">from {safe_name} &lt;{safe_email}&gt;</td></tr>
+          <tr><td style="padding-top: 20px;">
+            <div style="background: #101F1A; border: 1px solid rgba(92,158,140,0.2); border-radius: 8px; padding: 16px; font-size: 14px; color: #E8E3D9; line-height: 1.55; white-space: pre-wrap;">{safe_msg}</div>
+          </td></tr>
+          <tr><td style="padding-top: 16px; font-family: ui-monospace, monospace; font-size: 11px; color: #5A6B65;">
+            Reason key: {_html_escape(body.reason)}<br/>
+            User ID: {_html_escape(user.get('id') or '')}<br/>
+            Account email: {_html_escape(user.get('email') or '')}<br/>
+            IP: {safe_ip}<br/>
+            UA: {safe_ua}<br/>
+            {when_iso}
+          </td></tr>
+          <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">
+            — Reply directly to reach the user
+          </td></tr>
+        </table>
+        """
+        try:
+            # reply_to lets the admin hit "Reply" and land straight in the
+            # user's inbox without copy-pasting the address out of the body.
+            def _send_with_reply_to():
+                if not _resend or not _RESEND_API_KEY:
+                    return None
+                payload = {
+                    "from": _RESEND_SENDER,
+                    "to": [_RESEND_ADMIN_RECIPIENT],
+                    "subject": f"[{reason_label}] - Solarisound Support",
+                    "html": html,
+                }
+                if reply_email:
+                    payload["reply_to"] = [reply_email]
+                try:
+                    result = _resend.Emails.send(payload)
+                    return (result or {}).get("id")
+                except Exception as e:
+                    logger.warning("[resend] support send failed: %s", type(e).__name__)
+                    return None
+            resend_id = await asyncio.to_thread(_send_with_reply_to)
+            if resend_id:
+                delivered = True
+                try:
+                    await db.support_messages.update_one(
+                        {"id": doc["id"]},
+                        {"$set": {"delivered": True, "resend_id": resend_id}},
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("[support] resend dispatch error: %s", type(e).__name__)
+
+    return {
+        "ok": True,
+        "delivered": delivered,
+        "message": "Thank you for reaching out. We will get back to you shortly.",
+    }
+
+
+
 # --- Sessions (favorites) -----------------------------------------------------
 @api.get("/sessions")
 async def list_sessions(user: dict = Depends(get_current_user)):

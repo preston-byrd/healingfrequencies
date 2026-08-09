@@ -1,0 +1,23 @@
+{
+  "summary": "Full test of Support Bubble feature (backend /api/support/contact + frontend SupportBubble). All 6 pytest backend cases pass (401 no-auth, 400 unknown reason, 422 short message, 200 valid + DB persistence with all required fields, HTML/script tag stored raw, 429 rate-limit within 4 rapid sends). Full frontend flow verified: bubble hidden logged-out, visible on Dashboard AND Account, opens two-step modal, six reason chips render, name/email pre-fill (Admin / admin@example.com) with email readonly, Send disabled <10 chars & enabled >=10, back/X-close/backdrop-close/reopen-reset all work, success screen shows exact spec copy, opacity-35 while audio playing and opacity-90 when stopped.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_support_contact.py",
+    "/app/test_reports/pytest/support_contact.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Rate-limit spec in review_request says 'per-user bucket capacity=3 refill 1/200s' — server.py matches (line 879). Also enforces a per-IP bucket (capacity=5, 1/120s) which is a reasonable defence-in-depth addition; consumer test unaffected.",
+    "SupportBubble email input uses readOnly={!!user?.email}. In DOM the attribute serialises to empty string ('') which is HTML-correct (any presence = readonly). Verified via Playwright get_attribute returning ''.",
+    "_html_escape is applied to display_name, reply_email, msg, ip, ua AND reason_label in the HTML body — good. Raw message stored in Mongo as-is (verified). Subject uses reason_label (not user-controlled) so injection surface is limited to the six fixed labels.",
+    "Delivered=false is expected in preview (noreply@solarisounds.com not a verified sender) per agent-to-agent note; not flagged."
+  ],
+  "updated_files": ["/app/backend/tests/test_support_contact.py"],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100%"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8",
+  "seed_data_creation": "None. Test messages inserted into db.support_messages are prefixed 'TEST_' and cleaned up by pytest fixture teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend regression file at /app/backend/tests/test_support_contact.py — auth token key is 'token' (not 'access_token'). Rate-limit buckets are in-memory per instance; a fresh process resets them. Frontend: after admin login, a Wellness Assistant sheet (data-testid=ai-agent-sheet) auto-opens on Dashboard and intercepts pointer events over the support bubble — dismiss via its close button (or Escape) before clicking the bubble in UI tests. Playing-state opacity toggle confirmed: opacity-35 during playback, opacity-90 when idle."
+}
