@@ -901,6 +901,13 @@ async def support_contact(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "delivered": False,
         "provider": "resend" if (_resend and _RESEND_API_KEY) else "none",
+        # Admin Support Inbox — every new message lands in 'open' status and
+        # is empty of admin replies. Resolving from the inbox flips this to
+        # 'resolved' and stamps resolved_at / resolved_by.
+        "status": "open",
+        "admin_replies": [],
+        "resolved_at": None,
+        "resolved_by": None,
     }
     try:
         await db.support_messages.insert_one(doc)
@@ -974,6 +981,216 @@ async def support_contact(
         "delivered": delivered,
         "message": "Thank you for reaching out. We will get back to you shortly.",
     }
+
+
+# --- Admin Support Inbox ----------------------------------------------------
+# Admin-only endpoints for browsing, replying to, and resolving support
+# tickets that users submit via the floating Support Bubble on the frontend.
+# Every ticket is stored durably in db.support_messages (see /support/contact
+# above). This inbox is the primary place admins operate on that collection —
+# email is best-effort delivery, this UI is the source of truth.
+
+
+class SupportReplyIn(BaseModel):
+    message: str = Field(min_length=5, max_length=6000)
+    # When true (default), the ticket flips to 'resolved' after the reply is
+    # queued. Admin can un-check this in the UI to keep the thread open for
+    # further correspondence.
+    mark_resolved: bool = True
+
+
+def _support_public(doc: dict) -> dict:
+    """Strip Mongo internals + normalise legacy docs (no status field yet)."""
+    out = dict(doc or {})
+    out.pop("_id", None)
+    out.setdefault("status", "open")
+    out.setdefault("admin_replies", [])
+    out.setdefault("resolved_at", None)
+    out.setdefault("resolved_by", None)
+    return out
+
+
+@api.get("/admin/support")
+async def admin_support_list(
+    status: str = "all",
+    q: str = "",
+    skip: int = 0,
+    limit: int = 25,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    limit = max(1, min(100, int(limit)))
+    skip  = max(0, int(skip))
+
+    query: dict = {}
+    if status in ("open", "resolved"):
+        # Legacy docs (created before this feature) have no `status` field,
+        # so treat missing as 'open' for consistency.
+        if status == "open":
+            query["$or"] = [{"status": "open"}, {"status": {"$exists": False}}]
+        else:
+            query["status"] = "resolved"
+    q_clean = (q or "").strip()
+    if q_clean:
+        rx = {"$regex": re.escape(q_clean), "$options": "i"}
+        # Match against user_email, user_name, message body, or reason label.
+        or_clause = [
+            {"user_email": rx},
+            {"user_name": rx},
+            {"message": rx},
+            {"reason_label": rx},
+        ]
+        if "$or" in query:
+            # Combine status $or with search $or via $and so both apply.
+            existing = query.pop("$or")
+            query["$and"] = [{"$or": existing}, {"$or": or_clause}]
+        else:
+            query["$or"] = or_clause
+
+    total = await db.support_messages.count_documents(query)
+    # Open messages first (by newest), then resolved (by newest). We express
+    # this as a compound sort on a synthetic priority AFTER the query, which
+    # Mongo can't do natively — so instead we just sort by created_at desc.
+    # Filtering by status is the primary way admins narrow the view.
+    cursor = (
+        db.support_messages.find(query, {"_id": 0})
+        .sort("created_at", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+    items = [_support_public(d) for d in await cursor.to_list(limit)]
+
+    # Aggregate counts for the sidebar filter chips ("Open · 12 / Resolved · 45").
+    total_open = await db.support_messages.count_documents({
+        "$or": [{"status": "open"}, {"status": {"$exists": False}}],
+    })
+    total_resolved = await db.support_messages.count_documents({"status": "resolved"})
+
+    return {
+        "items": items,
+        "total": total,
+        "offset": skip,
+        "limit": limit,
+        "counts": {
+            "open": total_open,
+            "resolved": total_resolved,
+            "all": total_open + total_resolved,
+        },
+    }
+
+
+@api.post("/admin/support/{msg_id}/reply")
+async def admin_support_reply(
+    msg_id: str,
+    body: SupportReplyIn,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    doc = await db.support_messages.find_one({"id": msg_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    reply_text = body.message.strip()
+    reply_email = (doc.get("reply_to_email") or doc.get("user_email") or "").strip()
+    if not reply_email:
+        raise HTTPException(status_code=400, detail="No email on file to reply to")
+
+    when_iso = datetime.now(timezone.utc).isoformat()
+    resend_id: Optional[str] = None
+    delivered = False
+
+    if _resend and _RESEND_API_KEY:
+        safe_reply = _html_escape(reply_text).replace("\n", "<br/>")
+        safe_original = _html_escape(doc.get("message", "")).replace("\n", "<br/>")
+        safe_reason = _html_escape(doc.get("reason_label", "Support"))
+        html = f"""
+        <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+          <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · Reply</td></tr>
+          <tr><td style="padding-top: 8px; font-size: 20px; font-weight: 500; color: #E8E3D9;">Re: {safe_reason}</td></tr>
+          <tr><td style="padding-top: 20px;">
+            <div style="background: #101F1A; border: 1px solid rgba(92,158,140,0.2); border-radius: 8px; padding: 16px; font-size: 14px; color: #E8E3D9; line-height: 1.55; white-space: pre-wrap;">{safe_reply}</div>
+          </td></tr>
+          <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65; letter-spacing: 1px; text-transform: uppercase;">Your original message</td></tr>
+          <tr><td style="padding-top: 8px;">
+            <div style="background: rgba(20,38,31,0.35); border-left: 2px solid rgba(196,166,122,0.4); padding: 12px 14px; font-size: 12px; color: #8A9A92; line-height: 1.5; white-space: pre-wrap;">{safe_original}</div>
+          </td></tr>
+          <tr><td style="padding-top: 24px; font-size: 11px; color: #5A6B65;">— The Solarisound team</td></tr>
+        </table>
+        """
+        def _send():
+            try:
+                result = _resend.Emails.send({
+                    "from": _RESEND_SENDER,
+                    "to": [reply_email],
+                    "subject": f"Re: [{doc.get('reason_label','Support')}] - Solarisound Support",
+                    "html": html,
+                })
+                return (result or {}).get("id")
+            except Exception as e:
+                logger.warning("[resend] admin support reply failed: %s", type(e).__name__)
+                return None
+        resend_id = await asyncio.to_thread(_send)
+        delivered = bool(resend_id)
+
+    reply_entry = {
+        "message": reply_text,
+        "at": when_iso,
+        "admin_id": user["id"],
+        "admin_email": user.get("email"),
+        "resend_id": resend_id,
+        "delivered": delivered,
+    }
+    update: dict = {"$push": {"admin_replies": reply_entry}}
+    if body.mark_resolved:
+        update["$set"] = {
+            "status": "resolved",
+            "resolved_at": when_iso,
+            "resolved_by": user["id"],
+        }
+    await db.support_messages.update_one({"id": msg_id}, update)
+    doc2 = await db.support_messages.find_one({"id": msg_id}, {"_id": 0})
+    return {"ok": True, "delivered": delivered, "message": _support_public(doc2)}
+
+
+@api.post("/admin/support/{msg_id}/resolve")
+async def admin_support_resolve(msg_id: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    res = await db.support_messages.update_one(
+        {"id": msg_id},
+        {"$set": {
+            "status": "resolved",
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+            "resolved_by": user["id"],
+        }},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    doc = await db.support_messages.find_one({"id": msg_id}, {"_id": 0})
+    return {"ok": True, "message": _support_public(doc)}
+
+
+@api.post("/admin/support/{msg_id}/reopen")
+async def admin_support_reopen(msg_id: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    res = await db.support_messages.update_one(
+        {"id": msg_id},
+        {"$set": {"status": "open", "resolved_at": None, "resolved_by": None}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    doc = await db.support_messages.find_one({"id": msg_id}, {"_id": 0})
+    return {"ok": True, "message": _support_public(doc)}
+
+
+@api.delete("/admin/support/{msg_id}")
+async def admin_support_delete(msg_id: str, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    res = await db.support_messages.delete_one({"id": msg_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"ok": True}
+
 
 
 

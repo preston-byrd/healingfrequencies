@@ -7,6 +7,7 @@ import PromoCodesSection from '@/components/PromoCodesSection';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
+import AdminSupportInbox from '@/components/AdminSupportInbox';
 import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
 import MyJourneySection from '@/components/MyJourneySection';
 import MyPatternsSection from '@/components/MyPatternsSection';
@@ -1194,6 +1195,12 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             )}
           </div>
         )}
+
+        {/* Admin: Support Inbox — browse the support_messages collection,
+            reply inline via Resend, mark tickets resolved. Sits at the
+            bottom of the admin section so the most operational tool is
+            right where the admin ends up scrolling to. */}
+        {sub.is_admin && <AdminSupportInbox />}
       </div>
 
       {celebratingPlan && (
