@@ -309,9 +309,26 @@ export default function SessionShareCard({
 
   const triggerDownload = (blob) => {
     const url = URL.createObjectURL(blob);
+    const filename = `solarisound-${Math.round(session.frequencyHz || 0)}hz.png`;
+    // iOS Safari's <a download> attribute is ignored for blob: URLs, so the
+    // fallback there is opening the image in a new tab where the user can
+    // long-press → "Save to Photos". Detect iOS Safari (incl. iPadOS which
+    // reports MacIntel + touch) and take that path; everywhere else, use the
+    // classic hidden-anchor click which delivers a real file download.
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (isIOS) {
+      const win = window.open(url, '_blank');
+      // Popup blocked? Fall back to same-tab navigation so the user still
+      // reaches the image, then can share/save it from the browser UI.
+      if (!win) window.location.href = url;
+      // Don't revoke immediately — the new tab needs the URL to stay alive.
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return;
+    }
     const a = document.createElement('a');
     a.href = url;
-    a.download = `solarisound-${Math.round(session.frequencyHz || 0)}hz.png`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -391,7 +408,7 @@ export default function SessionShareCard({
         )}
 
         <div className="flex flex-col gap-2">
-          {canNativeShare ? (
+          {canNativeShare && (
             <button
               data-testid="session-share-share-btn"
               onClick={handleShare}
@@ -406,22 +423,41 @@ export default function SessionShareCard({
                 <><Share2 size={14} />Share your session</>
               )}
             </button>
-          ) : (
-            <button
-              data-testid="session-share-download-btn"
-              onClick={handleDownload}
-              disabled={status === 'sharing'}
-              className="w-full py-3 rounded-lg bg-[#5C9E8C]/25 hover:bg-[#5C9E8C]/40 disabled:opacity-50 border border-[#72C2AC]/50 hover:border-[#72C2AC] text-[#72C2AC] text-sm font-medium tracking-wide transition-colors inline-flex items-center justify-center gap-2"
-            >
-              {status === 'sharing' ? (
-                <><Loader2 size={14} className="animate-spin" />Preparing…</>
-              ) : status === 'shared' ? (
-                <><Check size={14} />Downloaded</>
-              ) : (
-                <><Download size={14} />Download card</>
-              )}
-            </button>
           )}
+
+          {/* Always offer a Download / Save-to-Photos path — Instagram, TikTok
+              and WhatsApp deliberately do not register PNG share extensions on
+              iOS, so the native share sheet never lists them. Downloading the
+              card and uploading manually is the reliable way to post it to
+              those platforms. On desktop this is the primary CTA. */}
+          <button
+            data-testid="session-share-download-btn"
+            onClick={handleDownload}
+            disabled={status === 'sharing'}
+            className={`w-full py-3 rounded-lg disabled:opacity-50 text-sm tracking-wide transition-colors inline-flex items-center justify-center gap-2 ${
+              canNativeShare
+                ? 'bg-black/25 hover:bg-black/40 border border-[#5C9E8C]/25 hover:border-[#5C9E8C]/50 text-[#C9DED6] font-normal'
+                : 'bg-[#5C9E8C]/25 hover:bg-[#5C9E8C]/40 border border-[#72C2AC]/50 hover:border-[#72C2AC] text-[#72C2AC] font-medium'
+            }`}
+          >
+            {status === 'sharing' ? (
+              <><Loader2 size={14} className="animate-spin" />Preparing…</>
+            ) : status === 'shared' ? (
+              <><Check size={14} />Saved</>
+            ) : (
+              <><Download size={14} />{canNativeShare ? 'Save to photos' : 'Download card'}</>
+            )}
+          </button>
+
+          {/* Discoverability nudge — most users won't intuit that Instagram
+              / TikTok require save-then-upload. Keep it short + calm to stay
+              in the post-session mood. */}
+          <div
+            className="text-[10.5px] text-[#8A9A92] text-center leading-relaxed pt-1"
+            data-testid="session-share-tip"
+          >
+            Tip: for Instagram or TikTok, save the card and upload from your camera roll.
+          </div>
 
           {!isPro && (
             <button
