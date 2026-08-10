@@ -619,3 +619,18 @@
   - **NOTE** — production-observable. Redeploy required.
 
 
+
+- **Email Sender Consolidation → noreply@solarisounds.com (Feb 2026, iter 74)**: All transactional Resend sends now originate from the verified domain sender `noreply@solarisounds.com`. Set via `RESEND_SENDER_EMAIL` in `/app/backend/.env` — a single knob that every outbound helper (`_send_email_sync`, and the two `_resend.Emails.send()` call-sites in the support flow) reads at import time via `_RESEND_SENDER`. No hardcoded sender strings anywhere.
+  - **New email flows added this iteration**:
+    - **Welcome email on registration** — new `_send_welcome_email(email, name)` helper. Fires as an `asyncio.create_task` from `POST /api/auth/register` alongside the existing admin-digest alert. Warm, brand-aligned HTML template with a "Open Solarisound" CTA linking to `https://solarisound.com/`. Silent no-op if Resend isn't configured (local dev / tests).
+    - **Support submission acknowledgement to user** — new `_send_support_ack_to_user(email, name, reason_label, message)` helper. Fires from `POST /api/support/contact` in parallel with the admin notify. Recipient prefers `body.email` (if the user overrode it) over their account email so signed-in users can route the ack to a different inbox. Subject: `We received your message · [{Reason}]`. Body includes the user's original message quoted in a gold-accented block.
+  - **Existing flows now migrated** (they already used `_RESEND_SENDER`, this iteration just changed the env value):
+    - Admin new-user digest alert (`_notify_admin_new_user`)
+    - Password reset email (`_dispatch_password_reset_email`)
+    - Support admin notify (existing) + support admin reply to user (existing)
+  - **Security** — all user-controlled fields (`user_name`, `reason_label`, `message`) are `_html_escape`d before hitting the HTML templates. `<script>` in a display name renders as `&lt;script&gt;` (verified in the new pytest suite).
+  - **Verified** — testing_agent_v3_fork iter_72: **8 new tests + 24 regression = 32/32 pass**. Confirmed: server module resolves `_RESEND_SENDER=noreply@solarisounds.com` at import time; exactly 3 `_resend.Emails.send` call-sites, all use `_RESEND_SENDER`; register fires admin + welcome tasks; support/contact fires admin + user ack; body.email override works; all four flows silent-no-op when API key blank. New regression suite at `backend/tests/test_resend_from_address.py`.
+  - **Files** — `backend/.env` (RESEND_SENDER_EMAIL), `backend/server.py` (new `_send_welcome_email`, new `_send_support_ack_to_user`, wired into register + support_contact), `backend/tests/test_resend_from_address.py` (new — 8 tests).
+  - **NOTE** — production-observable. Redeploy required. Preview shows `delivered:false` on all sends because `solarisounds.com` DNS verification hasn't propagated to this Resend account's sending list (or test recipients are `@example.com` which Resend refuses). Once the domain is fully verified in the Resend dashboard AND real recipient addresses are used, `delivered:true` responses will start flowing.
+
+

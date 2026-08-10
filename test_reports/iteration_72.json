@@ -1,0 +1,36 @@
+{
+  "summary": "Backend-only verification of Resend email sender configuration. All outbound Resend calls now use noreply@solarisounds.com (verified by static grep + in-process mock of _resend.Emails.send). Registration fires BOTH admin alert and welcome email as async tasks. Support contact fires admin notify + user ack (uses body.email override, subject startswith 'We received your message · ['). Password reset uses correct from. All flows silently no-op when RESEND_API_KEY blank / _resend module absent. HTML escaping verified for user_name and message payloads. All 32 tests pass (8 new + 24 regression).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_resend_from_address.py",
+    "/app/backend/tests/test_support_contact.py",
+    "/app/backend/tests/test_admin_support_inbox.py",
+    "/app/test_reports/pytest/iter72_resend.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now >7000 lines — well past the 700-line guideline. Consider splitting into modules (auth, billing, support, admin, email) for maintainability. Not a functional bug for this iteration.",
+    "_RESEND_SENDER default fallback in server.py:236 is still 'onboarding@resend.dev'. Harmless (env var overrides it) but leaving the string in source could confuse future readers. Consider setting the fallback to '' and letting _send_email_sync no-op when unset."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_resend_from_address.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not_tested"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8",
+  "seed_data_creation": "None — tests self-clean users prefixed test_reg_* and support_messages via existing fixture",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "In-process ASGI testing requires rebinding motor client to the current event loop (see app_client fixture) because module-level AsyncIOMotorClient binds to the loop of first use. pytest-asyncio spins a fresh loop per test → 'Event loop is closed'. Fixture handles this via monkeypatch on server.client / server.db. Also note: pydantic EmailStr lowercases emails so compare against email.lower() when checking recipient lists.",
+  "verified_behaviors": [
+    "RESEND_SENDER_EMAIL=noreply@solarisounds.com in /app/backend/.env",
+    "server._RESEND_SENDER resolves to noreply@solarisounds.com at import time",
+    "Exactly 3 _resend.Emails.send call sites (server.py lines 246, 1043, 1213), all use _RESEND_SENDER",
+    "POST /api/auth/register fires _queue_admin_signup_alert + _send_welcome_email as asyncio.create_task; both send with from=noreply@solarisounds.com",
+    "POST /api/support/contact fires admin notify + _send_support_ack_to_user; both from=noreply@solarisounds.com; ack subject startswith 'We received your message · ['",
+    "User ack uses body.email preferentially, falls back to account email when omitted",
+    "POST /api/auth/forgot-password sends reset email with from=noreply@solarisounds.com",
+    "All 4 flows silent no-op when RESEND_API_KEY/_resend cleared — register still returns 200",
+    "HTML escaping: <script> in user_name renders as &lt;script&gt; in welcome + support-ack templates"
+  ]
+}

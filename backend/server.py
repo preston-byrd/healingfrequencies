@@ -289,6 +289,83 @@ async def _notify_admin_new_user(user_email: str, user_name: str, ip: str) -> No
         logger.warning("[resend] admin notify failed: %s", type(e).__name__)
 
 
+async def _send_welcome_email(user_email: str, user_name: str) -> None:
+    """Fire-and-forget welcome email sent from noreply@<verified-domain> to a
+    freshly-registered user. Skipped silently when Resend isn't configured
+    so local dev still works. Content is intentionally warm + brief — the
+    goal is confirmation of a good signup, not a marketing pitch."""
+    if not _resend or not _RESEND_API_KEY:
+        return
+    safe_name = _html_escape((user_name or "").strip())[:120]
+    greeting = f"Welcome, {safe_name}." if safe_name else "Welcome."
+    html = f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 520px; margin: 0; padding: 28px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound</td></tr>
+      <tr><td style="padding-top: 14px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 30px; font-weight: 400; color: #E8E3D9;">{greeting}</td></tr>
+      <tr><td style="padding-top: 18px; font-size: 15px; color: #C9DED6; line-height: 1.65;">
+        Your account is ready. You now have access to Solfeggio presets, the Custom Generator, ambient soundscapes, and a curated set of guided journeys. Explore what feels good — most people start with 528 Hz "Miracle" or a Deep Restore flow.
+      </td></tr>
+      <tr><td style="padding-top: 18px; font-size: 14px; color: #8A9A92; line-height: 1.65;">
+        A gentle tip: put on headphones the first time you tune in. The binaural cues and lower Solfeggio frequencies are meant to be felt as much as heard.
+      </td></tr>
+      <tr><td style="padding-top: 26px;">
+        <a href="https://solarisound.com/" style="display: inline-block; padding: 12px 22px; background: #C4A67A; color: #08120F; border-radius: 999px; text-decoration: none; font-weight: 500; font-size: 14px;">Open Solarisound</a>
+      </td></tr>
+      <tr><td style="padding-top: 26px; font-size: 11px; color: #5A6B65;">
+        Reply to this email any time — a real person on our team will read it. Welcome home.
+      </td></tr>
+    </table>
+    """
+    try:
+        await asyncio.to_thread(
+            _send_email_sync,
+            user_email,
+            "Welcome to Solarisound",
+            html,
+        )
+    except Exception as e:
+        logger.warning("[resend] welcome email failed: %s", type(e).__name__)
+
+
+async def _send_support_ack_to_user(user_email: str, user_name: str, reason_label: str, msg: str) -> None:
+    """Confirmation email sent to the user acknowledging that we received
+    their support submission. Complements the in-app "Thank you" screen
+    with a durable receipt in their inbox that they can search for later.
+    Silent no-op when Resend / API key aren't configured."""
+    if not _resend or not _RESEND_API_KEY:
+        return
+    safe_name = _html_escape((user_name or "").strip())[:120]
+    safe_reason = _html_escape(reason_label)
+    safe_msg = _html_escape(msg).replace("\n", "<br/>")
+    hello = f"Hi {safe_name}," if safe_name else "Hi,"
+    html = f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 540px; margin: 0; padding: 28px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound · Support</td></tr>
+      <tr><td style="padding-top: 12px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 26px; font-weight: 400; color: #E8E3D9;">We received your message</td></tr>
+      <tr><td style="padding-top: 14px; font-size: 14px; color: #C9DED6; line-height: 1.6;">
+        {hello} thanks for reaching out about <span style="color: #72C2AC;">{safe_reason}</span>. A real person on our team will read this and get back to you shortly. If there's more context we should know, just reply directly to this email.
+      </td></tr>
+      <tr><td style="padding-top: 22px; font-size: 11px; color: #5A6B65; letter-spacing: 1px; text-transform: uppercase;">A copy of what you sent</td></tr>
+      <tr><td style="padding-top: 8px;">
+        <div style="background: #101F1A; border-left: 2px solid rgba(196,166,122,0.4); padding: 14px 16px; font-size: 13px; color: #C9DED6; line-height: 1.55; white-space: pre-wrap;">{safe_msg}</div>
+      </td></tr>
+      <tr><td style="padding-top: 24px; font-size: 12px; color: #8A9A92;">
+        Meanwhile, keep tuning — we'll be in touch soon.
+      </td></tr>
+      <tr><td style="padding-top: 24px; font-size: 11px; color: #5A6B65;">— The Solarisound team</td></tr>
+    </table>
+    """
+    try:
+        await asyncio.to_thread(
+            _send_email_sync,
+            user_email,
+            f"We received your message · [{reason_label}]",
+            html,
+        )
+    except Exception as e:
+        logger.warning("[resend] support ack failed: %s", type(e).__name__)
+
+
 # ---- Sign-up alert digest buffer -------------------------------------------
 # SEC-001 hardening: bursts of registrations previously produced one admin
 # email per user (alert fatigue + amplification vector). Instead, we now
@@ -576,6 +653,11 @@ async def register(body: RegisterIn, request: Request, response: Response):
     # a burst of sign-ups sends ONE roll-up email instead of one-per-user.
     asyncio.create_task(
         _queue_admin_signup_alert(email, user["name"], ip)
+    )
+    # Warm welcome email to the user — sent from noreply@<verified-domain>.
+    # Silent no-op when Resend isn't configured so tests / local dev work.
+    asyncio.create_task(
+        _send_welcome_email(email, user["name"])
     )
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
@@ -975,6 +1057,14 @@ async def support_contact(
                     pass
         except Exception as e:
             logger.warning("[support] resend dispatch error: %s", type(e).__name__)
+
+    # Confirmation email TO THE USER — separate task so a Resend hiccup on
+    # the admin notify doesn't block the user ack (and vice versa). Also
+    # silent no-op when Resend isn't configured.
+    if reply_email:
+        asyncio.create_task(
+            _send_support_ack_to_user(reply_email, display_name, reason_label, msg)
+        )
 
     return {
         "ok": True,
