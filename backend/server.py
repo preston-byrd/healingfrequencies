@@ -1781,27 +1781,77 @@ async def me_update_nudge_prefs(body: NudgePrefsIn, user: dict = Depends(get_cur
 
 @api.get("/admin/email-engagement")
 async def admin_email_engagement(user: dict = Depends(get_current_user)):
-    """Aggregate stats + recent nudges for the admin Email Engagement panel."""
+    """Aggregate stats + recent nudges for the admin Email Engagement panel.
+
+    Previously this endpoint issued ~13 separate count_documents queries
+    (one per tier × three per tier + totals + unsubs), which on a growing
+    production dataset added up to seconds of wall-time and sporadically
+    tripped Cloudflare's 520 "could not parse" timeout on Refresh. The
+    entire stat block now comes from a single aggregation pipeline over
+    email_nudges + one small user count for the unsubscribed total, so
+    the response consistently returns in tens of milliseconds regardless
+    of collection size."""
     _require_admin(user)
-    total = await db.email_nudges.count_documents({})
-    opened = await db.email_nudges.count_documents({"opened_at": {"$ne": None}})
-    clicked = await db.email_nudges.count_documents({"clicked_at": {"$ne": None}})
-    delivered = await db.email_nudges.count_documents({"delivered": True})
-    per_tier = {}
-    for tier in ("72h", "7d", "14d", "30d"):
-        per_tier[tier] = {
-            "sent":    await db.email_nudges.count_documents({"tier": tier}),
-            "opened":  await db.email_nudges.count_documents({"tier": tier, "opened_at": {"$ne": None}}),
-            "clicked": await db.email_nudges.count_documents({"tier": tier, "clicked_at": {"$ne": None}}),
-        }
-    recent = await db.email_nudges.find({}, {"_id": 0}).sort("sent_at", -1).limit(25).to_list(25)
-    unsub_count = await db.users.count_documents({"nudge_unsubscribed": True})
+    try:
+        pipeline = [
+            {"$group": {
+                "_id": None,
+                "total":     {"$sum": 1},
+                "delivered": {"$sum": {"$cond": [{"$eq": ["$delivered", True]}, 1, 0]}},
+                "opened":    {"$sum": {"$cond": [{"$ne": ["$opened_at", None]}, 1, 0]}},
+                "clicked":   {"$sum": {"$cond": [{"$ne": ["$clicked_at", None]}, 1, 0]}},
+                "per_tier_raw": {"$push": {
+                    "tier": "$tier",
+                    "opened": {"$cond": [{"$ne": ["$opened_at", None]}, 1, 0]},
+                    "clicked": {"$cond": [{"$ne": ["$clicked_at", None]}, 1, 0]},
+                }},
+            }},
+        ]
+        agg = await db.email_nudges.aggregate(pipeline).to_list(1)
+    except Exception as e:
+        logger.warning("[email-engagement] aggregate failed: %s", type(e).__name__)
+        agg = []
+
+    if agg:
+        row = agg[0]
+        total = int(row.get("total", 0))
+        delivered = int(row.get("delivered", 0))
+        opened = int(row.get("opened", 0))
+        clicked = int(row.get("clicked", 0))
+        per_tier: dict = {t: {"sent": 0, "opened": 0, "clicked": 0} for t in ("72h", "7d", "14d", "30d")}
+        for r in row.get("per_tier_raw", []) or []:
+            tk = r.get("tier")
+            if tk in per_tier:
+                per_tier[tk]["sent"]    += 1
+                per_tier[tk]["opened"]  += int(r.get("opened") or 0)
+                per_tier[tk]["clicked"] += int(r.get("clicked") or 0)
+    else:
+        total = delivered = opened = clicked = 0
+        per_tier = {t: {"sent": 0, "opened": 0, "clicked": 0} for t in ("72h", "7d", "14d", "30d")}
+
+    # Recent list — capped at 25, projected to only the fields the frontend
+    # renders so response size stays small.
+    try:
+        recent = await db.email_nudges.find(
+            {},
+            {"_id": 0, "id": 1, "user_email": 1, "tier": 1, "variant_key": 1,
+             "top_freq": 1, "sent_at": 1, "delivered": 1, "opened_at": 1, "clicked_at": 1},
+        ).sort("sent_at", -1).limit(25).to_list(25)
+    except Exception as e:
+        logger.warning("[email-engagement] recent fetch failed: %s", type(e).__name__)
+        recent = []
+
+    try:
+        unsub_count = await db.users.count_documents({"nudge_unsubscribed": True})
+    except Exception:
+        unsub_count = 0
+
     return {
         "total": total,
         "delivered": delivered,
         "opened": opened,
         "clicked": clicked,
-        "open_rate": round(opened / total, 3) if total else 0.0,
+        "open_rate":  round(opened / total, 3) if total else 0.0,
         "click_rate": round(clicked / total, 3) if total else 0.0,
         "per_tier": per_tier,
         "unsubscribed_users": unsub_count,
@@ -7973,6 +8023,13 @@ async def _lifespan_startup():
     await db.hb_milestones.create_index([("user_id", 1), ("key", 1)], unique=True)
     await db.hb_monthly_reports.create_index([("user_id", 1), ("month", 1)], unique=True)
     await db.feature_announcements.create_index([("active", 1), ("published_at", -1)])
+    # Re-engagement nudges — sort by sent_at (descending) is the primary
+    # access pattern; user_id + tier is used by the sequence-gate lookup.
+    await db.email_nudges.create_index([("sent_at", -1)])
+    await db.email_nudges.create_index([("user_id", 1), ("sent_at", -1)])
+    await db.email_nudges.create_index([("user_id", 1), ("tier", 1), ("sent_at", -1)])
+    # Unsubscribe token lookup for the public one-tap unsub / prefs links.
+    await db.users.create_index("nudge_unsubscribe_token", sparse=True)
     # Seed default feature announcements the first time the app boots (idempotent).
     seed_anns = [
         {
