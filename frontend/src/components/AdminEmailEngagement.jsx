@@ -32,6 +32,7 @@ export default function AdminEmailEngagement() {
   const [loading, setLoading] = useState(false);
   const [ticking, setTicking] = useState(false);
   const [err, setErr] = useState('');
+  const [lastTickSummary, setLastTickSummary] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -48,11 +49,23 @@ export default function AdminEmailEngagement() {
 
   useEffect(() => { load(); }, [load]);
 
-  const triggerTick = async () => {
+  const triggerTick = async (force = false) => {
+    if (force && !window.confirm(
+      'Send nudges NOW to every 72h+ inactive user, bypassing the 9-10am CST window?\n\n' +
+      'All other guards (unsubscribes, cadence, per-tier caps) still apply, so this cannot re-spam anyone.'
+    )) return;
     setTicking(true);
     setErr('');
     try {
-      await api.post('/admin/email-engagement/tick');
+      const { data } = await api.post(`/admin/email-engagement/tick${force ? '?force=true' : ''}`);
+      // Surface the send result inline so the admin can see how many
+      // fired without hunting for the toast.
+      if (data?.stats) {
+        const s = data.stats;
+        const summary = `Sent ${s.sent} · scanned ${s.scanned} · skipped ${s.skipped_recent + s.skipped_unsub + s.skipped_window + s.skipped_no_tier + s.skipped_already_sent}`;
+        setErr(''); // clear old errors
+        setLastTickSummary(summary);
+      }
       await load();
     } catch (e) {
       setErr(e?.response?.data?.detail || 'Trigger failed');
@@ -71,13 +84,22 @@ export default function AdminEmailEngagement() {
         <div className="flex items-center gap-3">
           <button
             data-testid="admin-email-engagement-tick"
-            onClick={triggerTick}
+            onClick={() => triggerTick(false)}
             disabled={ticking}
-            title="Fire one scheduler pass now"
+            title="Fire one scheduler pass now (honors the 9-10am CST send window)"
             className="text-[11px] text-[#C4A67A] hover:text-[#72C2AC] inline-flex items-center gap-1 transition-colors disabled:opacity-50"
           >
             {ticking ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
             Trigger tick
+          </button>
+          <button
+            data-testid="admin-email-engagement-tick-force"
+            onClick={() => triggerTick(true)}
+            disabled={ticking}
+            title="Bypass the 9-10am CST window and send NOW to all 72h+ inactive users"
+            className="text-[11px] text-[#E8B872] hover:text-[#C4A67A] inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+          >
+            <Zap size={12} /> Force send now
           </button>
           <button
             data-testid="admin-email-engagement-refresh"
@@ -89,6 +111,12 @@ export default function AdminEmailEngagement() {
           </button>
         </div>
       </div>
+
+      {lastTickSummary && (
+        <div className="text-[11px] text-[#72C2AC] mb-2" data-testid="admin-email-engagement-tick-summary">
+          Last run — {lastTickSummary}
+        </div>
+      )}
 
       {err && <div className="text-xs text-[#D96C6C] mb-3">{err}</div>}
 

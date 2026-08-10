@@ -721,12 +721,28 @@ async def _reengagement_tick() -> dict:
     if not _in_send_window_cst(now):
         stats["skipped_window"] = 1
         return stats
-    # Only scan users whose last_login_at is at least 72h old.
+    # Only scan users whose last login (or, for legacy users where we haven't
+    # yet stamped that field, whose registration date) is at least 72h old.
+    # The $or across last_login_at AND (missing last_login_at + old created_at)
+    # ensures the first-ever nudge batch reaches users who signed up before
+    # iter 76 introduced the last_login_at field.
     cutoff = (now - timedelta(hours=72)).isoformat()
     cursor = db.users.find(
-        {"last_login_at": {"$lte": cutoff}, "$or": [
-            {"nudge_unsubscribed": {"$ne": True}}, {"nudge_unsubscribed": {"$exists": False}},
-        ]},
+        {
+            "$and": [
+                {"$or": [
+                    {"last_login_at": {"$lte": cutoff}},
+                    {"$and": [
+                        {"last_login_at": {"$exists": False}},
+                        {"created_at": {"$lte": cutoff}},
+                    ]},
+                ]},
+                {"$or": [
+                    {"nudge_unsubscribed": {"$ne": True}},
+                    {"nudge_unsubscribed": {"$exists": False}},
+                ]},
+            ],
+        },
         {"_id": 0, "id": 1, "email": 1, "name": 1, "last_login_at": 1, "created_at": 1,
          "nudge_unsubscribed": 1, "nudge_cadence": 1, "nudge_unsubscribe_token": 1,
          "nudge_sequence_reset_at": 1},
@@ -1794,10 +1810,32 @@ async def admin_email_engagement(user: dict = Depends(get_current_user)):
 
 
 @api.post("/admin/email-engagement/tick")
-async def admin_email_engagement_tick(user: dict = Depends(get_current_user)):
+async def admin_email_engagement_tick(
+    force: bool = False,
+    user: dict = Depends(get_current_user),
+):
     """Admin diagnostic — fire one scheduler pass RIGHT NOW without waiting
-    for the 15-min tick. Returns the same stats dict the loop logs."""
+    for the 15-min tick. Returns the same stats dict the loop logs.
+
+    `force=true` bypasses the 9-10am CST send-window gate so an admin can
+    hand-fire an initial batch outside the usual window (e.g. first launch
+    of the re-engagement system). All other gates (72h+ inactivity,
+    unsubscribed check, cadence throttle, tier-already-sent check) still
+    apply, so this cannot accidentally spam anyone."""
     _require_admin(user)
+    if force:
+        # Temporarily bypass the send-window gate by monkeypatching the
+        # helper for the duration of this single tick. Cleanly restored
+        # in `finally` so a raised exception can't leave the loop unlocked.
+        import server as _self  # noqa: F401
+        original = _in_send_window_cst
+        try:
+            globals()["_in_send_window_cst"] = lambda _now: True
+            stats = await _reengagement_tick()
+        finally:
+            globals()["_in_send_window_cst"] = original
+        stats["forced"] = True
+        return {"ok": True, "stats": stats}
     stats = await _reengagement_tick()
     return {"ok": True, "stats": stats}
 
