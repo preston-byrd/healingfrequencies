@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { formatApiError, warmBackend } from '@/lib/api';
 import ForgotPasswordModal from '@/components/ForgotPasswordModal';
@@ -28,6 +28,10 @@ export default function AuthScreen() {
   const [canRetry, setCanRetry] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
+  // Local toggle for masking/unmasking the password input. Off by default
+  // for shoulder-surf safety; a tap on the eye icon reveals the value so
+  // the user can double-check what they typed on flaky mobile keyboards.
+  const [showPassword, setShowPassword] = useState(false);
 
   // Warm the backend the moment the sign-in screen mounts so DNS + TLS
   // + any Cloudflare/cold-start latency happens while the user is
@@ -100,16 +104,29 @@ export default function AuthScreen() {
           </div>
           <div>
             <label className="label-tiny block mb-2">Password</label>
-            <input
-              data-testid="auth-password-input"
-              type="password"
-              required
-              minLength={6}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] transition-colors"
-              placeholder="•••••••"
-            />
+            <div className="relative">
+              <input
+                data-testid="auth-password-input"
+                type={showPassword ? 'text' : 'password'}
+                required
+                minLength={6}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 pr-9 text-[#E8E3D9] transition-colors"
+                placeholder="•••••••"
+              />
+              <button
+                type="button"
+                data-testid="auth-password-toggle"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showPassword}
+                tabIndex={-1}
+                className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[#8A9A92] hover:text-[#C9DED6] transition-colors"
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
           </div>
 
           {err && (
