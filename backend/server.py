@@ -255,40 +255,6 @@ def _send_email_sync(to: str, subject: str, html: str) -> Optional[str]:
         return None
 
 
-async def _notify_admin_new_user(user_email: str, user_name: str, ip: str) -> None:
-    """Fire-and-forget admin alert when someone signs up. Skipped entirely
-    when RESEND_API_KEY / RESEND_ADMIN_RECIPIENT are not configured."""
-    if not _resend or not _RESEND_API_KEY or not _RESEND_ADMIN_RECIPIENT:
-        return
-    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    safe_name = (user_name or "").strip()[:120].replace("<", "&lt;").replace(">", "&gt;")
-    safe_email = user_email.strip()[:200].replace("<", "&lt;").replace(">", "&gt;")
-    safe_ip = (ip or "unknown")[:64]
-    html = f"""
-    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
-      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · new sign-up</td></tr>
-      <tr><td style="padding-top: 12px; font-size: 22px; font-weight: 500; color: #E8E3D9;">{safe_name or safe_email}</td></tr>
-      <tr><td style="padding-top: 8px; font-size: 13px; color: #8A9A92;">{safe_email}</td></tr>
-      <tr><td style="padding-top: 16px; font-family: ui-monospace, monospace; font-size: 11px; color: #5A6B65;">
-        IP {safe_ip}<br/>
-        {when}
-      </td></tr>
-      <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">
-        — From your Healing Frequencies admin alerts
-      </td></tr>
-    </table>
-    """
-    try:
-        await asyncio.to_thread(
-            _send_email_sync,
-            _RESEND_ADMIN_RECIPIENT,
-            f"New sign-up: {safe_email}",
-            html,
-        )
-    except Exception as e:
-        logger.warning("[resend] admin notify failed: %s", type(e).__name__)
-
-
 async def _send_welcome_email(user_email: str, user_name: str) -> None:
     """Fire-and-forget welcome email sent from noreply@<verified-domain> to a
     freshly-registered user. Skipped silently when Resend isn't configured
@@ -366,84 +332,105 @@ async def _send_support_ack_to_user(user_email: str, user_name: str, reason_labe
         logger.warning("[resend] support ack failed: %s", type(e).__name__)
 
 
-# ---- Sign-up alert digest buffer -------------------------------------------
-# SEC-001 hardening: bursts of registrations previously produced one admin
-# email per user (alert fatigue + amplification vector). Instead, we now
-# buffer pending sign-ups for a short window and send a SINGLE digest email
-# summarising all of them. First sign-up in a quiet period sends immediately
-# (so the admin still gets prompt notice); subsequent ones within
-# _ADMIN_SIGNUP_DIGEST_WINDOW_S are appended and flushed together.
-_ADMIN_SIGNUP_DIGEST_WINDOW_S = 300      # 5 minutes
-_ADMIN_SIGNUP_DIGEST_MAX = 50            # never buffer more than this
-_admin_signup_buffer: list = []          # [(email, name, ip, ts), ...]
-_admin_signup_flush_task: Optional[asyncio.Task] = None
-_admin_signup_lock = asyncio.Lock()
-_admin_signup_last_sent_at: float = 0.0
+# ---- Admin new-user notification -------------------------------------------
+# Product spec (Feb 2026): one email per successful registration with the
+# exact subject "New User Registration - Solarisound" and a clean template
+# containing name, email, timestamp, registration method (email / Google /
+# etc.), and plan (Free / Trial / Pro). The per-IP register throttle
+# (15/hr) already bounds abuse so we don't need a digest buffer anymore.
+
+def _derive_plan_label(user: dict) -> str:
+    """Return 'Free' / 'Trial' / 'Pro' based on a fresh user's flags. At
+    registration time this is almost always 'Free' — we still compute it
+    from the doc so a future auto-trial-on-signup change surfaces here
+    without a code edit here. Parses ISO strings to datetime for a
+    timezone-correct comparison (naive string comparison would misclassify
+    docs whose pro_until is missing the '+00:00' suffix)."""
+    now_dt = datetime.now(timezone.utc)
+    def _future(v):
+        if not v:
+            return False
+        try:
+            dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt > now_dt
+        except Exception:
+            return False
+    if _future(user.get("pro_until")) or _future(user.get("pro_expires_at")):
+        return "Pro"
+    if _future(user.get("stripe_trial_end")):
+        return "Trial"
+    return "Free"
 
 
-async def _queue_admin_signup_alert(user_email: str, user_name: str, ip: str) -> None:
-    """Buffered replacement for `_notify_admin_new_user`. Fires the first
-    email in any quiet window immediately, then rolls the next 5-minute
-    burst into a single digest, then repeats. Silent if Resend is unset."""
+async def _notify_admin_registration(user: dict, method: str = "email") -> None:
+    """Fire-and-forget admin alert on EACH successful registration. Silent
+    no-op when Resend / RESEND_ADMIN_RECIPIENT aren't configured. Method
+    string is the auth provider ("email", "Google", "Apple", …) — currently
+    only "email" is wired but the field is a stable contract for future
+    OAuth additions.
+
+    Subject is exactly 'New User Registration - Solarisound' per product
+    spec. Body is intentionally plain — no CTAs, no marketing copy — just
+    the six data points an admin needs to triage."""
     if not _resend or not _RESEND_API_KEY or not _RESEND_ADMIN_RECIPIENT:
         return
-    global _admin_signup_flush_task, _admin_signup_last_sent_at
-    now = _time.time()
-    async with _admin_signup_lock:
-        if now - _admin_signup_last_sent_at > _ADMIN_SIGNUP_DIGEST_WINDOW_S and not _admin_signup_buffer:
-            # Quiet period — send THIS one immediately, don't buffer.
-            _admin_signup_last_sent_at = now
-            asyncio.create_task(_notify_admin_new_user(user_email, user_name, ip))
-            return
-        # Otherwise queue and (re)arm the digest flush.
-        if len(_admin_signup_buffer) < _ADMIN_SIGNUP_DIGEST_MAX:
-            _admin_signup_buffer.append((user_email, user_name, ip, now))
-        if _admin_signup_flush_task and not _admin_signup_flush_task.done():
-            return
-        _admin_signup_flush_task = asyncio.create_task(_flush_admin_signup_digest())
+    safe_name  = _html_escape((user.get("name") or "").strip())[:120] or "(no name)"
+    safe_email = _html_escape((user.get("email") or "").strip())[:200]
+    safe_method = _html_escape((method or "email").strip())[:40].title()
+    plan = _derive_plan_label(user)
+    # Registration date/time — parse the created_at ISO we just stamped so
+    # the email carries the exact instant the row was written (not now()).
+    try:
+        created_at_dt = datetime.fromisoformat(user.get("created_at").replace("Z", "+00:00"))
+    except Exception:
+        created_at_dt = datetime.now(timezone.utc)
+    when_pretty = created_at_dt.strftime("%B %d, %Y · %H:%M UTC")
 
-
-async def _flush_admin_signup_digest() -> None:
-    await asyncio.sleep(_ADMIN_SIGNUP_DIGEST_WINDOW_S)
-    global _admin_signup_last_sent_at
-    async with _admin_signup_lock:
-        pending = list(_admin_signup_buffer)
-        _admin_signup_buffer.clear()
-    if not pending:
-        return
-    _admin_signup_last_sent_at = _time.time()
-    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    rows_html = ""
-    for email, name, ip, ts in pending:
-        safe_name = (name or "").strip()[:120].replace("<", "&lt;").replace(">", "&gt;")
-        safe_email = (email or "").strip()[:200].replace("<", "&lt;").replace(">", "&gt;")
-        safe_ip = (ip or "unknown")[:64]
-        rows_html += (
-            f"<tr><td style=\"padding: 8px 0; border-top: 1px solid #1E2A26;\">"
-            f"<div style=\"font-size: 14px; color: #E8E3D9;\">{safe_name or safe_email}</div>"
-            f"<div style=\"font-size: 12px; color: #8A9A92;\">{safe_email}</div>"
-            f"<div style=\"font-family: ui-monospace, monospace; font-size: 10px; color: #5A6B65; padding-top: 2px;\">IP {safe_ip}</div>"
-            f"</td></tr>"
-        )
-    total = len(pending)
+    # Clean, minimal HTML — no aurora gradients or CTAs, per "simply
+    # formatted, purely informational" requirement. Table layout is
+    # email-client-safe (Gmail / Outlook / Apple Mail).
     html = f"""
-    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 480px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
-      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · sign-up digest</td></tr>
-      <tr><td style="padding-top: 12px; font-size: 22px; font-weight: 500; color: #E8E3D9;">{total} new sign-up{'s' if total != 1 else ''}</td></tr>
-      <tr><td style="padding-top: 4px; font-size: 12px; color: #8A9A92;">In the last {_ADMIN_SIGNUP_DIGEST_WINDOW_S // 60} minutes · {when}</td></tr>
-      <tr><td style="padding-top: 12px;"><table style="width: 100%;">{rows_html}</table></td></tr>
-      <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">— From your Healing Frequencies admin alerts</td></tr>
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 520px; margin: 0; padding: 26px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · New Registration</td></tr>
+      <tr><td style="padding-top: 12px; font-size: 20px; font-weight: 500; color: #E8E3D9;">A new user just joined</td></tr>
+      <tr><td style="padding-top: 18px;">
+        <table style="width: 100%; font-size: 14px; color: #E8E3D9;">
+          <tr>
+            <td style="padding: 6px 0; color: #8A9A92; width: 160px;">Name</td>
+            <td style="padding: 6px 0;">{safe_name}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #8A9A92;">Email</td>
+            <td style="padding: 6px 0;">{safe_email}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #8A9A92;">Registered</td>
+            <td style="padding: 6px 0; font-family: ui-monospace, monospace; font-size: 13px;">{when_pretty}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #8A9A92;">Method</td>
+            <td style="padding: 6px 0;">{safe_method}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #8A9A92;">Plan</td>
+            <td style="padding: 6px 0;">{plan}</td>
+          </tr>
+        </table>
+      </td></tr>
+      <tr><td style="padding-top: 24px; font-size: 11px; color: #5A6B65;">No action needed — this is a heads-up notification.</td></tr>
     </table>
     """
     try:
         await asyncio.to_thread(
             _send_email_sync,
             _RESEND_ADMIN_RECIPIENT,
-            f"{total} new sign-up{'s' if total != 1 else ''} · digest",
+            "New User Registration - Solarisound",
             html,
         )
     except Exception as e:
-        logger.warning("[resend] admin digest failed: %s", type(e).__name__)
+        logger.warning("[resend] admin registration notify failed: %s", type(e).__name__)
 
 
 # --- Setup --------------------------------------------------------------------
@@ -649,10 +636,11 @@ async def register(body: RegisterIn, request: Request, response: Response):
         user_id=user["id"], user_email=email,
         metadata={"name": user["name"]},
     )
-    # Fire-and-forget admin alert — funnelled through the digest buffer so
-    # a burst of sign-ups sends ONE roll-up email instead of one-per-user.
+    # Fire-and-forget admin alert — one clean per-registration email per
+    # product spec. Silent no-op when Resend/RESEND_ADMIN_RECIPIENT are
+    # not configured (local dev / tests).
     asyncio.create_task(
-        _queue_admin_signup_alert(email, user["name"], ip)
+        _notify_admin_registration(user, method="email")
     )
     # Warm welcome email to the user — sent from noreply@<verified-domain>.
     # Silent no-op when Resend isn't configured so tests / local dev work.

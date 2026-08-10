@@ -101,9 +101,8 @@ async def _wait_for_calls(calls, expected_count, timeout=3.0):
 @pytest.mark.asyncio
 async def test_register_fires_admin_alert_and_welcome_email(app_client):
     ac, calls, server = app_client
-    # Reset digest buffer for deterministic behaviour.
-    server._admin_signup_buffer.clear()
-    server._admin_signup_last_sent_at = 0.0
+    # Digest buffer was removed in iter 74 — admin notify now fires per
+    # successful register directly, no state to reset.
 
     email = f"TEST_reg_{uuid.uuid4().hex[:8]}@example.com"
     r = await ac.post("/api/auth/register", json={

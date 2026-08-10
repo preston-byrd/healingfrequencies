@@ -634,3 +634,15 @@
   - **NOTE** — production-observable. Redeploy required. Preview shows `delivered:false` on all sends because `solarisounds.com` DNS verification hasn't propagated to this Resend account's sending list (or test recipients are `@example.com` which Resend refuses). Once the domain is fully verified in the Resend dashboard AND real recipient addresses are used, `delivered:true` responses will start flowing.
 
 
+
+- **Admin New-User Registration Notification (Feb 2026, iter 75)**: Every successful registration now fires exactly one email to `RESEND_ADMIN_RECIPIENT` with the exact subject `New User Registration - Solarisound` and a clean informational body containing: **Name · Email · Registered (human-readable date) · Method (Email / Google / …) · Plan (Free / Trial / Pro)**. Purely informational — no CTAs, no action-required copy. Retires the previous 5-minute digest buffer in favour of per-registration delivery per product spec (the existing per-IP register throttle at 15/hr already caps abuse, so digest batching is no longer necessary).
+  - **New helpers**:
+    - `_notify_admin_registration(user, method='email')` — the per-registration send. Silent no-op when Resend isn't configured. Wraps user-controlled name/email via `_html_escape` before templating.
+    - `_derive_plan_label(user)` — computes `'Free' | 'Trial' | 'Pro'` from `pro_until` / `stripe_trial_end` / `pro_expires_at` flags with proper `datetime.fromisoformat` parsing (timezone-aware — no fragile string-lex comparisons).
+  - **Removed dead code** — `_notify_admin_new_user`, `_queue_admin_signup_alert`, `_flush_admin_signup_digest`, `_admin_signup_buffer`, `_admin_signup_flush_task`, `_admin_signup_lock`, `_admin_signup_last_sent_at`, `_ADMIN_SIGNUP_DIGEST_WINDOW_S`, `_ADMIN_SIGNUP_DIGEST_MAX`.
+  - **Trigger discipline** — admin notify fires ONLY on the 200-success path of `POST /api/auth/register`. Duplicate-email (400), Pydantic validation (422), and per-IP-rate-limit (429) branches never fire it. Welcome email to the user still fires alongside admin notify (both as `asyncio.create_task` so registration is not blocked on delivery).
+  - **Verified** — testing_agent_v3_fork iter_73: **45/45 pass** (14 new admin-notify tests + 31 existing regression tests). Subject verified character-for-character. HTML injection escaped. Silent no-op when RESEND vars blank. All three failure branches confirmed to skip the admin notify. Legacy digest symbols confirmed absent from server.py via grep.
+  - **Files** — `backend/server.py` (new `_notify_admin_registration` + `_derive_plan_label`, removed legacy digest block, register endpoint updated), `backend/tests/test_admin_registration_notify.py` (new — 13 tests), `backend/tests/test_resend_from_address.py` (cleaned dead references to removed digest symbols).
+  - **NOTE** — production-observable. Redeploy required to reach solarisound.com.
+
+

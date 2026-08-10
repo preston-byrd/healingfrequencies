@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 74 admin new-user registration notification: all 12 requested behaviours verified via new pytest suite tests/test_admin_registration_notify.py (14 tests) plus regression on test_resend_from_address.py (6), test_support_contact.py (6), test_admin_support_inbox.py (19). 45/45 passed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_registration_notify.py",
+    "/app/backend/tests/test_resend_from_address.py",
+    "/app/test_reports/pytest/iter74_admin_notify.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 7481 lines — should be split into modules (auth, email, admin, stripe, sessions) for maintainability. Not blocking but growing risk.",
+    "_derive_plan_label uses ISO-string comparison against datetime.now().isoformat() to check 'future' — string-lexicographic comparison of ISO-8601 timestamps works but only if both are UTC (with same trailing +00:00 shape). Users seeded with a naive/timezone-differing pro_until could produce wrong labels. Consider parsing to datetime and comparing objects. Currently OK for the register-time path since fresh users have neither flag set.",
+    "_notify_admin_registration falls back to datetime.now(UTC) if created_at parsing fails — silent behaviour. Since the register endpoint always stamps created_at with isoformat() this is safe today but the fallback masks bugs. A logger.debug on the except would help future forensics."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_admin_registration_notify.py (new)",
+    "/app/backend/tests/test_resend_from_address.py (removed dead reference to _admin_signup_buffer/_admin_signup_last_sent_at as instructed)"
+  ],
+  "success_rate": {"backend": "100% (45/45)", "frontend": "not tested (backend-only request)"},
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (used by regression suites)",
+  "seed_data_creation": "Each register test creates a TEST_-prefixed user and cleans it up via pymongo in a finally block. Rate-limit test cleans up all TEST_rl_* users too.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter 74 verified. Subject string 'New User Registration - Solarisound' is exact. Admin notify fires only on 200-registration path; duplicate (400), Pydantic validation (422), and rate-limited (429) branches all skip it (verified via unittest.mock.patch). Legacy digest helpers (_queue_admin_signup_alert, _flush_admin_signup_digest, _notify_admin_new_user, _admin_signup_buffer) all confirmed absent from server.py via grep test. RESEND_ADMIN_RECIPIENT / RESEND_API_KEY empty branches confirmed silent no-op. HTML injection escaped. Welcome-email regression still fires (both tasks queued per success)."
+}
