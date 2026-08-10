@@ -8,6 +8,8 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import AdminSupportInbox from '@/components/AdminSupportInbox';
+import AdminEmailEngagement from '@/components/AdminEmailEngagement';
+import NudgePreferencesCard from '@/components/NudgePreferencesCard';
 import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
 import MyJourneySection from '@/components/MyJourneySection';
 import MyPatternsSection from '@/components/MyPatternsSection';
@@ -842,6 +844,10 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
           )}
         </div>
 
+        {/* Email preferences — user can pause / weekly-adjust the
+            re-engagement nudge emails without leaving the app. */}
+        <NudgePreferencesCard />
+
         {/* Admin: Security dashboard tile */}
         {sub.is_admin && security && (
           <div className="glass p-6 border border-[#C4A67A]/30" data-testid="admin-security-card">
@@ -1201,6 +1207,9 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             bottom of the admin section so the most operational tool is
             right where the admin ends up scrolling to. */}
         {sub.is_admin && <AdminSupportInbox />}
+
+        {/* Admin: Email Engagement — re-engagement nudge analytics. */}
+        {sub.is_admin && <AdminEmailEngagement />}
       </div>
 
       {celebratingPlan && (

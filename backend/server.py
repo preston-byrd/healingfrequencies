@@ -25,6 +25,7 @@ from emergentintegrations.payments.stripe.checkout import (
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import json
 import re
+import random
 try:
     import resend as _resend  # transactional email — optional, gracefully no-op if key missing
 except Exception:  # pragma: no cover
@@ -433,6 +434,354 @@ async def _notify_admin_registration(user: dict, method: str = "email") -> None:
         logger.warning("[resend] admin registration notify failed: %s", type(e).__name__)
 
 
+# ---- Re-engagement email nudges --------------------------------------------
+# Automated warm re-engagement emails sent to users who haven't logged in
+# recently. 4-tier sequence at 72h → 7d → 14d → 30d, gated by a per-user
+# time window (9am CST default, never 22:00-05:00 CST). Message copy comes
+# from three pools (has-Harmonic-Blueprint / no-HB / all-users) with a
+# rotation rule that never repeats the last variant sent to a given user.
+#
+# Delivery pipeline:
+#   1. Background loop (started in FastAPI lifespan) ticks every 15 min.
+#   2. For each candidate user, decides tier + variant + timing.
+#   3. Sends via Resend (from = noreply@solarisounds.com per iter 74).
+#   4. Records the send in `email_nudges` for open/click tracking + admin
+#      analytics.
+
+from zoneinfo import ZoneInfo
+
+_CST = ZoneInfo("America/Chicago")
+
+# Tier thresholds — a user with `last_login_at` older than this window (and
+# no successful nudge already at this tier) becomes eligible.
+_NUDGE_TIERS = [
+    {"key": "72h", "min_hours": 72,   "max_hours":  7 * 24},
+    {"key": "7d",  "min_hours": 7*24, "max_hours": 14 * 24},
+    {"key": "14d", "min_hours": 14*24, "max_hours": 30 * 24},
+    {"key": "30d", "min_hours": 30*24, "max_hours": 365 * 24},
+]
+
+# Variant pools. Each variant has a stable `key` used for rotation gating.
+_MSG_HB = [
+    {"key": "hb_balanced",   "text": "Hi {name}, you haven't checked in for a little while. I'd love to make sure you're balanced. Your frequencies are waiting."},
+    {"key": "hb_update",     "text": "Hey {name}, it's been a few days. Let's update your Harmonic Blueprint so we can help keep you aligned."},
+    {"key": "hb_reset",      "text": "Hi {name}, your last session was {days} days ago. Your nervous system might be ready for a reset. Let's find your frequency today."},
+    {"key": "hb_eigenmode",  "text": "Hey {name}, your Eigenmode Journey is ready and waiting. A few minutes of sound therapy could be exactly what you need right now."},
+    {"key": "hb_assistant",  "text": "Hi {name}, your Wellness Assistant has a new recommendation ready based on your Harmonic Blueprint. Come see what it's suggesting."},
+    {"key": "hb_streak",     "text": "Hi {name}, we noticed your streak is at risk. Come back today and keep your resonance practice going."},
+]
+_MSG_NO_HB = [
+    {"key": "nohb_setup",     "text": "Hi {name}, I noticed you haven't set up your Harmonic Blueprint yet. If you've got a minute, let's map your unique frequency signature together."},
+    {"key": "nohb_discover",  "text": "Hey {name}, your Harmonic Blueprint is waiting to be discovered. It only takes a few minutes and it will personalize your entire Solarisound experience."},
+    {"key": "nohb_powerful",  "text": "Hi {name}, did you know Solarisound can map your unique harmonic signature? Your Harmonic Blueprint is one of our most powerful features and yours is ready to set up."},
+]
+_MSG_ALL = [
+    {"key": "all_listening",  "text": "Hi {name}, I would love to set up a listening session for you. Sign in and let's try a few frequencies together."},
+    {"key": "all_five_min",   "text": "Hey {name}, even a 5-minute session can shift your whole day. Your frequencies are waiting at solarisound.com."},
+    {"key": "all_topfreq",    "text": "Hi {name}, your {top_freq} Hz session is ready and waiting. Come tune in."},
+]
+
+# 30-day tier gets a warmer, more personal subject and body copy.
+_MSG_30D_TEMPLATE = (
+    "Hi {name}, it's been about a month since your last session. "
+    "We saved your place — your frequencies are still here whenever you're ready. "
+    "Come back for a quiet 5 minutes and see how you feel."
+)
+
+
+def _nudge_tier_for_hours(hours: float) -> Optional[dict]:
+    """Return the tier dict a user falls into, or None if too fresh / too old."""
+    for t in _NUDGE_TIERS:
+        if t["min_hours"] <= hours < t["max_hours"]:
+            return t
+    return None
+
+
+def _in_send_window_cst(now_utc: datetime) -> bool:
+    """9am CST default with a hard block on 22:00–05:00 CST. Since we can't
+    yet target each user's typical session hour (v2), we send during the
+    9am–10am CST slot only — 24h scheduler tick will hit that once per day."""
+    now_cst = now_utc.astimezone(_CST)
+    hour = now_cst.hour
+    if hour < 5 or hour >= 22:
+        return False
+    return 9 <= hour < 10
+
+
+async def _pick_top_frequency_for(user_id: str) -> Optional[float]:
+    """Return the frequency the user tunes to most often (from wellness_journey
+    entries). None if they've never logged a session."""
+    try:
+        cur = db.wellness_journey.aggregate([
+            {"$match": {"user_id": user_id, "frequency": {"$exists": True, "$ne": None}}},
+            {"$group": {"_id": "$frequency", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": 1},
+        ])
+        docs = await cur.to_list(1)
+        return float(docs[0]["_id"]) if docs else None
+    except Exception:
+        return None
+
+
+async def _user_has_harmonic_blueprint(user_id: str) -> bool:
+    try:
+        doc = await db.resonance_profiles.find_one(
+            {"user_id": user_id, "is_eigenmode": True},
+            {"_id": 1},
+        )
+        return bool(doc)
+    except Exception:
+        return False
+
+
+def _pick_variant(pool: list, last_key: Optional[str]) -> dict:
+    """Rotate variants — never repeat the last one sent. Falls back to the
+    first pool entry if `last_key` is the only variant (single-item pool)."""
+    if last_key:
+        alt = [v for v in pool if v["key"] != last_key]
+        if alt:
+            return random.choice(alt)
+    return random.choice(pool)
+
+
+def _build_frontend_url() -> str:
+    """Canonical base URL for the CTA button and deep links inside the email.
+    Prefers the configured FRONTEND_URL; falls back to solarisound.com."""
+    base = os.environ.get("FRONTEND_URL", "").strip()
+    if base:
+        return base.rstrip("/")
+    return "https://solarisound.com"
+
+
+def _nudge_cta_url(user_id: str, nudge_id: str, top_freq: Optional[float], tier_key: str) -> str:
+    """CTA link — for the 14d + 30d tiers, deep-link into a pre-loaded
+    session with the user's most-played frequency. For earlier tiers, just
+    open the homepage. Also carries the nudge_id so /api/e/track/click can
+    stamp the open + click before redirecting."""
+    base = _build_frontend_url()
+    target = base
+    if tier_key in ("14d", "30d") and top_freq:
+        # /play route reads ?frequency=<hz> to preload a session.
+        target = f"{base}/play?frequency={top_freq:g}"
+    # Click-tracking wrapper: hit our backend first, which records the click
+    # and 302s to the real URL.
+    api_base = base  # same origin — /api/e/track/click will exist on prod
+    return f"{api_base}/api/e/track/click/{nudge_id}?to={_url_quote(target)}"
+
+
+def _url_quote(s: str) -> str:
+    from urllib.parse import quote
+    return quote(s, safe="")
+
+
+def _nudge_subject_for(tier_key: str, name: str) -> str:
+    safe_name = (name or "").strip() or "there"
+    if tier_key == "30d":
+        return f"We miss you, {safe_name}"
+    if tier_key == "14d":
+        return f"Your frequencies are still here, {safe_name}"
+    if tier_key == "7d":
+        return f"A few days away — {safe_name}, we saved your spot"
+    return "Your frequencies are waiting"
+
+
+def _render_nudge_html(*, name: str, body_text: str, cta_url: str, nudge_id: str,
+                       unsubscribe_url: str, preferences_url: str, top_freq: Optional[float]) -> str:
+    """One template shared across all four tiers. Variant / tier differences
+    live in body_text + subject; the design chrome stays consistent."""
+    safe_body = _html_escape(body_text).replace("\n", "<br/>")
+    base = _build_frontend_url()
+    freq_line = ""
+    if top_freq:
+        freq_line = (
+            f'<div style="padding-top: 14px; font-family: \'Cormorant Garamond\', Georgia, serif; '
+            f'font-size: 20px; color: #C4A67A;">Your most-played: {top_freq:g} Hz</div>'
+        )
+    # 1×1 tracking pixel for open rate.
+    pixel = f'<img src="{base}/api/e/track/open/{nudge_id}" width="1" height="1" alt="" style="display:none;" />'
+    return f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 540px; margin: 0; padding: 28px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound</td></tr>
+      <tr><td style="padding-top: 12px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 28px; font-weight: 400; color: #E8E3D9;">A little check-in</td></tr>
+      <tr><td style="padding-top: 18px; font-size: 15px; color: #C9DED6; line-height: 1.65;">{safe_body}</td></tr>
+      <tr><td>{freq_line}</td></tr>
+      <tr><td style="padding-top: 28px;">
+        <a href="{cta_url}" style="display: inline-block; padding: 13px 26px; background: #C4A67A; color: #08120F; border-radius: 999px; text-decoration: none; font-weight: 500; font-size: 14px;">Return to My Frequencies</a>
+      </td></tr>
+      <tr><td style="padding-top: 40px; font-size: 11px; color: #5A6B65; line-height: 1.5;">
+        You're receiving this because you signed up at solarisound.com.
+        <a href="{preferences_url}" style="color: #8A9A92; text-decoration: underline;">Get these weekly instead</a>
+        &nbsp;·&nbsp;
+        <a href="{unsubscribe_url}" style="color: #8A9A92; text-decoration: underline;">Unsubscribe</a>
+      </td></tr>
+      {pixel}
+    </table>
+    """
+
+
+async def _ensure_unsub_token(user: dict) -> str:
+    """Lazily generate a per-user unsubscribe token. Persisted so the same
+    link works forever (users often click months later)."""
+    tok = user.get("nudge_unsubscribe_token")
+    if tok:
+        return tok
+    tok = str(uuid.uuid4())
+    await db.users.update_one({"id": user["id"]}, {"$set": {"nudge_unsubscribe_token": tok}})
+    return tok
+
+
+async def _send_reengagement_nudge(user: dict, tier: dict, dry_run: bool = False) -> Optional[dict]:
+    """Compose + send one nudge. Returns the persisted email_nudges doc on
+    success (or the composed doc when dry_run=True), None on skip."""
+    if not _resend or not _RESEND_API_KEY:
+        return None
+    now = datetime.now(timezone.utc)
+    tier_key = tier["key"]
+    name = (user.get("name") or "").strip() or user.get("email", "").split("@")[0]
+
+    # Pool selection — HB set → HB + all-users pools. Otherwise no-HB + all.
+    has_hb = await _user_has_harmonic_blueprint(user["id"])
+    if tier_key == "30d":
+        # 30-day tier uses the fixed "we miss you" template — no rotation.
+        variant_key = "miss_you_30d"
+        top_freq = await _pick_top_frequency_for(user["id"])
+        body_text = _MSG_30D_TEMPLATE.format(name=name)
+    else:
+        pool = (_MSG_HB if has_hb else _MSG_NO_HB) + _MSG_ALL
+        # Rotation — read the last variant this user was sent.
+        last = await db.email_nudges.find_one(
+            {"user_id": user["id"]},
+            sort=[("sent_at", -1)],
+        )
+        last_key = (last or {}).get("variant_key")
+        variant = _pick_variant(pool, last_key)
+        variant_key = variant["key"]
+        top_freq = await _pick_top_frequency_for(user["id"])
+        # Days since last login for the 'X days ago' interpolation.
+        last_iso = user.get("last_login_at") or user.get("created_at")
+        try:
+            days_since = int((now - datetime.fromisoformat(last_iso.replace("Z", "+00:00"))).total_seconds() // 86400)
+        except Exception:
+            days_since = 0
+        body_text = variant["text"].format(
+            name=name,
+            days=days_since,
+            top_freq=(f"{top_freq:g}" if top_freq else "528"),
+        )
+
+    nudge_id = str(uuid.uuid4())
+    unsub_tok = await _ensure_unsub_token(user)
+    base = _build_frontend_url()
+    unsub_url = f"{base}/api/e/unsub/{unsub_tok}"
+    prefs_url = f"{base}/api/e/prefs/{unsub_tok}?cadence=weekly"
+    cta_url = _nudge_cta_url(user["id"], nudge_id, top_freq, tier_key)
+    subject = _nudge_subject_for(tier_key, name)
+    html = _render_nudge_html(
+        name=name, body_text=body_text, cta_url=cta_url,
+        nudge_id=nudge_id, unsubscribe_url=unsub_url,
+        preferences_url=prefs_url, top_freq=(top_freq if tier_key in ("7d", "14d", "30d") else None),
+    )
+
+    doc = {
+        "id": nudge_id,
+        "user_id": user["id"],
+        "user_email": user.get("email"),
+        "tier": tier_key,
+        "variant_key": variant_key,
+        "has_hb": has_hb,
+        "top_freq": top_freq,
+        "subject": subject,
+        "sent_at": now.isoformat(),
+        "delivered": False,
+        "opened_at": None,
+        "clicked_at": None,
+        "resend_id": None,
+    }
+
+    if dry_run:
+        return doc
+
+    resend_id = await asyncio.to_thread(_send_email_sync, user["email"], subject, html)
+    doc["resend_id"] = resend_id
+    doc["delivered"] = bool(resend_id)
+    try:
+        await db.email_nudges.insert_one(doc)
+    except Exception as e:
+        logger.warning("[nudge] insert failed: %s", type(e).__name__)
+    return doc
+
+
+async def _reengagement_tick() -> dict:
+    """Single pass of the scheduler. Returns a small dict of counters so
+    tests + the admin diagnostics endpoint can inspect results without
+    parsing logs."""
+    now = datetime.now(timezone.utc)
+    stats = {"scanned": 0, "sent": 0, "skipped_window": 0, "skipped_unsub": 0, "skipped_recent": 0, "skipped_no_tier": 0, "skipped_already_sent": 0}
+    if not _in_send_window_cst(now):
+        stats["skipped_window"] = 1
+        return stats
+    # Only scan users whose last_login_at is at least 72h old.
+    cutoff = (now - timedelta(hours=72)).isoformat()
+    cursor = db.users.find(
+        {"last_login_at": {"$lte": cutoff}, "$or": [
+            {"nudge_unsubscribed": {"$ne": True}}, {"nudge_unsubscribed": {"$exists": False}},
+        ]},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "last_login_at": 1, "created_at": 1,
+         "nudge_unsubscribed": 1, "nudge_cadence": 1, "nudge_unsubscribe_token": 1,
+         "nudge_sequence_reset_at": 1},
+    )
+    async for u in cursor:
+        stats["scanned"] += 1
+        if u.get("nudge_unsubscribed"):
+            stats["skipped_unsub"] += 1
+            continue
+        # Compute the login-reset watermark UP FRONT so both the recency and
+        # already-sent gates scope their queries to nudges sent after the
+        # user's most recent login. Without this, a nudge sent BEFORE the
+        # last login incorrectly counts as "recent" and blocks new sends
+        # even though the spec says login resets the sequence.
+        reset_at = u.get("nudge_sequence_reset_at") or u.get("last_login_at")
+        # Cadence check — weekly users only get one nudge every 7 days.
+        cadence = (u.get("nudge_cadence") or "default").lower()
+        recency_hours = 72 if cadence == "default" else (7 * 24)
+        recency_query = {"user_id": u["id"]}
+        if reset_at:
+            recency_query["sent_at"] = {"$gt": reset_at}
+        last = await db.email_nudges.find_one(recency_query, sort=[("sent_at", -1)])
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last["sent_at"].replace("Z", "+00:00"))
+                if (now - last_dt).total_seconds() < recency_hours * 3600:
+                    stats["skipped_recent"] += 1
+                    continue
+            except Exception:
+                pass
+        # Tier decision.
+        last_iso = u.get("last_login_at") or u.get("created_at")
+        try:
+            last_dt = datetime.fromisoformat(last_iso.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        hours = (now - last_dt).total_seconds() / 3600.0
+        tier = _nudge_tier_for_hours(hours)
+        if not tier:
+            stats["skipped_no_tier"] += 1
+            continue
+        # Have we already sent this tier to this user in this login-gap?
+        # Same watermark used by the recency gate above.
+        already = await db.email_nudges.find_one({
+            "user_id": u["id"], "tier": tier["key"],
+            **({"sent_at": {"$gt": reset_at}} if reset_at else {}),
+        })
+        if already:
+            stats["skipped_already_sent"] += 1
+            continue
+        await _send_reengagement_nudge(u, tier)
+        stats["sent"] += 1
+    return stats
+
+
 # --- Setup --------------------------------------------------------------------
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -627,6 +976,11 @@ async def register(body: RegisterIn, request: Request, response: Response):
         "name": (body.name or email.split("@")[0])[:120],
         "password_hash": hash_password(body.password),
         "created_at": datetime.now(timezone.utc).isoformat(),
+        # Seed last_login_at with the registration moment so the re-engagement
+        # scheduler doesn't immediately flag a brand-new user as "inactive
+        # 72h" if their creation happened at an old timestamp during a
+        # data migration.
+        "last_login_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(user)
     # Audit + counter for the admin security tile.
@@ -674,6 +1028,17 @@ async def login(body: LoginIn, request: Request, response: Response):
         "auth.login_succeeded", request,
         user_id=user["id"], user_email=email,
     )
+    # Stamp last_login_at so the re-engagement scheduler can compute
+    # "days since last login" for tier decisions. Also clears any pending
+    # nudge sequence — a fresh login means the user is engaged again.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"last_login_at": now_iso, "nudge_sequence_reset_at": now_iso}},
+        )
+    except Exception as e:
+        logger.warning("[auth.login] last_login stamp failed: %s", type(e).__name__)
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
     return {"id": user["id"], "email": email, "name": user.get("name", ""), "token": token}
@@ -1268,6 +1633,173 @@ async def admin_support_delete(msg_id: str, user: dict = Depends(get_current_use
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Message not found")
     return {"ok": True}
+
+
+# --- Re-engagement email: tracking + prefs + admin analytics ---------------
+# Public endpoints (no auth) used by the outbound HTML: open pixel + click
+# redirect + one-tap unsubscribe. All accept a per-nudge or per-user token
+# so no personal state is required to render them.
+
+@api.get("/e/track/open/{nudge_id}")
+async def nudge_track_open(nudge_id: str):
+    """Transparent 1×1 GIF used as the email's open-tracking pixel."""
+    try:
+        await db.email_nudges.update_one(
+            {"id": nudge_id, "opened_at": None},
+            {"$set": {"opened_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    except Exception:
+        pass
+    # A single transparent 43-byte GIF89a payload.
+    pixel = (
+        b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04"
+        b"\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+    )
+    return Response(content=pixel, media_type="image/gif", headers={"Cache-Control": "no-store"})
+
+
+@api.get("/e/track/click/{nudge_id}")
+async def nudge_track_click(nudge_id: str, to: str = ""):
+    """Records the click on the nudge CTA, then 302s the recipient to their
+    intended destination. `to` is a fully-qualified URL — we validate it
+    against a strict prefix allow-list so the redirect can't be abused as
+    an open redirector."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        await db.email_nudges.update_one(
+            {"id": nudge_id},
+            {"$set": {"clicked_at": now}},
+        )
+        # A click implies an open — stamp opened_at too if we somehow missed
+        # the pixel (Gmail image proxy caching, etc.).
+        await db.email_nudges.update_one(
+            {"id": nudge_id, "opened_at": None},
+            {"$set": {"opened_at": now}},
+        )
+    except Exception:
+        pass
+    base = _build_frontend_url()
+    dest = to or base
+    # Anti-open-redirect — only allow same-origin destinations.
+    if not (dest.startswith(base + "/") or dest == base):
+        dest = base
+    return Response(status_code=302, headers={"Location": dest})
+
+
+@api.get("/e/unsub/{token}")
+async def nudge_unsubscribe(token: str):
+    """One-tap unsubscribe from re-engagement emails. GET so the link in
+    the email body works without a form. Idempotent."""
+    if not token or len(token) < 8:
+        raise HTTPException(status_code=400, detail="Invalid unsubscribe link")
+    res = await db.users.update_one(
+        {"nudge_unsubscribe_token": token},
+        {"$set": {"nudge_unsubscribed": True}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Unknown unsubscribe link")
+    # Warm HTML confirmation instead of raw JSON — this is user-facing.
+    html = """<!doctype html><html><head><meta charset="utf-8"><title>Unsubscribed</title></head>
+    <body style="background:#08120F;color:#E8E3D9;font-family:system-ui,sans-serif;text-align:center;padding:80px 20px;">
+      <h1 style="font-family:'Cormorant Garamond',Georgia,serif;font-weight:400;">You're unsubscribed.</h1>
+      <p style="color:#8A9A92;max-width:420px;margin:20px auto;line-height:1.6;">We won't send you any more re-engagement emails. Your account is unchanged — sign in any time.</p>
+      <p style="padding-top:20px;"><a href="/" style="color:#C4A67A;">Return to Solarisound</a></p>
+    </body></html>"""
+    return Response(content=html, media_type="text/html")
+
+
+@api.get("/e/prefs/{token}")
+async def nudge_prefs(token: str, cadence: str = "weekly"):
+    """One-tap preference change from the email footer. Currently supports
+    switching cadence between 'default' (72h) and 'weekly'."""
+    if cadence not in ("default", "weekly", "off"):
+        cadence = "weekly"
+    res = await db.users.update_one(
+        {"nudge_unsubscribe_token": token},
+        {"$set": {"nudge_cadence": cadence,
+                  "nudge_unsubscribed": cadence == "off"}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Unknown link")
+    label = "weekly" if cadence == "weekly" else ("paused" if cadence == "off" else "default (every few days)")
+    html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Preferences updated</title></head>
+    <body style="background:#08120F;color:#E8E3D9;font-family:system-ui,sans-serif;text-align:center;padding:80px 20px;">
+      <h1 style="font-family:'Cormorant Garamond',Georgia,serif;font-weight:400;">Set to {label}.</h1>
+      <p style="color:#8A9A92;max-width:420px;margin:20px auto;line-height:1.6;">Change this any time from your account.</p>
+      <p style="padding-top:20px;"><a href="/" style="color:#C4A67A;">Return to Solarisound</a></p>
+    </body></html>"""
+    return Response(content=html, media_type="text/html")
+
+
+class NudgePrefsIn(BaseModel):
+    unsubscribed: Optional[bool] = None
+    cadence: Optional[str] = None  # 'default' | 'weekly' | 'off'
+
+
+@api.get("/me/nudge-prefs")
+async def me_get_nudge_prefs(user: dict = Depends(get_current_user)):
+    doc = await db.users.find_one({"id": user["id"]}, {"nudge_unsubscribed": 1, "nudge_cadence": 1, "_id": 0})
+    return {
+        "unsubscribed": bool((doc or {}).get("nudge_unsubscribed")),
+        "cadence": (doc or {}).get("nudge_cadence") or "default",
+    }
+
+
+@api.put("/me/nudge-prefs")
+async def me_update_nudge_prefs(body: NudgePrefsIn, user: dict = Depends(get_current_user)):
+    upd = {}
+    if body.unsubscribed is not None:
+        upd["nudge_unsubscribed"] = bool(body.unsubscribed)
+    if body.cadence is not None:
+        c = body.cadence.lower()
+        if c not in ("default", "weekly", "off"):
+            raise HTTPException(status_code=400, detail="Invalid cadence")
+        upd["nudge_cadence"] = c
+        if c == "off":
+            upd["nudge_unsubscribed"] = True
+    if not upd:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    await db.users.update_one({"id": user["id"]}, {"$set": upd})
+    return {"ok": True, **upd}
+
+
+@api.get("/admin/email-engagement")
+async def admin_email_engagement(user: dict = Depends(get_current_user)):
+    """Aggregate stats + recent nudges for the admin Email Engagement panel."""
+    _require_admin(user)
+    total = await db.email_nudges.count_documents({})
+    opened = await db.email_nudges.count_documents({"opened_at": {"$ne": None}})
+    clicked = await db.email_nudges.count_documents({"clicked_at": {"$ne": None}})
+    delivered = await db.email_nudges.count_documents({"delivered": True})
+    per_tier = {}
+    for tier in ("72h", "7d", "14d", "30d"):
+        per_tier[tier] = {
+            "sent":    await db.email_nudges.count_documents({"tier": tier}),
+            "opened":  await db.email_nudges.count_documents({"tier": tier, "opened_at": {"$ne": None}}),
+            "clicked": await db.email_nudges.count_documents({"tier": tier, "clicked_at": {"$ne": None}}),
+        }
+    recent = await db.email_nudges.find({}, {"_id": 0}).sort("sent_at", -1).limit(25).to_list(25)
+    unsub_count = await db.users.count_documents({"nudge_unsubscribed": True})
+    return {
+        "total": total,
+        "delivered": delivered,
+        "opened": opened,
+        "clicked": clicked,
+        "open_rate": round(opened / total, 3) if total else 0.0,
+        "click_rate": round(clicked / total, 3) if total else 0.0,
+        "per_tier": per_tier,
+        "unsubscribed_users": unsub_count,
+        "recent": recent,
+    }
+
+
+@api.post("/admin/email-engagement/tick")
+async def admin_email_engagement_tick(user: dict = Depends(get_current_user)):
+    """Admin diagnostic — fire one scheduler pass RIGHT NOW without waiting
+    for the 15-min tick. Returns the same stats dict the loop logs."""
+    _require_admin(user)
+    stats = await _reengagement_tick()
+    return {"ok": True, "stats": stats}
 
 
 
@@ -7481,9 +8013,39 @@ async def _lifespan_startup():
         if updates:
             await db.users.update_one({"email": admin_email}, {"$set": updates})
             logger.info("[seed] admin fields updated: %s", list(updates.keys()))
+    # Kick off the re-engagement scheduler as a background task. Silent
+    # no-op inside the loop when Resend isn't configured.
+    global _reengagement_task
+    _reengagement_task = asyncio.create_task(_reengagement_scheduler_loop())
+
+
+_reengagement_task: Optional[asyncio.Task] = None
+_REENGAGEMENT_TICK_INTERVAL_S = int(os.environ.get("REENGAGEMENT_TICK_INTERVAL_S", "900"))  # 15 min default
+
+
+async def _reengagement_scheduler_loop():
+    """Long-running background loop that fires _reengagement_tick() at a
+    fixed cadence. Sleeps between ticks so a slow tick doesn't cascade.
+    Any exception inside the tick is swallowed + logged so the loop
+    survives transient DB / Resend outages."""
+    while True:
+        try:
+            stats = await _reengagement_tick()
+            if stats.get("sent"):
+                logger.info("[nudge] tick sent=%s scanned=%s", stats["sent"], stats["scanned"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[nudge] tick error: %s", type(e).__name__)
+        await asyncio.sleep(_REENGAGEMENT_TICK_INTERVAL_S)
 
 
 async def _lifespan_shutdown():
+    try:
+        if _reengagement_task and not _reengagement_task.done():
+            _reengagement_task.cancel()
+    except Exception:
+        pass
     client.close()
 
 # NOTE: startup + shutdown are wired via the `lifespan=` context manager
