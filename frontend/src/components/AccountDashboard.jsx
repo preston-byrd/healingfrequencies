@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search, Trash2, CreditCard, Link2, Apple } from 'lucide-react';
+import { ArrowLeft, Sparkles, Check, X, Loader2, Settings, Receipt, Users, Search, Trash2, CreditCard, Link2, Apple, Eye, EyeOff } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { ThankYouCelebration } from '@/components/ThankYouCelebration';
@@ -47,6 +47,11 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
   // password
   const [curPw, setCurPw] = useState('');
   const [newPw, setNewPw] = useState('');
+  // Show/hide toggles for the Change Password inputs — off by default for
+  // shoulder-surf safety; user can flip either independently to verify the
+  // exact string they typed on flaky mobile keyboards.
+  const [showCurPw, setShowCurPw] = useState(false);
+  const [showNewPw, setShowNewPw] = useState(false);
 
   // post-payment celebration
   const [celebratingPlan, setCelebratingPlan] = useState(null);
@@ -789,20 +794,46 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             <div className="label-tiny">Change Password</div>
           </div>
           <form onSubmit={changePassword} className="space-y-3 max-w-sm">
-            <input
-              data-testid="current-password-input"
-              type="password" required value={curPw}
-              onChange={(e) => setCurPw(e.target.value)}
-              placeholder="Current password"
-              className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] text-sm"
-            />
-            <input
-              data-testid="new-password-input"
-              type="password" required minLength={6} value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              placeholder="New password (min 6 chars)"
-              className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] text-sm"
-            />
+            <div className="relative">
+              <input
+                data-testid="current-password-input"
+                type={showCurPw ? 'text' : 'password'} required value={curPw}
+                onChange={(e) => setCurPw(e.target.value)}
+                placeholder="Current password"
+                className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 pr-9 text-[#E8E3D9] text-sm"
+              />
+              <button
+                type="button"
+                data-testid="current-password-toggle"
+                onClick={() => setShowCurPw((v) => !v)}
+                aria-label={showCurPw ? 'Hide current password' : 'Show current password'}
+                aria-pressed={showCurPw}
+                tabIndex={-1}
+                className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[#8A9A92] hover:text-[#C9DED6] transition-colors"
+              >
+                {showCurPw ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+            <div className="relative">
+              <input
+                data-testid="new-password-input"
+                type={showNewPw ? 'text' : 'password'} required minLength={6} value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+                placeholder="New password (min 6 chars)"
+                className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 pr-9 text-[#E8E3D9] text-sm"
+              />
+              <button
+                type="button"
+                data-testid="new-password-toggle"
+                onClick={() => setShowNewPw((v) => !v)}
+                aria-label={showNewPw ? 'Hide new password' : 'Show new password'}
+                aria-pressed={showNewPw}
+                tabIndex={-1}
+                className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[#8A9A92] hover:text-[#C9DED6] transition-colors"
+              >
+                {showNewPw ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
             <button
               data-testid="change-password-button"
               type="submit" disabled={busy === 'pw'}
