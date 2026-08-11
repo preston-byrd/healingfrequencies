@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2, Bell, Info } from 'lucide-react';
+import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2, Bell, Info, CircleDot } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
 import Breathwork from '@/components/Breathwork';
+import AmbientPulse from '@/components/AmbientPulse';
 import WellnessCheckinCard from '@/components/WellnessCheckinCard';
 import SessionShareCard from '@/components/SessionShareCard';
 import SessionUnlockCard from '@/components/SessionUnlockCard';
@@ -164,6 +165,45 @@ export default function Dashboard({ onOpenAccount }) {
     return Math.max(0, Math.round((endAt - Date.now()) / 1000));
   }); // seconds; 0 = not running
   const [breathwork, setBreathwork] = useState(false);
+  // Ambient Pulse — subtle radial "breathing" glow behind the visualizer.
+  // Persisted per-user via localStorage; default ON for Pro, OFF for free.
+  const [ambientPulse, setAmbientPulse] = useState(false);
+  const [ambientPulseGate, setAmbientPulseGate] = useState(''); // '' | 'pro-only'
+  // Ambient Pulse: load persisted preference on mount / user change.
+  // Default: ON for Pro, OFF for free (product spec). Stored per-user so
+  // it survives across sessions and across devices when the user next
+  // signs in.
+  useEffect(() => {
+    if (!user) return;
+    const uid = user.id || user.email || 'anon';
+    try {
+      const raw = localStorage.getItem(`solar:ambientPulse:${uid}`);
+      if (raw === '1' || raw === '0') {
+        setAmbientPulse(raw === '1');
+      } else {
+        setAmbientPulse(!!isPro);
+      }
+    } catch (_) {
+      setAmbientPulse(!!isPro);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, isPro]);
+
+  const toggleAmbientPulse = () => {
+    if (!isPro) {
+      setAmbientPulseGate('pro-only');
+      setTimeout(() => setAmbientPulseGate(''), 3500);
+      return;
+    }
+    const next = !ambientPulse;
+    setAmbientPulse(next);
+    try {
+      const uid = user?.id || user?.email || 'anon';
+      localStorage.setItem(`solar:ambientPulse:${uid}`, next ? '1' : '0');
+    } catch (_) { /* private mode / storage disabled */ }
+  };
+
+
   const [sessions, setSessions] = useState([]);
   const [saveName, setSaveName] = useState('');
   const [err, setErr] = useState('');
@@ -1947,6 +1987,17 @@ export default function Dashboard({ onOpenAccount }) {
               collision with either the frequency name above OR the timer
               below on portrait mobile. Above `lg` the sidebars appear so
               min-h reverts to 0 (flex-1 handles the growth). */}
+          {/* Ambient Pulse — sits BEHIND the visualizer so the glow radiates
+              outward from the center of the frequency ring. Absolutely
+              positioned, pointer-events:none, aria-hidden, z-[1]. */}
+          <AmbientPulse
+            enabled={ambientPulse && isPro}
+            playing={state.playing}
+            frequencyHz={flowStage?.meta?.hz || state.frequency}
+            breathwork={breathwork}
+            sleepMode={activeSoundscape === 'sleep'}
+            sleepProgress={duration > 0 ? Math.max(0, Math.min(1, 1 - (remaining / (duration * 60)))) : 0}
+          />
           <Visualizer playing={state.playing} frequency={state.frequency} mode={visualMode} />
           <Breathwork active={breathwork && state.playing} />
           <WellnessCheckinCard
@@ -1963,6 +2014,34 @@ export default function Dashboard({ onOpenAccount }) {
             onUpgrade={onOpenAccount}
             session={shareSession}
           />
+          {/* Ambient Pulse — free-tier upgrade prompt. Appears when a free
+              user taps the toggle; auto-dismisses after 3.5s. Includes the
+              accessibility note about slow gentle transitions being safe. */}
+          {ambientPulseGate === 'pro-only' && (
+            <div
+              data-testid="ambient-pulse-gate"
+              className="absolute left-1/2 -translate-x-1/2 top-24 z-30 max-w-xs pointer-events-auto"
+            >
+              <div className="rounded-xl border border-[#C4A67A]/50 bg-[#0B1814]/95 backdrop-blur-sm p-4 shadow-[0_10px_30px_rgba(0,0,0,0.55)]">
+                <div className="text-[11px] uppercase tracking-[0.2em] text-[#C4A67A] font-mono mb-1">
+                  Pro feature
+                </div>
+                <div className="text-[14px] text-[#E8E3D9] leading-relaxed mb-2">
+                  Ambient Pulse is a Pro feature. Upgrade to experience fully immersive sessions.
+                </div>
+                <div className="text-[11px] text-[#8A9A92] leading-relaxed mb-3">
+                  Ambient Pulse uses very slow, gentle light transitions designed to be safe for all users. If you're sensitive to light changes, keep it off.
+                </div>
+                <button
+                  data-testid="ambient-pulse-upgrade"
+                  onClick={() => { setAmbientPulseGate(''); onOpenAccount && onOpenAccount(); }}
+                  className="w-full py-2 rounded-full bg-[#C4A67A]/20 hover:bg-[#C4A67A]/35 border border-[#C4A67A]/50 hover:border-[#C4A67A] text-[#C4A67A] text-[12px] tracking-wide transition-colors"
+                >
+                  See Pro plans →
+                </button>
+              </div>
+            </div>
+          )}
           <SessionUnlockCard
             open={sessionUnlockOpen}
             onUpgrade={() => { setSessionUnlockOpen(false); onOpenAccount(); }}
@@ -2086,6 +2165,24 @@ export default function Dashboard({ onOpenAccount }) {
                 <span>{keepAwake ? 'Screen on' : 'Keep screen on'}</span>
               </button>
             )}
+            {/* Ambient Pulse — subtle radial breathing glow. Free users see
+                the toggle for discovery but tapping it surfaces an upgrade
+                nudge instead of enabling. Preference persists per-user via
+                localStorage. */}
+            <button
+              data-testid="ambient-pulse-toggle"
+              onClick={toggleAmbientPulse}
+              aria-pressed={ambientPulse && isPro}
+              title={!isPro ? 'Ambient Pulse — Pro feature' : (ambientPulse ? 'The screen breathes with your session — tap to turn off' : 'Turn on Ambient Pulse — the room breathes with you')}
+              className={`group inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-[10px] tracking-[0.18em] uppercase transition-colors ${
+                (ambientPulse && isPro)
+                  ? 'border-[#72C2AC]/60 bg-[#72C2AC]/15 text-[#72C2AC]'
+                  : 'border-[#5C9E8C]/30 bg-black/20 text-[#8A9A92] hover:text-[#E8E3D9]'
+              } ${!isPro ? 'opacity-70' : ''}`}
+            >
+              <CircleDot size={12} className={(ambientPulse && isPro) ? 'text-[#72C2AC]' : 'text-[#8A9A92]'} />
+              <span>Ambient Pulse{!isPro ? ' · Pro' : ''}</span>
+            </button>
             {/* For-best-results listening guide — subtle, non-clinical set of
                 recommendations (wired headphones, moderate volume, quiet
                 environment). Opens a soft glass card, never blocks playback. */}
