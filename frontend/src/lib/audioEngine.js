@@ -115,6 +115,16 @@ class AudioEngine {
       this.master = this.ctx.createGain();
       this.master.gain.value = 1;
       this.master.connect(this.ctx.destination);
+      // Bind statechange BEFORE anything else. This is the ONLY event that
+      // fires reliably when the OS suspends/resumes the audio thread on
+      // mobile (visibilitychange lags behind and may arrive after the
+      // graph is already frozen). Our handler synchronously disconnects
+      // the isochronic LFO on suspend and rebuilds it on resume — so no
+      // pulse-phase drift can leak into the audible output during a
+      // screen-lock cycle.
+      try {
+        this.ctx.addEventListener('statechange', () => this._onCtxStateChange());
+      } catch (e) { _warn('audio.statechange', e); }
       created = true;
     }
     if (this.ctx.state !== 'running') {
@@ -819,6 +829,57 @@ class AudioEngine {
   toggle() { this.playing ? this.stop() : this.start(); }
 
   // ---- Robustness: ensureRunning, health check, visibility handling ---------
+
+  // Fires whenever ctx.state changes. On mobile screen-lock the OS transitions
+  // us to 'suspended' *before* any DOM event (visibilitychange / pagehide /
+  // blur) can reach us. If we don't tear down the isochronic LFO in the same
+  // synchronous tick, when the OS later resumes the audio thread the LFO's
+  // internal square-wave phase is stale and its FIRST output cycle after
+  // resume produces an audible click / phantom pulse — the exact "isochronic
+  // artifact on screen lock" the user reported. Handling it here (rather than
+  // via visibilitychange) gets us in ahead of the OS.
+  _onCtxStateChange() {
+    if (!this.ctx) return;
+    const st = this.ctx.state;
+    if (st === 'suspended' || st === 'interrupted') {
+      // Snap the gate to unity SYNCHRONOUSLY via direct .value assignment —
+      // NOT via setValueAtTime, which requires a running context and would
+      // silently no-op here. Then hard-disconnect the LFO chain so no phase
+      // state persists across the suspension.
+      if (this.playing && this.isochronic > 0 && !this._isoFrozen) {
+        this._isoRateBeforeHide = this.isochronic;
+        try {
+          [this.isoLfo, this.isoSmoother, this.isoScale, this.isoOffset].forEach((n) => {
+            if (!n) return;
+            try { n.disconnect(); } catch (_) {}
+            try { if (typeof n.stop === 'function') n.stop(); } catch (_) {}
+          });
+        } catch (e) { _warn('audio.freeze', e); }
+        this.isoLfo = null;
+        this.isoSmoother = null;
+        this.isoScale = null;
+        this.isoOffset = null;
+        if (this.gateGain) {
+          try { this.gateGain.gain.value = 1; } catch (_) {}
+        }
+        this._isoFrozen = true;
+      }
+    } else if (st === 'running') {
+      // Rebuild the LFO after a brief debounce so the audio thread has
+      // fully spun back up before we schedule fresh oscillator start().
+      if (this._isoFrozen && this.playing && this._isoRateBeforeHide > 0) {
+        clearTimeout(this._isoResumeT);
+        this._isoResumeT = setTimeout(() => {
+          if (!this.playing || !this.gateGain) { this._isoFrozen = false; return; }
+          this._isoFrozen = false;
+          this.isochronic = this._isoRateBeforeHide;
+          this._isoRateBeforeHide = 0;
+          try { this._spawnIsochronicLFO(this.isochronic); } catch (e) { _warn('audio.isoResume', e); }
+        }, 220);
+      }
+    }
+  }
+
   // Callable from any user-gesture path to defensively re-arm the audio ctx.
   // Handles the mobile browser edge case where an implicit suspension (screen
   // lock, tab background) leaves ctx.state === 'suspended' even after the
@@ -838,32 +899,31 @@ class AudioEngine {
   }
 
   // Called by the Dashboard's visibilitychange listener when the page becomes
-  // hidden (screen lock / tab switch / app-switch on mobile). We freeze the
-  // isochronic LFO at unity gain so that when the OS suspends and later
-  // resumes the audio thread mid-square-wave, we don't come back at a random
-  // gate-position that manifests as an audible click or a false-rate pulse.
-  // The base carrier, ambient layers, and MediaStream keep-alive stay live —
-  // no perceptual gap for the user.
+  // hidden (screen lock / tab switch / app-switch on mobile). This is a
+  // BACKUP path — the primary defence against pulse artifacts is now the
+  // AudioContext statechange handler above, which fires ahead of any DOM
+  // event on mobile. But desktop browsers do NOT always transition ctx to
+  // 'suspended' on tab hide, so we keep this belt-and-suspenders trigger.
   freezeIsochronicForBackground() {
     if (!this.ctx || !this.playing) return;
     if (this.isochronic <= 0) return; // nothing to freeze
-    if (this._isoFrozen) return;      // idempotent
+    if (this._isoFrozen) return;      // idempotent — statechange may have fired first
     this._isoRateBeforeHide = this.isochronic;
-    // Tear down the LFO cleanly and pin the gate at 1.0 so the carrier
-    // continues to sound identically to isochronic-off during the freeze.
     this._killIsochronicLFO(1);
     this._isoFrozen = true;
   }
 
   // Called when the tab is visible again and the ctx has been resumed.
   // Rebuilds the LFO at the original rate so pulsing resumes seamlessly.
+  // Idempotent — if statechange already handled the rebuild we no-op.
   resumeIsochronicAfterBackground() {
     if (!this._isoFrozen) return;
+    // If ctx is still suspended, defer — the statechange handler will do it.
+    if (this.ctx && this.ctx.state !== 'running') return;
     this._isoFrozen = false;
     const rate = this._isoRateBeforeHide;
     this._isoRateBeforeHide = 0;
     if (!this.playing || rate <= 0 || !this.gateGain) return;
-    // Restore user-facing state + LFO.
     this.isochronic = rate;
     this._spawnIsochronicLFO(rate);
   }

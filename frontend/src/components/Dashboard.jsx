@@ -414,16 +414,17 @@ export default function Dashboard({ onOpenAccount }) {
   // Also freezes the isochronic LFO on hide + rebuilds it on show so the OS
   // suspend/resume cycle can't leave the square-wave gate at a click-y
   // position or introduce a phantom pulse artifact (Issue 1).
+  //
+  // Primary defence lives in audioEngine._onCtxStateChange (bound directly to
+  // the AudioContext) — that's what fires on mobile screen-lock ahead of any
+  // DOM event. These listeners are the belt-and-suspenders backup for
+  // browsers where DOM events fire but ctx doesn't transition to 'suspended'
+  // (desktop Firefox, some Android Chrome builds).
   useEffect(() => {
-    const onVis = () => {
-      if (document.hidden) {
-        // Screen-lock / tab-switch — pause the pulse LFO cleanly. Base
-        // frequency + ambient layers keep playing via the MediaStream sink.
-        try { audioEngine.freezeIsochronicForBackground(); } catch (_) { /* noop */ }
-        return;
-      }
-      // Coming back into focus — resume ctx first, then rebuild the LFO in
-      // sync with the (now-running) audio thread.
+    const onHide = () => {
+      try { audioEngine.freezeIsochronicForBackground(); } catch (_) { /* noop */ }
+    };
+    const onShow = () => {
       const revive = async () => {
         try { await audioEngine.ensureRunning(); } catch (_) { /* noop */ }
         try { audioEngine.resumeIsochronicAfterBackground(); } catch (_) { /* noop */ }
@@ -433,8 +434,24 @@ export default function Dashboard({ onOpenAccount }) {
       };
       revive();
     };
+    const onVis = () => (document.hidden ? onHide() : onShow());
+    // Multiple event families because different mobile browsers signal the
+    // lock event through different channels:
+    //   • visibilitychange — Android Chrome + most desktop
+    //   • pagehide / pageshow — iOS Safari (fires on screen lock reliably)
+    //   • blur / focus — some Android WebViews
     document.addEventListener('visibilitychange', onVis);
-    return () => document.removeEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', onHide);
+    window.addEventListener('pageshow', onShow);
+    window.addEventListener('blur', onHide);
+    window.addEventListener('focus', onShow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', onHide);
+      window.removeEventListener('pageshow', onShow);
+      window.removeEventListener('blur', onHide);
+      window.removeEventListener('focus', onShow);
+    };
   }, []);
 
   // ---- Background playback: keep screen awake (opt-in) ---------------------
