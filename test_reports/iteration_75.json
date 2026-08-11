@@ -1,0 +1,38 @@
+{
+  "summary": "Validated the two audio-engine fixes (Issue 1 screen-lock isochronic artifacts; Issue 2 silent-playback after frequency change). All 9 test scenarios from the review request passed. Added a test-only window.__audioEngine handle in /app/frontend/src/lib/audioEngine.js to enable probing from Playwright — main agent should remove or gate it behind NODE_ENV before ship.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_results_detail": {
+    "methods_exist": "ensureRunning, freezeIsochronicForBackground, resumeIsochronicAfterBackground, _postStartHealthCheck all present and callable",
+    "ensureRunning_noop_when_running": "before=running, after=running (no-op confirmed)",
+    "ensureRunning_resumes_suspended": "before=suspended, after=running (ctx.resume() triggered as expected)",
+    "rapid_stop_start_cycle": "4 clicks @ 200ms — final state consistent (playing/osc/gate coherent). Note: initial rapid-click test on fresh page was intercepted by Wellness Assistant modal overlay (unrelated to audio); subsequent tests confirmed correctness.",
+    "frequency_switching_stress": "Stop → different preset (528, 396, 741) within 200ms — each yielded playing=true, osc!=null, gateGain!=null, correct frequency. Directly validates the gateGain-local-capture fix in stop(). BEFORE this fix the stale 850ms cleanup would null-out the fresh session's gateGain.",
+    "isochronic_visibility_freeze": "setIsochronic(7) → isoLfo populated at 7 Hz. document hidden → isoLfo=null, _isoFrozen=true, playing=true (carrier unaffected). document visible → isoLfo recreated (truthy again, new instance), _isoFrozen=false, isochronic restored to 7.",
+    "health_check_auto_recovery": "Corrupted gateGain=null 100ms after start. After 3s: gateGain=true, osc=true, playing=true (silent restart worked).",
+    "normal_playback_stability": "Osc reference unchanged over 2.2s of healthy playback — health check does NOT trigger unwanted restart when graph is intact.",
+    "idempotent_stop": "3 consecutive stop() calls — 0 exceptions, playing=false."
+  },
+  "critical_code_review_comments": [
+    "audioEngine.js is 1249 lines — exceeds the 700-line file-size guideline. Consider splitting into ambient / tone / isochronic / robustness modules.",
+    "window.__audioEngine handle I added is currently unconditional. Recommend wrapping in `if (process.env.NODE_ENV !== 'production')` before production build, OR remove after verification.",
+    "_postStartHealthCheck fires stop()+start() unconditionally when broken, but the 900ms wait inside health-check + 850ms cleanup + 800ms fade-in means a corruption-triggered recovery is ~1.7s of silence — acceptable for a rare edge case but worth noting in code comment.",
+    "freezeIsochronicForBackground uses class-field syntax (_isoFrozen = false at class level) — verify Babel/webpack config supports it in all target browsers. It works in the current preview but is a subtle stylistic mismatch with the rest of the file that assigns state in the constructor."
+  ],
+  "test_report_links": [],
+  "action_items": [
+    "Remove (or gate on NODE_ENV) the `window.__audioEngine = audioEngine` line at the bottom of /app/frontend/src/lib/audioEngine.js before shipping. Testing agent added it to enable probing.",
+    "Optional: initialize _isoFrozen / _isoRateBeforeHide in the constructor rather than via class fields for consistency with the rest of the file."
+  ],
+  "updated_files": ["/app/frontend/src/lib/audioEngine.js"],
+  "success_rate": { "backend": "N/A (frontend only)", "frontend": "100% (9/9 scenarios)" },
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Audio-engine fixes validated end-to-end via window.__audioEngine handle. If main agent removes the window handle, use React DevTools or add a test-mode branch to re-probe. Preview URL: https://frequency-healer-31.preview.emergentagent.com. Admin login works and dashboard shows play-pause-button + solfeggio-freq-{hz} presets. Wellness Assistant modal appears on first dashboard load — dismiss (close X) before clicking play if it's blocking.",
+  "test_credentials": "admin@example.com / JuzlUWlMMOjHM0u#m5qv0ds!oYp8 (from /app/memory/test_credentials.md)"
+}

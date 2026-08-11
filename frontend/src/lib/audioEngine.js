@@ -70,6 +70,13 @@ class AudioEngine {
     this._mediaSessionBound = false;
 
     this.playing = false;
+    // Isochronic background-freeze state — flipped true by
+    // freezeIsochronicForBackground() when the tab hides while the user has
+    // isochronic pulse enabled. resumeIsochronicAfterBackground() rebuilds
+    // the LFO on visibility return. Constructor-initialized (rather than
+    // class-field syntax) for stylistic consistency with the rest of the file.
+    this._isoFrozen = false;
+    this._isoRateBeforeHide = 0;
     // Wall-clock timestamp (ms since epoch) at which the current session's
     // Smart-Fade timer is scheduled to hit 00:00. Kept on the singleton
     // (not React state) so Dashboard.jsx can restore the correct
@@ -545,6 +552,9 @@ class AudioEngine {
       if (this._wakeLockWanted) this.requestWakeLock();
 
       this._emit();
+      // Post-start health check (Issue 2 mitigation) — silently restarts the
+      // session if the audio graph is broken after 500ms. Fire-and-forget.
+      this._postStartHealthCheck().catch((e) => _warn('audio.health', e));
     } finally {
       this._starting = false;
     }
@@ -769,15 +779,21 @@ class AudioEngine {
     // so that a subsequent start() (within the cleanup window) doesn't get its
     // brand-new oscillator clobbered when the cleanup timeout fires.
     const oscsLocal = [this.osc, this.oscR].filter(Boolean);
+    // Same discipline for gateGain — a stale cleanup disconnecting the new
+    // start()'s gateGain was the root of the "player shows as playing but no
+    // sound after switching frequencies" bug. Capture-then-compare-by-ref.
+    const gateGainLocal = this.gateGain;
     this.osc = null;
     this.oscR = null;
+    this.gateGain = null;
     this._killPhiHarmonics(0.8);
     this._killIsochronicLFO(0); // tear down LFO; gateGain disconnected via timeout below
     setTimeout(() => {
       oscsLocal.forEach((o) => { try { o.stop(); o.disconnect(); } catch (e) { _warn('audio', e); } });
-      if (this.gateGain) {
-        try { this.gateGain.disconnect(); } catch (e) { _warn('audio', e); }
-        this.gateGain = null;
+      // Only disconnect the OLD gateGain — a fresh start() may already have
+      // assigned a new this.gateGain by now, and we must NOT touch that.
+      if (gateGainLocal) {
+        try { gateGainLocal.disconnect(); } catch (e) { _warn('audio', e); }
       }
       // Pause the background-audio sink AFTER the fade completes so we don't
       // cut off the tail. Leaving it playing forever would also work, but it
@@ -801,6 +817,115 @@ class AudioEngine {
   }
 
   toggle() { this.playing ? this.stop() : this.start(); }
+
+  // ---- Robustness: ensureRunning, health check, visibility handling ---------
+  // Callable from any user-gesture path to defensively re-arm the audio ctx.
+  // Handles the mobile browser edge case where an implicit suspension (screen
+  // lock, tab background) leaves ctx.state === 'suspended' even after the
+  // MediaStream keep-alive sink was created. Silent no-op when ctx is already
+  // running, so it's safe to call on every play/resume site.
+  async ensureRunning() {
+    if (!this.ctx) return;
+    if (this.ctx.state === 'running') return;
+    try {
+      await this.ctx.resume();
+    } catch (e) { _warn('audio.ensureRunning', e); }
+    // Nudge the hidden <audio> sink back into play state — some Android
+    // Chrome builds pause it on lock even when we don't ask them to.
+    if (this._sinkEl && this._sinkEl.paused && this.playing) {
+      try { await this._sinkEl.play(); } catch (e) { _warn('audio.sinkPlay', e); }
+    }
+  }
+
+  // Called by the Dashboard's visibilitychange listener when the page becomes
+  // hidden (screen lock / tab switch / app-switch on mobile). We freeze the
+  // isochronic LFO at unity gain so that when the OS suspends and later
+  // resumes the audio thread mid-square-wave, we don't come back at a random
+  // gate-position that manifests as an audible click or a false-rate pulse.
+  // The base carrier, ambient layers, and MediaStream keep-alive stay live —
+  // no perceptual gap for the user.
+  freezeIsochronicForBackground() {
+    if (!this.ctx || !this.playing) return;
+    if (this.isochronic <= 0) return; // nothing to freeze
+    if (this._isoFrozen) return;      // idempotent
+    this._isoRateBeforeHide = this.isochronic;
+    // Tear down the LFO cleanly and pin the gate at 1.0 so the carrier
+    // continues to sound identically to isochronic-off during the freeze.
+    this._killIsochronicLFO(1);
+    this._isoFrozen = true;
+  }
+
+  // Called when the tab is visible again and the ctx has been resumed.
+  // Rebuilds the LFO at the original rate so pulsing resumes seamlessly.
+  resumeIsochronicAfterBackground() {
+    if (!this._isoFrozen) return;
+    this._isoFrozen = false;
+    const rate = this._isoRateBeforeHide;
+    this._isoRateBeforeHide = 0;
+    if (!this.playing || rate <= 0 || !this.gateGain) return;
+    // Restore user-facing state + LFO.
+    this.isochronic = rate;
+    this._spawnIsochronicLFO(rate);
+  }
+
+  // Post-start audio health check. Fires ~500ms after any start() to detect
+  // the "shows as playing but produces no sound" failure mode. If any of the
+  // graph invariants are broken, we do a silent stop → start restart at the
+  // SAME frequency/settings without user action.
+  //
+  // Invariants:
+  //   • ctx exists and is 'running'
+  //   • gateGain still connected (numberOfInputs > 0 is a weak proxy, but the
+  //     more reliable signal is: gateGain === null while this.playing → broken)
+  //   • at least one oscillator is bound to this instance
+  async _postStartHealthCheck() {
+    // Give the audio graph a brief settle so linearRampToValueAtTime has
+    // moved toneGain off zero before we probe.
+    await new Promise((r) => setTimeout(r, 500));
+    if (!this.playing) return;
+    const broken =
+      !this.ctx ||
+      this.ctx.state !== 'running' ||
+      !this.gateGain ||
+      !this.osc;
+    if (!broken) return;
+    _warn('audio.health', new Error(
+      `broken audio graph after start — ctx=${this.ctx && this.ctx.state}, ` +
+      `gateGain=${!!this.gateGain}, osc=${!!this.osc}. Rebuilding silently.`
+    ));
+    // Silent rebuild — carry current user settings forward.
+    const carry = {
+      frequency: this.frequency,
+      waveform: this.waveform,
+      binaural: this.binaural,
+      toneVolume: this.toneVolume,
+      goldenStack: this.goldenStack,
+      isochronic: this.isochronic,
+      ambientSnapshot: Object.fromEntries(
+        Object.entries(this.ambient || {}).map(([k, a]) => [k, a && a.volume || 0])
+      ),
+    };
+    try {
+      this.stop();
+    } catch (e) { _warn('audio.health.stop', e); }
+    // Wait for the 850ms cleanup timeout to finish before restarting so we
+    // don't collide with our own stale disconnect.
+    await new Promise((r) => setTimeout(r, 900));
+    // Restore settings + pending ambient so start() reproduces the mix.
+    this.frequency = carry.frequency;
+    this.waveform = carry.waveform;
+    this.binaural = carry.binaural;
+    this.toneVolume = carry.toneVolume;
+    this.goldenStack = carry.goldenStack;
+    this.isochronic = carry.isochronic;
+    if (carry.ambientSnapshot && Object.values(carry.ambientSnapshot).some((v) => v > 0.001)) {
+      this._pendingAmbient = carry.ambientSnapshot;
+    }
+    try {
+      await this.start();
+    } catch (e) { _warn('audio.health.restart', e); }
+  }
+
 
   setFrequency(hz) {
     this.frequency = hz;
@@ -1121,4 +1246,11 @@ class AudioEngine {
 }
 
 const audioEngine = new AudioEngine();
+// Test-only handle for E2E automation. Stripped from production bundles so
+// pages served from solarisound.com never expose the raw engine on window.
+// Preview + local dev keep it so Playwright can probe internal state.
+if (typeof window !== 'undefined' && typeof process !== 'undefined'
+    && process.env && process.env.NODE_ENV !== 'production') {
+  try { window.__audioEngine = audioEngine; } catch (_) { /* noop */ }
+}
 export default audioEngine;

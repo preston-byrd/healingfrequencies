@@ -371,16 +371,27 @@ export default function Dashboard({ onOpenAccount }) {
 
   // Background/foreground sync: when tab becomes visible, resume the AudioContext
   // (Chrome auto-suspends it when hidden) so playback continues cleanly.
+  // Also freezes the isochronic LFO on hide + rebuilds it on show so the OS
+  // suspend/resume cycle can't leave the square-wave gate at a click-y
+  // position or introduce a phantom pulse artifact (Issue 1).
   useEffect(() => {
     const onVis = () => {
-      if (!document.hidden && audioEngine.ctx && audioEngine.ctx.state !== 'running') {
-        audioEngine.ctx.resume().catch(() => { /* noop */ });
+      if (document.hidden) {
+        // Screen-lock / tab-switch — pause the pulse LFO cleanly. Base
+        // frequency + ambient layers keep playing via the MediaStream sink.
+        try { audioEngine.freezeIsochronicForBackground(); } catch (_) { /* noop */ }
+        return;
       }
-      // Wake Lock auto-releases when the tab is hidden; re-acquire on return
-      // if the user opted in (and is currently playing).
-      if (!document.hidden && audioEngine.playing) {
-        audioEngine.reacquireWakeLockIfWanted();
-      }
+      // Coming back into focus — resume ctx first, then rebuild the LFO in
+      // sync with the (now-running) audio thread.
+      const revive = async () => {
+        try { await audioEngine.ensureRunning(); } catch (_) { /* noop */ }
+        try { audioEngine.resumeIsochronicAfterBackground(); } catch (_) { /* noop */ }
+        if (audioEngine.playing) {
+          try { audioEngine.reacquireWakeLockIfWanted(); } catch (_) { /* noop */ }
+        }
+      };
+      revive();
     };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
