@@ -80,7 +80,10 @@ def test_admin_get_profile_shape(admin_token, target_user):
     assert "email" in body["_editable_fields"]
     assert "role" in body["_editable_fields"]
     assert "_sensitive_fields" in body
-    assert set(body["_sensitive_fields"]) == {"email", "role"}
+    assert set(body["_sensitive_fields"]) == {"email", "role", "phone_number", "phone_verified"}
+    # HF-030 phone fields must be in the editable allow-list too.
+    assert "phone_number" in body["_editable_fields"]
+    assert "phone_verified" in body["_editable_fields"]
 
 
 def test_admin_put_name_and_plan_notes(admin_token, target_user):
@@ -282,3 +285,162 @@ def test_no_op_put_returns_empty_changes(admin_token, target_user):
         )
     assert r.status_code == 200
     assert r.json()["changes"] == []
+
+
+# -----------------------------------------------------------------------------
+# HF-030: phone_number + phone_verified — admin can edit both, both sensitive.
+# -----------------------------------------------------------------------------
+
+def _rand_phone() -> str:
+    """Generate a fake but E.164-shaped US phone for uniqueness safety."""
+    n = uuid.uuid4().int % 10000000
+    return f"+1666{n:07d}"
+
+
+def test_admin_put_phone_requires_confirm(admin_token, target_user):
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    new_phone = _rand_phone()
+    with httpx.Client() as c:
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": new_phone},
+        )
+        assert r.status_code == 400
+        assert "confirm" in r.text.lower()
+        r2 = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": new_phone, "confirm": True},
+        )
+    assert r2.status_code == 200, r2.text
+    fields = {c["field"] for c in r2.json()["changes"]}
+    assert "phone_number" in fields
+
+
+def test_admin_put_phone_invalid_format(admin_token, target_user):
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    with httpx.Client() as c:
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": "555-1234", "confirm": True},
+        )
+    assert r.status_code == 400
+    assert "country code" in r.text.lower() or "e.164" in r.text.lower()
+
+
+def test_admin_put_phone_uniqueness_collision(admin_token, target_user):
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    # Create a second user with a distinct phone.
+    suffix = uuid.uuid4().hex[:8]
+    other_email = f"admin_phone_other_{suffix}@example.com"
+    other_phone = _rand_phone()
+    with httpx.Client() as c:
+        c.post(f"{API_URL}/auth/phone/send-code", json={"phone_number": other_phone})
+        vr = c.post(f"{API_URL}/auth/phone/verify-code",
+                    json={"phone_number": other_phone, "code": "123456"})
+        token = vr.json()["phone_verification_token"]
+        c.post(f"{API_URL}/auth/register", json={
+            "email": other_email, "password": "TestPass123!", "name": "Other",
+            "phone_number": other_phone, "phone_verification_token": token,
+        }).raise_for_status()
+        # Now try to give target_user the same phone.
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": other_phone, "confirm": True},
+        )
+    assert r.status_code == 409, r.text
+
+
+def test_admin_put_phone_verified_toggle(admin_token, target_user):
+    """Admin can flip phone_verified independently, but only if a phone exists."""
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    with httpx.Client() as c:
+        # target_user was registered with a verified phone by the fixture.
+        # Flip verified off:
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_verified": False, "confirm": True},
+        )
+        assert r.status_code == 200, r.text
+        fresh = c.get(f"{API_URL}/admin/users/{target_user['id']}/profile", headers=hdr).json()
+        assert fresh.get("phone_verified") in (False, None)
+        # Flip back on:
+        r2 = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_verified": True, "confirm": True},
+        )
+    assert r2.status_code == 200
+
+
+def test_admin_put_phone_verified_requires_phone(admin_token, target_user):
+    """Marking verified=true without a phone_number on file is nonsensical."""
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    with httpx.Client() as c:
+        # Clear phone first.
+        c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": "", "confirm": True},
+        ).raise_for_status()
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_verified": True, "confirm": True},
+        )
+    assert r.status_code == 400
+    assert "phone_number" in r.text
+
+
+def test_admin_change_phone_invalidates_verified(admin_token, target_user):
+    """Changing phone_number should force phone_verified back to False."""
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    new_phone = _rand_phone()
+    with httpx.Client() as c:
+        # target starts verified (fixture); PUT a new number.
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": new_phone, "confirm": True},
+        )
+        assert r.status_code == 200, r.text
+        fresh = c.get(f"{API_URL}/admin/users/{target_user['id']}/profile", headers=hdr).json()
+    assert fresh["phone_number"] == new_phone
+    assert fresh.get("phone_verified") in (False, None)
+
+
+def test_admin_clear_phone_unsets_verified(admin_token, target_user):
+    """Sending empty phone_number clears both fields."""
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    with httpx.Client() as c:
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": "", "confirm": True},
+        )
+        assert r.status_code == 200
+        fresh = c.get(f"{API_URL}/admin/users/{target_user['id']}/profile", headers=hdr).json()
+    assert not fresh.get("phone_number")
+    assert not fresh.get("phone_verified")
+
+
+def test_admin_phone_audit_log_masks_full_number(admin_token, target_user):
+    """Audit log must record only last-4 of the phone, never the full E.164."""
+    hdr = {"Authorization": f"Bearer {admin_token}"}
+    new_phone = _rand_phone()
+    with httpx.Client() as c:
+        r = c.put(
+            f"{API_URL}/admin/users/{target_user['id']}/profile",
+            headers=hdr,
+            json={"phone_number": new_phone, "confirm": True},
+        )
+    assert r.status_code == 200
+    change = next((ch for ch in r.json()["changes"] if ch["field"] == "phone_number"), None)
+    assert change is not None
+    # `after` should be the last-4 digits, not the full number.
+    assert change["after"] == new_phone[-4:]
+    assert new_phone not in str(change)

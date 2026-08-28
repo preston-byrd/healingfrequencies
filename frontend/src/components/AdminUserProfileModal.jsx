@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, UserCog, Save, AlertTriangle, CheckCircle, Loader2,
-  Mail, Shield, BellRing, FileText, RotateCcw, Info,
+  Mail, Shield, BellRing, FileText, RotateCcw, Info, Phone,
 } from 'lucide-react';
 import api, { formatApiError } from '@/lib/api';
 
@@ -42,6 +42,8 @@ export default function AdminUserProfileModal({ userId, open, onClose, onSaved }
           name: data.name || '',
           email: data.email || '',
           role: data.role || 'user',
+          phone_number: data.phone_number || '',
+          phone_verified: !!data.phone_verified,
           plan_notes: data.plan_notes || '',
           nudge_cadence: data.nudge_cadence || 'default',
           nudge_unsubscribed: !!data.nudge_unsubscribed,
@@ -73,6 +75,19 @@ export default function AdminUserProfileModal({ userId, open, onClose, onSaved }
     if ((form.role || 'user') !== (profile.role || 'user')) {
       out.push(['role', form.role]);
       sensitiveTouched.push('role');
+    }
+    // Phone number — normalise "empty" both sides so an untouched blank
+    // field never registers as a diff. Trim whitespace so trailing spaces
+    // don't falsely trigger the sensitive-confirm gate.
+    const curPhone = (profile.phone_number || '').trim();
+    const nextPhone = (form.phone_number || '').trim();
+    if (nextPhone !== curPhone) {
+      out.push(['phone_number', nextPhone]);
+      sensitiveTouched.push('phone_number');
+    }
+    if (!!form.phone_verified !== !!profile.phone_verified) {
+      out.push(['phone_verified', !!form.phone_verified]);
+      sensitiveTouched.push('phone_verified');
     }
     if ((form.plan_notes || '') !== (profile.plan_notes || '')) out.push(['plan_notes', form.plan_notes]);
     if ((form.nudge_cadence || 'default') !== (profile.nudge_cadence || 'default')) out.push(['nudge_cadence', form.nudge_cadence]);
@@ -231,6 +246,48 @@ export default function AdminUserProfileModal({ userId, open, onClose, onSaved }
                       onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
                       className="admin-input"
                     />
+                  </Field>
+                  <Field
+                    label={
+                      <span className="inline-flex items-center gap-1.5">
+                        <Phone size={11} className="text-[#8A9A92]" /> Phone number
+                        {form.phone_verified ? (
+                          <span
+                            data-testid="admin-profile-phone-verified-badge"
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] bg-[#5C9E8C]/20 text-[#72C2AC]"
+                          >
+                            <CheckCircle size={9} /> Verified
+                          </span>
+                        ) : (
+                          <span
+                            data-testid="admin-profile-phone-unverified-badge"
+                            className="px-1.5 py-0.5 rounded-full text-[9px] bg-[#1A332A]/60 text-[#8A9A92]"
+                          >
+                            Unverified
+                          </span>
+                        )}
+                      </span>
+                    }
+                    hint="Sensitive — E.164 (e.g. +14155552671). Leave empty to clear."
+                  >
+                    <input
+                      data-testid="admin-profile-phone"
+                      type="tel"
+                      maxLength={20}
+                      placeholder="+14155552671"
+                      value={form.phone_number}
+                      onChange={(e) => setForm((f) => ({ ...f, phone_number: e.target.value }))}
+                      className="admin-input font-mono"
+                    />
+                    <label className="mt-2 inline-flex items-center gap-2 text-[11px] text-[#8A9A92]">
+                      <input
+                        data-testid="admin-profile-phone-verified-toggle"
+                        type="checkbox"
+                        checked={!!form.phone_verified}
+                        onChange={(e) => setForm((f) => ({ ...f, phone_verified: e.target.checked }))}
+                      />
+                      Manually mark phone as verified (bypasses SMS round-trip)
+                    </label>
                   </Field>
                   <Field label="Role" hint="Sensitive — requires confirm">
                     <select

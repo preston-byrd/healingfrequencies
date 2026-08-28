@@ -8330,8 +8330,9 @@ async def admin_delete_user(user_id: str, request: Request, user: dict = Depends
 _ADMIN_EDITABLE_TOP = {
     "name", "email", "role", "plan_notes",
     "nudge_cadence", "nudge_unsubscribed",
+    "phone_number", "phone_verified",
 }
-_ADMIN_SENSITIVE = {"email", "role"}
+_ADMIN_SENSITIVE = {"email", "role", "phone_number", "phone_verified"}
 _ADMIN_NUDGE_CADENCES = {"default", "weekly", "paused"}
 _ADMIN_ROLES = {"user", "admin"}
 
@@ -8499,6 +8500,74 @@ async def admin_update_user_profile(
                 raise HTTPException(status_code=400, detail="You cannot demote your own admin account")
             set_doc["role"] = new_role
             changes.append({"field": "role", "before": target.get("role"), "after": new_role})
+
+    # ---- Phone number (sensitive) ----
+    # Empty string / None from the admin form means "clear this user's phone"
+    # — we unset both phone_number and phone_verified so they must re-verify
+    # if they want to re-attach a number. Otherwise validate as E.164 and
+    # enforce uniqueness against other users.
+    if "phone_number" in payload:
+        raw = payload["phone_number"]
+        if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+            if target.get("phone_number"):
+                if not confirm:
+                    raise HTTPException(status_code=400, detail="Phone change requires confirm=true")
+                unset_doc["phone_number"] = ""
+                unset_doc["phone_verified"] = ""
+                unset_doc["phone_verified_at"] = ""
+                changes.append({
+                    "field": "phone_number",
+                    "before": (target.get("phone_number") or "")[-4:],
+                    "after": None,
+                })
+        else:
+            new_phone = _normalize_phone(raw)
+            if new_phone != (target.get("phone_number") or ""):
+                if not confirm:
+                    raise HTTPException(status_code=400, detail="Phone change requires confirm=true")
+                existing = await db.users.find_one(
+                    {"phone_number": new_phone, "id": {"$ne": user_id}},
+                    {"_id": 1},
+                )
+                if existing:
+                    raise HTTPException(status_code=409, detail="Another user already has that phone number")
+                set_doc["phone_number"] = new_phone
+                # Changing the number invalidates the prior verification —
+                # admin can flip phone_verified back on via its own toggle.
+                if target.get("phone_verified"):
+                    set_doc["phone_verified"] = False
+                    unset_doc["phone_verified_at"] = ""
+                changes.append({
+                    "field": "phone_number",
+                    "before": (target.get("phone_number") or "")[-4:] or None,
+                    "after": new_phone[-4:],
+                })
+
+    # ---- Phone verified flag (sensitive) ----
+    # Manual override so support can flip a user's verified status without
+    # actually running an SMS round-trip (e.g. Twilio outage, VoIP number).
+    if "phone_verified" in payload and payload["phone_verified"] is not None:
+        new_v = bool(payload["phone_verified"])
+        # Only meaningful when a phone_number is present — otherwise flipping
+        # this flag creates an inconsistent state.
+        final_phone = set_doc.get("phone_number") or target.get("phone_number")
+        if new_v and not final_phone:
+            raise HTTPException(status_code=400, detail="Cannot mark phone as verified without a phone_number")
+        # If phone_number just changed, set_doc may already contain the reset
+        # to False — respect the explicit admin choice regardless.
+        if new_v != bool(target.get("phone_verified")) or "phone_verified" in set_doc:
+            if not confirm:
+                raise HTTPException(status_code=400, detail="Phone verified change requires confirm=true")
+            set_doc["phone_verified"] = new_v
+            if new_v:
+                set_doc["phone_verified_at"] = datetime.now(timezone.utc).isoformat()
+            else:
+                unset_doc["phone_verified_at"] = ""
+            changes.append({
+                "field": "phone_verified",
+                "before": bool(target.get("phone_verified")),
+                "after": new_v,
+            })
 
     # ---- Nudge cadence + unsubscribed ----
     if "nudge_cadence" in payload and payload["nudge_cadence"] is not None:
