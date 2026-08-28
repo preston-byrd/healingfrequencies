@@ -1651,6 +1651,84 @@ async def admin_support_delete(msg_id: str, user: dict = Depends(get_current_use
     return {"ok": True}
 
 
+# --- Per-frequency ideal default volume ------------------------------------
+# The frontend ships a baseline map (see lib/frequencyDefaults.js). Admins can
+# override any Hz→volume via these endpoints without a code change. The
+# public GET is unauthenticated so the Dashboard can fetch overrides during
+# initial mount, before we know if the visitor is even signed in.
+
+@api.get("/frequency-defaults")
+async def get_frequency_defaults():
+    """Public: returns admin-configured per-frequency ideal default volumes.
+
+    Merged over the frontend baseline map on the client. Values are
+    number 0..1 keyed by string-Hz (JSON keys must be strings).
+    """
+    try:
+        cursor = db.frequency_volume_defaults.find({}, {"_id": 0, "hz": 1, "volume": 1})
+        overrides: dict[str, float] = {}
+        async for doc in cursor:
+            hz = doc.get("hz")
+            vol = doc.get("volume")
+            if hz is None or vol is None:
+                continue
+            try:
+                overrides[str(float(hz))] = max(0.0, min(1.0, float(vol)))
+            except (TypeError, ValueError):
+                continue
+        return {"overrides": overrides}
+    except Exception:
+        return {"overrides": {}}
+
+
+@api.get("/admin/frequency-defaults")
+async def admin_list_frequency_defaults(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    docs: list[dict] = []
+    cursor = db.frequency_volume_defaults.find({}, {"_id": 0}).sort("hz", 1)
+    async for d in cursor:
+        docs.append(d)
+    return {"overrides": docs}
+
+
+@api.put("/admin/frequency-defaults")
+async def admin_upsert_frequency_default(
+    payload: dict,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    try:
+        hz = float(payload.get("hz"))
+        volume = float(payload.get("volume"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="hz and volume must be numbers")
+    if not (0.0 < hz <= 20000.0):
+        raise HTTPException(status_code=400, detail="hz out of range")
+    if not (0.0 <= volume <= 1.0):
+        raise HTTPException(status_code=400, detail="volume must be between 0 and 1")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.frequency_volume_defaults.update_one(
+        {"hz": hz},
+        {
+            "$set": {
+                "hz": hz,
+                "volume": volume,
+                "updated_at": now_iso,
+                "updated_by": user.get("id"),
+            }
+        },
+        upsert=True,
+    )
+    return {"ok": True, "hz": hz, "volume": volume}
+
+
+@api.delete("/admin/frequency-defaults/{hz}")
+async def admin_delete_frequency_default(hz: float, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    res = await db.frequency_volume_defaults.delete_one({"hz": hz})
+    return {"ok": True, "deleted": res.deleted_count}
+
+
 # --- Re-engagement email: tracking + prefs + admin analytics ---------------
 # Public endpoints (no auth) used by the outbound HTML: open pixel + click
 # redirect + one-tap unsubscribe. All accept a per-nudge or per-user token

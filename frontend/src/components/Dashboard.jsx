@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { Play, Pause, Save, Trash2, LogOut, Wind, Droplet, Waves, Trees, Volume2, Sparkles, UserCircle, Lock, Bug, CloudRain, Music, Moon, Brain, Layers, Sunrise, Cloud, Heart, Globe, Sun, Smartphone, HeartPulse, Mic, Ear, Flower2, Bell, Info, CircleDot } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
 import api, { formatApiError } from '@/lib/api';
+import { applyIdealVolume, getIdealVolume, loadAdminOverrides, volumeDivergesFromIdeal } from '@/lib/frequencyDefaults';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSubscription } from '@/contexts/SubscriptionContext';
 import Visualizer from '@/components/Visualizer';
@@ -211,6 +212,19 @@ export default function Dashboard({ onOpenAccount }) {
   const [sessionStart, setSessionStart] = useState(null);
   const [checkedInThisRun, setCheckedInThisRun] = useState(false);
   const [sleepMode, setSleepMode] = useState(false);
+
+  // Per-frequency ideal-default-volume tracking.
+  //   userAdjustedVolumeRef.current = true → user has manually moved the tone
+  //   slider during the current session. As long as this flag is true, no
+  //   playback entry point may auto-apply the per-frequency ideal volume;
+  //   the user's chosen level is respected until they explicitly stop the
+  //   session or tap "Reset to recommended".
+  // The flag is cleared on every fresh session start (togglePlay start,
+  // stopSleepMode, timer expiry, etc.).
+  const userAdjustedVolumeRef = React.useRef(false);
+  // Fetch admin overrides once per app load. Silent on failure.
+  useEffect(() => { loadAdminOverrides(); }, []);
+
   // Soundscape selection — set when the user taps a curated mix, cleared on
   // explicit reset (tap-toggle, swap, full stop, sleep mode, timer end).
   // Persisted through Pause/Resume so the visual indicator survives a pause.
@@ -967,6 +981,14 @@ export default function Dashboard({ onOpenAccount }) {
         // makes the countdown survive that race and any subsequent
         // Dashboard remount.
         try { audioEngine.sessionEndAt = Date.now() + DEFAULT_MIN * 60 * 1000; } catch (_) {}
+        // Assistant-triggered session is a fresh start → clear the
+        // divergence flag and apply the per-frequency ideal default
+        // volume for the frequency the assistant just loaded.
+        userAdjustedVolumeRef.current = false;
+        const targetHz = (typeof detail.frequency === 'number' && detail.frequency > 0)
+          ? detail.frequency
+          : audioEngine.frequency;
+        try { applyIdealVolume(audioEngine, targetHz); } catch (_) { /* graceful */ }
         // Mark this session as Wellness-Assistant-owned so the timer-expiry
         // branch knows to surface the "How are you feeling now?" check-in
         // once the fade completes.
@@ -1169,6 +1191,13 @@ export default function Dashboard({ onOpenAccount }) {
 
   const togglePlay = () => {
     if (!audioEngine.playing) {
+      // Fresh session start → clear the "user has diverged" flag so the
+      // per-frequency ideal default volume applies to this session. If the
+      // user hasn't diverged from the ideal (or the flag is already clear),
+      // apply the ideal now so the level matches whatever frequency is
+      // currently loaded on the engine.
+      userAdjustedVolumeRef.current = false;
+      try { applyIdealVolume(audioEngine, audioEngine.frequency); } catch (_) { /* graceful */ }
       setRemaining(duration * 60);
       audioEngine.start();
     } else {
@@ -1180,6 +1209,8 @@ export default function Dashboard({ onOpenAccount }) {
       // Manual stop bypasses the natural fade path, so don't queue a
       // "how are you feeling now?" check-in on the next fade completion.
       assistantOwnedRef.current = false;
+      // Explicit stop ends the session → next start re-applies the ideal.
+      userAdjustedVolumeRef.current = false;
     }
   };
 
@@ -1203,6 +1234,17 @@ export default function Dashboard({ onOpenAccount }) {
     audioEngine.setFrequency(hz);
     audioEngine.setGoldenStack(wantGolden);
     setActiveSoundscape(null); // new manual selection invalidates any active soundscape
+    // Per-frequency ideal default volume: apply for this new selection when
+    // (a) the engine isn't currently playing (fresh session about to start)
+    //     — always apply ideal for the new hz.
+    // (b) engine IS playing but user hasn't diverged yet — retune to the
+    //     new frequency's ideal so higher/lower tones don't feel harsh.
+    // If the user has manually adjusted volume mid-session, respect it.
+    if (!audioEngine.playing || !userAdjustedVolumeRef.current) {
+      // Starting fresh clears the flag; retuning mid-session leaves it as-is.
+      if (!audioEngine.playing) userAdjustedVolumeRef.current = false;
+      try { applyIdealVolume(audioEngine, hz); } catch (_) { /* graceful */ }
+    }
     if (!audioEngine.playing) {
       setRemaining(duration * 60);
       audioEngine.start();
@@ -1291,6 +1333,11 @@ export default function Dashboard({ onOpenAccount }) {
     audioEngine.setWaveform('sine');
     audioEngine.setBinaural(0);
     audioEngine.setFrequency(s.freq);
+    // Fresh soundscape session → clear divergence flag and apply the
+    // per-frequency ideal default volume. Preserves relative ambient mix
+    // (which is set by the soundscape's own ambient dict below).
+    userAdjustedVolumeRef.current = false;
+    try { applyIdealVolume(audioEngine, s.freq); } catch (_) { /* graceful */ }
     Object.keys(audioEngine.ambient || {}).forEach((k) => {
       if (!(k in s.ambient)) audioEngine.setAmbient(k, 0);
     });
@@ -1402,6 +1449,13 @@ export default function Dashboard({ onOpenAccount }) {
     audioEngine.setFrequency(s.frequency);
     audioEngine.setWaveform(s.waveform);
     audioEngine.setBinaural(s.binaural || 0);
+    // Loading a saved session is a fresh session start. If the saved
+    // session stored a specific tone volume via prefs (handled elsewhere
+    // via /me/prefs restoration), that will take precedence when the
+    // engine's next state emits; otherwise the per-frequency ideal
+    // default applies here.
+    userAdjustedVolumeRef.current = false;
+    try { applyIdealVolume(audioEngine, s.frequency); } catch (_) { /* graceful */ }
     const mins = s.duration_minutes || 10;
     setDuration(mins);
     setBreathwork(!!s.breathwork);
@@ -1479,6 +1533,10 @@ export default function Dashboard({ onOpenAccount }) {
       audioEngine.setIsochronic(0);
       audioEngine.setFrequency(data.frequency);
       audioEngine.setWaveform(data.waveform || 'sine');
+      // AI prescriptions are always a fresh session → apply the per-freq
+      // ideal default volume and clear the divergence flag.
+      userAdjustedVolumeRef.current = false;
+      try { applyIdealVolume(audioEngine, data.frequency); } catch (_) { /* graceful */ }
       if (data.binaural) audioEngine.setBinaural(data.binaural);
       if (data.isochronic) audioEngine.setIsochronic(data.isochronic);
       if (data.golden_stack) audioEngine.setGoldenStack(true);
@@ -2433,16 +2491,40 @@ export default function Dashboard({ onOpenAccount }) {
 
             <label className="text-xs text-[#8A9A92] flex justify-between mt-5 mb-1">
               <span><Volume2 size={12} className="inline mr-1" />Tone volume</span>
-              <span className="font-mono text-[#72C2AC]">{Math.round(state.toneVolume * 100)}%</span>
+              <span className="font-mono text-[#72C2AC]" data-testid="tone-volume-readout">{Math.round(state.toneVolume * 100)}%</span>
             </label>
             <input
               data-testid="tone-volume-slider"
               type="range" min="0" max="1" step="0.01"
               value={state.toneVolume}
-              onChange={(e) => audioEngine.setToneVolume(parseFloat(e.target.value))}
+              onChange={(e) => {
+                // A manual slider move counts as the user asserting their own
+                // preferred level for the rest of this session. From this
+                // point on, no auto-apply path (soundscape / assistant /
+                // AI prescription / etc) may override the user's chosen
+                // level until they either stop the session or tap
+                // "recommended" to opt back into the per-freq default.
+                userAdjustedVolumeRef.current = true;
+                audioEngine.setToneVolume(parseFloat(e.target.value));
+              }}
               className="slider"
               style={{ '--v': `${state.toneVolume * 100}%` }}
             />
+            {volumeDivergesFromIdeal(state.toneVolume, state.frequency) && (
+              <button
+                type="button"
+                data-testid="reset-recommended-volume-btn"
+                onClick={() => {
+                  try { applyIdealVolume(audioEngine, state.frequency); } catch (_) { /* graceful */ }
+                  userAdjustedVolumeRef.current = false;
+                }}
+                className="mt-1 text-[10px] text-[#72C2AC] hover:text-[#8FD9C1] transition-colors inline-flex items-center gap-1"
+                title={`Return to ${Math.round(getIdealVolume(state.frequency) * 100)}% — the ideal level tuned for ${state.frequency} Hz`}
+              >
+                <CircleDot size={10} />
+                Reset to recommended ({Math.round(getIdealVolume(state.frequency) * 100)}%)
+              </button>
+            )}
           </div>
 
           {/* Flow Mode — 3-stage guided frequency journeys. Sits in the right

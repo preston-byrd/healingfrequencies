@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Sunrise, Heart, Moon, Play, Square, Sparkles, Lock, Plus } from 'lucide-react';
 import audioEngine from '@/lib/audioEngine';
+import { applyIdealVolume } from '@/lib/frequencyDefaults';
 import { getFlowEngine, JOURNEYS, DURATION_OPTIONS } from '@/lib/flowEngine';
 import { getSoundBath } from '@/lib/soundBathEngine';
 
@@ -61,6 +62,14 @@ export default function FlowModePanel({
     // 120 ms breather so the previous stop-ramp settles before the flow's
     // entry-fade kicks in.
     await new Promise((r) => setTimeout(r, 120));
+    // Per-frequency ideal default volume: seed audioEngine.toneVolume to
+    // the first stage's ideal BEFORE flow.start() so the entry fade ramps
+    // TO that level (flowEngine reads audio.toneVolume as its ramp target).
+    // Later stage crossfades preserve whatever toneVolume is at the time.
+    try {
+      const firstHz = journey?.stages?.[0]?.hz;
+      if (firstHz) applyIdealVolume(audioEngine, firstHz);
+    } catch (_) { /* graceful — baseline still runs */ }
     await flow.start(journey, mins);
     // Pass the journey descriptor along so Dashboard can label the
     // post-session share card with the exact flow the user just completed

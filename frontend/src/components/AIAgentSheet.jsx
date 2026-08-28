@@ -266,7 +266,11 @@ export default function AIAgentSheet({
     // — kept here rather than at every individual kind so we never miss it.
     try {
       window.dispatchEvent(new CustomEvent('sf:agent:suggestion-taken', {
-        detail: { kind: s.kind, label: s.label },
+        detail: {
+          kind: s.kind,
+          label: s.label,
+          frequency: (typeof s.frequency === 'number' && s.frequency > 0) ? s.frequency : undefined,
+        },
       }));
     } catch (e) { /* event dispatch shouldn't ever throw, but be safe */ }
     close();
