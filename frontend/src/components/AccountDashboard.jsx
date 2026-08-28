@@ -10,6 +10,8 @@ import SoundLineage from '@/components/SoundLineage';
 import AdminSupportInbox from '@/components/AdminSupportInbox';
 import AdminEmailEngagement from '@/components/AdminEmailEngagement';
 import AdminFrequencyDefaults from '@/components/AdminFrequencyDefaults';
+import AdminUserProfileModal from '@/components/AdminUserProfileModal';
+import { UserCog } from 'lucide-react';
 import NudgePreferencesCard from '@/components/NudgePreferencesCard';
 import HarmonicBlueprintSection from '@/components/HarmonicBlueprintSection';
 import MyJourneySection from '@/components/MyJourneySection';
@@ -84,6 +86,10 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
   const [grantDays, setGrantDays] = useState({});
   const [usersMeta, setUsersMeta] = useState({ total: 0, offset: 0, limit: 100, filtered_test_count: 0 });
   const [showTestUsers, setShowTestUsers] = useState(false);
+  // Admin: open a full profile-editor modal against a specific user_id. When
+  // set, `AdminUserProfileModal` mounts and fetches that user's editable
+  // profile. `null` = modal closed.
+  const [profileModalUserId, setProfileModalUserId] = useState(null);
 
   // admin security tile — counters + recent audit events + new-user badge
   const [security, setSecurity] = useState(null);
@@ -1157,6 +1163,14 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
                     </div>
 
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      <button
+                        data-testid={`profile-user-${u.id}`}
+                        onClick={() => setProfileModalUserId(u.id)}
+                        title="Open full profile editor"
+                        className="p-1.5 rounded-full text-[#8A9A92] hover:text-[#72C2AC] hover:bg-[#72C2AC]/10 transition-colors"
+                      >
+                        <UserCog size={14} />
+                      </button>
                       <input
                         data-testid={`grant-days-${u.id}`}
                         type="number" min="1" max="3650"
@@ -1247,6 +1261,22 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             admin tune the starting tone volume applied when a given
             frequency begins playback, without a code change. */}
         {sub.is_admin && <AdminFrequencyDefaults />}
+
+        {/* Admin: Full profile editor modal. Mounted at the top of the
+            admin section so state persists across scrolls; opens when the
+            admin taps the UserCog button on any user row. */}
+        {sub.is_admin && (
+          <AdminUserProfileModal
+            open={!!profileModalUserId}
+            userId={profileModalUserId}
+            onClose={() => setProfileModalUserId(null)}
+            onSaved={() => {
+              // Refresh the users list so name / role / plan_notes edits
+              // are visible in the row immediately.
+              loadUsers(userQuery, usersMeta.offset || 0, showTestUsers);
+            }}
+          />
+        )}
       </div>
 
       {celebratingPlan && (

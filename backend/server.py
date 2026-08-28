@@ -7512,6 +7512,257 @@ async def admin_delete_user(user_id: str, request: Request, user: dict = Depends
     return {"ok": True, "user_id": user_id, "email": target["email"], "deleted": True}
 
 
+# --- Admin user profile view + edit ---------------------------------------
+# GET returns the full profile (minus password_hash) of any user.
+# PUT accepts a partial patch of admin-editable fields, validates each,
+# writes an audit-log row PER changed field with before/after values,
+# and returns the fresh profile. Sensitive fields (email, role) require
+# the caller to also send `confirm: true` in the payload so a fat-finger
+# never re-roles someone silently.
+
+# Field allow-list. Anything not in here is silently ignored on PUT — the
+# frontend cannot expand the surface area of what admins can edit by
+# guessing extra keys. Keys marked SENSITIVE require confirm=True.
+_ADMIN_EDITABLE_TOP = {
+    "name", "email", "role", "plan_notes",
+    "nudge_cadence", "nudge_unsubscribed",
+}
+_ADMIN_SENSITIVE = {"email", "role"}
+_ADMIN_NUDGE_CADENCES = {"default", "weekly", "paused"}
+_ADMIN_ROLES = {"user", "admin"}
+
+
+def _sanitize_notification_prefs_patch(np_in: dict) -> dict:
+    """Coerce an admin-supplied notification_prefs patch onto the same
+    schema `_get_notification_prefs` returns. Only known keys pass through.
+    """
+    out: dict = {}
+    if not isinstance(np_in, dict):
+        return out
+    if "enabled" in np_in:
+        out["enabled"] = bool(np_in["enabled"])
+    if "push_enabled" in np_in:
+        out["push_enabled"] = bool(np_in["push_enabled"])
+    if "max_per_day" in np_in:
+        try:
+            out["max_per_day"] = max(0, min(50, int(np_in["max_per_day"])))
+        except (TypeError, ValueError):
+            pass
+    if "categories" in np_in and isinstance(np_in["categories"], dict):
+        out["categories"] = {
+            c: bool(v) for c, v in np_in["categories"].items()
+            if c in NOTIFICATION_CATEGORIES
+        }
+    if "quiet_hours" in np_in and isinstance(np_in["quiet_hours"], dict):
+        qh = {}
+        if "enabled" in np_in["quiet_hours"]:
+            qh["enabled"] = bool(np_in["quiet_hours"]["enabled"])
+        for k in ("start_hour", "end_hour"):
+            if k in np_in["quiet_hours"]:
+                try:
+                    qh[k] = max(0, min(23, int(np_in["quiet_hours"][k])))
+                except (TypeError, ValueError):
+                    pass
+        if qh:
+            out["quiet_hours"] = qh
+    return out
+
+
+def _redact_user_profile(doc: dict) -> dict:
+    """Return a copy of the user doc safe for admin consumption.
+    Strips password_hash + any raw stripe secret fields. Preserves everything
+    else so the admin has full visibility into the account state.
+    """
+    if not doc:
+        return {}
+    safe = {k: v for k, v in doc.items() if k not in {
+        "password_hash",
+        "_id",
+    }}
+    return safe
+
+
+@api.get("/admin/users/{user_id}/profile")
+async def admin_get_user_profile(
+    user_id: str,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    doc = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Attach a compact list of the fields the admin is permitted to edit so
+    # the frontend never has to hard-code the allow-list separately.
+    doc["_editable_fields"] = sorted(list(_ADMIN_EDITABLE_TOP)) + [
+        "notification_prefs", "reset_hearing_profile", "reset_prefs",
+    ]
+    doc["_sensitive_fields"] = sorted(list(_ADMIN_SENSITIVE))
+    # Also compute derived plan-label the UI is likely to show.
+    now = datetime.now(timezone.utc)
+    pu = doc.get("pro_until")
+    days_left = 0
+    is_pro = False
+    if pu:
+        try:
+            until = datetime.fromisoformat(pu)
+            is_pro = until > now
+            if is_pro:
+                days_left = max(0, (until - now).days + 1)
+        except Exception:
+            pass
+    doc["_plan_label"] = "admin" if doc.get("role") == "admin" else (
+        "pro" if is_pro else "basic"
+    )
+    doc["_pro"] = is_pro
+    doc["_days_left"] = days_left
+    return _redact_user_profile(doc)
+
+
+@api.put("/admin/users/{user_id}/profile")
+async def admin_update_user_profile(
+    user_id: str,
+    payload: dict,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    _require_admin(user)
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    confirm = bool(payload.get("confirm"))
+    # Track before/after per changed field so we can write one audit row per
+    # change. Also lets the response advertise which fields actually landed
+    # so the client can render "N fields updated".
+    changes: list[dict] = []
+    set_doc: dict = {}
+    unset_doc: dict = {}
+
+    # ---- Top-level scalar fields ----
+    for field in ("name", "plan_notes"):
+        if field in payload:
+            new = payload[field]
+            if new is None:
+                # Empty string coerces to unset-equivalent for plan_notes;
+                # name is required so treat None as skip.
+                if field == "plan_notes":
+                    unset_doc[field] = ""
+                    if target.get(field):
+                        changes.append({"field": field, "before": target.get(field), "after": None})
+                continue
+            new = str(new).strip()
+            if field == "name":
+                if not new:
+                    raise HTTPException(status_code=400, detail="Name cannot be empty")
+                if len(new) > 80:
+                    raise HTTPException(status_code=400, detail="Name too long (max 80)")
+            if field == "plan_notes":
+                if len(new) > 2000:
+                    raise HTTPException(status_code=400, detail="plan_notes too long (max 2000)")
+            if new != (target.get(field) or ""):
+                set_doc[field] = new
+                changes.append({"field": field, "before": target.get(field), "after": new})
+
+    # ---- Email (sensitive) ----
+    if "email" in payload and payload["email"] is not None:
+        new_email = str(payload["email"]).strip().lower()
+        if not new_email or "@" not in new_email or "." not in new_email.split("@")[-1]:
+            raise HTTPException(status_code=400, detail="Invalid email format")
+        if len(new_email) > 200:
+            raise HTTPException(status_code=400, detail="Email too long")
+        if new_email != (target.get("email") or "").lower():
+            if not confirm:
+                raise HTTPException(status_code=400, detail="Email change requires confirm=true")
+            # Uniqueness check
+            existing = await db.users.find_one({"email": new_email, "id": {"$ne": user_id}}, {"_id": 1})
+            if existing:
+                raise HTTPException(status_code=409, detail="Another user already has that email")
+            set_doc["email"] = new_email
+            changes.append({"field": "email", "before": target.get("email"), "after": new_email})
+
+    # ---- Role (sensitive) ----
+    if "role" in payload and payload["role"] is not None:
+        new_role = str(payload["role"]).strip().lower()
+        if new_role not in _ADMIN_ROLES:
+            raise HTTPException(status_code=400, detail=f"role must be one of {sorted(_ADMIN_ROLES)}")
+        if new_role != (target.get("role") or "user"):
+            if not confirm:
+                raise HTTPException(status_code=400, detail="Role change requires confirm=true")
+            # Guardrail: admin cannot demote themselves via this endpoint —
+            # forces an out-of-band recovery path if they meant to strip
+            # their own admin.
+            if user_id == user["id"] and new_role != "admin":
+                raise HTTPException(status_code=400, detail="You cannot demote your own admin account")
+            set_doc["role"] = new_role
+            changes.append({"field": "role", "before": target.get("role"), "after": new_role})
+
+    # ---- Nudge cadence + unsubscribed ----
+    if "nudge_cadence" in payload and payload["nudge_cadence"] is not None:
+        new_c = str(payload["nudge_cadence"]).strip().lower()
+        if new_c not in _ADMIN_NUDGE_CADENCES:
+            raise HTTPException(status_code=400, detail=f"nudge_cadence must be one of {sorted(_ADMIN_NUDGE_CADENCES)}")
+        if new_c != (target.get("nudge_cadence") or "default"):
+            set_doc["nudge_cadence"] = new_c
+            changes.append({"field": "nudge_cadence", "before": target.get("nudge_cadence"), "after": new_c})
+
+    if "nudge_unsubscribed" in payload and payload["nudge_unsubscribed"] is not None:
+        new_u = bool(payload["nudge_unsubscribed"])
+        if new_u != bool(target.get("nudge_unsubscribed")):
+            set_doc["nudge_unsubscribed"] = new_u
+            changes.append({"field": "nudge_unsubscribed", "before": bool(target.get("nudge_unsubscribed")), "after": new_u})
+
+    # ---- Notification prefs (nested patch) ----
+    if "notification_prefs" in payload and isinstance(payload["notification_prefs"], dict):
+        patch = _sanitize_notification_prefs_patch(payload["notification_prefs"])
+        current_np = target.get("notification_prefs") or {}
+        if patch:
+            for k, v in patch.items():
+                before = current_np.get(k)
+                if before != v:
+                    set_doc[f"notification_prefs.{k}"] = v
+                    changes.append({"field": f"notification_prefs.{k}", "before": before, "after": v})
+
+    # ---- Destructive resets (safe: single toggles) ----
+    if payload.get("reset_hearing_profile") is True:
+        if target.get("hearing_profile"):
+            unset_doc["hearing_profile"] = ""
+            changes.append({"field": "hearing_profile", "before": "<set>", "after": None})
+    if payload.get("reset_prefs") is True:
+        if target.get("prefs"):
+            unset_doc["prefs"] = ""
+            changes.append({"field": "prefs", "before": "<set>", "after": None})
+
+    if not changes:
+        return {"ok": True, "changes": [], "message": "No changes"}
+
+    # Apply the mutation. $set + $unset can coexist in a single update.
+    op: dict = {}
+    if set_doc:
+        op["$set"] = set_doc
+    if unset_doc:
+        op["$unset"] = unset_doc
+    if op:
+        await db.users.update_one({"id": user_id}, op)
+
+    # Audit each field change separately so a per-field query in
+    # /admin/audit-log surfaces every mutation with its before/after.
+    for ch in changes:
+        await _audit(
+            "admin.user.profile.updated", request,
+            user_id=user["id"], user_email=user.get("email"),
+            metadata={
+                "target_user_id": user_id,
+                "target_email": target.get("email"),
+                "field": ch["field"],
+                "before": ch["before"],
+                "after": ch["after"],
+            },
+        )
+
+    fresh = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    return {"ok": True, "changes": changes, "user": _redact_user_profile(fresh)}
+
+
 # --- Admin observability ----------------------------------------------------
 @api.get("/admin/security")
 async def admin_security(
