@@ -130,5 +130,9 @@ export function formatApiError(err) {
   if (typeof d === 'string') return d;
   if (Array.isArray(d)) return d.map((e) => e?.msg || JSON.stringify(e)).join(' ');
   if (d?.msg) return d.msg;
+  // Some endpoints (e.g. /auth/phone/send-code) shape `detail` as a rich
+  // object so the client can react to structured hints (retry-by-call,
+  // support links, etc.) while still showing a friendly `message`.
+  if (d?.message) return d.message;
   return String(d);
 }

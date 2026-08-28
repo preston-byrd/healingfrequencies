@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { RefreshCw, Eye, EyeOff, ArrowLeft, ShieldCheck } from 'lucide-react';
+import { RefreshCw, Eye, EyeOff, ArrowLeft, ShieldCheck, PhoneCall } from 'lucide-react';
 import PhoneInput, { isValidPhoneNumber } from 'react-phone-number-input';
 import 'react-phone-number-input/style.css';
 import { useAuth } from '@/contexts/AuthContext';
@@ -51,6 +51,15 @@ export default function AuthScreen() {
   // and racking up 429s. 45s is the sweet spot for SMS delivery jitter.
   const [resendCooldown, setResendCooldown] = useState(0);
   const cooldownTimerRef = useRef(null);
+  // Voice-call fallback: when Twilio Lookup rejects SMS for a given number
+  // (error 60200 / 60205 / 60600) the backend replies with
+  // `detail.can_retry_by_call = true`. We surface a "Get a phone call
+  // instead" chip so the user isn't stranded on a valid-but-SMS-hostile
+  // number (landlines, some VoIP carriers, stale carrier DB entries).
+  const [canRetryByCall, setCanRetryByCall] = useState(false);
+  // Which channel the OTP was ultimately delivered through — used to
+  // customise the verify-step subhead ("we called you" vs "we texted you").
+  const [otpChannel, setOtpChannel] = useState('sms');
 
   useEffect(() => {
     warmBackend();
@@ -69,6 +78,8 @@ export default function AuthScreen() {
     setPhoneVerificationToken('');
     setVerifiedPhone('');
     setResendCooldown(0);
+    setCanRetryByCall(false);
+    setOtpChannel('sms');
   };
 
   const attemptLogin = async () => {
@@ -85,10 +96,13 @@ export default function AuthScreen() {
     }
   };
 
-  // Step 1: user filled the form → send SMS OTP.
-  const attemptSendOtp = async () => {
+  // Step 1: user filled the form → send OTP via SMS (default) or voice call.
+  // The optional `channel` argument lets us reuse this from the "Get a
+  // phone call instead" fallback after a Twilio SMS Lookup rejection.
+  const attemptSendOtp = async (channel = 'sms') => {
     setErr('');
     setCanRetry(false);
+    setCanRetryByCall(false);
     // Client-side format check up front so we don't waste a Twilio API
     // call on obviously-broken input.
     if (!phone || !isValidPhoneNumber(phone)) {
@@ -105,13 +119,19 @@ export default function AuthScreen() {
     }
     setBusy(true);
     try {
-      await api.post('/auth/phone/send-code', { phone_number: phone });
+      await api.post('/auth/phone/send-code', { phone_number: phone, channel });
       setVerifiedPhone(phone);
+      setOtpChannel(channel);
       setRegisterStep(REGISTER_STEP_VERIFY);
       setResendCooldown(45);
     } catch (e) {
       setErr(formatApiError(e));
       setCanRetry(isNetworkError(e));
+      // Detect the structured retry-hint from `/auth/phone/send-code`.
+      const hint = e?.response?.data?.detail;
+      if (hint && typeof hint === 'object' && hint.can_retry_by_call) {
+        setCanRetryByCall(true);
+      }
     } finally {
       setBusy(false);
     }
@@ -145,13 +165,16 @@ export default function AuthScreen() {
     }
   };
 
-  // Step 2b: user asked for a new code.
+  // Step 2b: user asked for a new code — reuse whichever channel we
+  // successfully sent on the first pass so the UX stays coherent.
   const attemptResendOtp = async () => {
     if (resendCooldown > 0 || busy) return;
     setErr('');
     setBusy(true);
     try {
-      await api.post('/auth/phone/send-code', { phone_number: verifiedPhone });
+      await api.post('/auth/phone/send-code', {
+        phone_number: verifiedPhone, channel: otpChannel,
+      });
       setResendCooldown(45);
     } catch (e) {
       setErr(formatApiError(e));
@@ -176,7 +199,10 @@ export default function AuthScreen() {
     if (mode === 'login') return 'Tune in. Settle down. Resonate.';
     if (registerStep === REGISTER_STEP_VERIFY) {
       const last4 = verifiedPhone.slice(-4);
-      return `We sent a code to the number ending in ${last4}. Enter it below to finish creating your account.`;
+      const delivery = otpChannel === 'call'
+        ? `We're calling the number ending in ${last4} with your 6-digit code`
+        : `We sent a code to the number ending in ${last4}`;
+      return `${delivery}. Enter it below to finish creating your account.`;
     }
     return 'A quiet space to listen, breathe, and restore.';
   })();
@@ -357,15 +383,29 @@ export default function AuthScreen() {
               {canRetry && (
                 <button
                   type="button"
-                  onClick={mode === 'login' ? attemptLogin
-                    : registerStep === REGISTER_STEP_FORM ? attemptSendOtp
-                    : attemptVerifyOtp}
+                  onClick={() => {
+                    if (mode === 'login') return attemptLogin();
+                    if (registerStep === REGISTER_STEP_FORM) return attemptSendOtp();
+                    return attemptVerifyOtp();
+                  }}
                   disabled={busy}
                   data-testid="auth-retry-button"
                   className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-[#72C2AC] hover:text-[#C4A67A] transition-colors disabled:opacity-40"
                 >
                   <RefreshCw size={12} className={busy ? 'animate-spin' : ''} />
                   {busy ? 'Retrying…' : 'Retry'}
+                </button>
+              )}
+              {canRetryByCall && mode === 'register' && registerStep === REGISTER_STEP_FORM && (
+                <button
+                  type="button"
+                  onClick={() => attemptSendOtp('call')}
+                  disabled={busy}
+                  data-testid="auth-retry-by-call"
+                  className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-[#C4A67A] hover:text-[#72C2AC] transition-colors disabled:opacity-40"
+                >
+                  <PhoneCall size={12} />
+                  {busy ? 'Calling…' : 'Get a phone call instead'}
                 </button>
               )}
             </div>

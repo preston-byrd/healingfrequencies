@@ -1137,6 +1137,10 @@ def _normalize_phone(raw: str) -> str:
 
 class PhoneSendIn(BaseModel):
     phone_number: str = Field(min_length=6, max_length=20)
+    # Optional channel for the OTP — Twilio Verify supports "sms" (default)
+    # and "call" (voice call reading digits). Frontend surfaces "call" as a
+    # fallback when SMS Lookup rejects a number (Twilio error 60200 etc.).
+    channel: Optional[str] = None
 
 
 class PhoneVerifyIn(BaseModel):
@@ -1159,6 +1163,10 @@ async def phone_send_code(body: PhoneSendIn, request: Request):
     """
     ip = _client_ip(request)
     phone = _normalize_phone(body.phone_number)
+    # Whitelist channels so a malformed client can't pass "email" or worse.
+    channel = (body.channel or "sms").strip().lower()
+    if channel not in ("sms", "call"):
+        channel = "sms"
 
     _rate_limit_or_429(
         f"phone-send:phone:{phone}", capacity=3, refill_per_sec=1 / 200,
@@ -1170,14 +1178,19 @@ async def phone_send_code(body: PhoneSendIn, request: Request):
             label="verification code",
         )
 
-    generic = {"ok": True, "message": "If that number can receive SMS, a code is on the way."}
+    generic_msg = (
+        "If that number can receive a call, we'll ring you shortly."
+        if channel == "call"
+        else "If that number can receive SMS, a code is on the way."
+    )
+    generic = {"ok": True, "message": generic_msg, "channel": channel}
 
     if _TWILIO_TEST_MODE:
         # Bypass Twilio entirely. The verify-code endpoint's matching
         # bypass accepts _TWILIO_TEST_ACCEPT_CODE for any phone.
         await _audit(
             "auth.phone.code_sent", request,
-            metadata={"phone_last4": phone[-4:], "status": "test-mode"},
+            metadata={"phone_last4": phone[-4:], "status": "test-mode", "channel": channel},
         )
         return {**generic, "status": "pending"}
 
@@ -1193,29 +1206,50 @@ async def phone_send_code(body: PhoneSendIn, request: Request):
         def _send():
             return _twilio_client.verify.v2 \
                 .services(_TWILIO_VERIFY_SERVICE_SID) \
-                .verifications.create(to=phone, channel="sms")
+                .verifications.create(to=phone, channel=channel)
         verification = await asyncio.get_event_loop().run_in_executor(None, _send)
         status = getattr(verification, "status", "pending")
     except Exception as e:
         # Best-effort classification of common Twilio errors → user-friendly.
         msg = str(e)
         friendly = "We couldn't send a code to that number. Please double-check the format and try again."
+        can_retry_by_call = False
         if "60200" in msg or "invalid" in msg.lower():
-            friendly = "That phone number doesn't look valid. Please check the country code and try again."
+            if channel == "call":
+                friendly = "That phone number doesn't look valid. Please check the country code and try again."
+            else:
+                friendly = "That number couldn't be verified by SMS. Try requesting a voice call instead."
+                can_retry_by_call = True
         elif "60203" in msg or "60212" in msg or "too many" in msg.lower():
             friendly = "Too many attempts for that number. Please wait a few minutes and try again."
         elif "landline" in msg.lower() or "60205" in msg or "60600" in msg:
-            friendly = "That number can't receive SMS. Please use a mobile number."
-        logger.warning("[twilio.send] %s: %s", type(e).__name__, msg[:200])
+            if channel == "sms":
+                friendly = "That number can't receive SMS — try a voice call instead."
+                can_retry_by_call = True
+            else:
+                friendly = "That number can't receive a verification call either. Please use a different phone."
+        logger.warning("[twilio.send] channel=%s %s: %s", channel, type(e).__name__, msg[:200])
         await _audit(
             "auth.phone.send_failed", request,
-            metadata={"phone_last4": phone[-4:], "twilio_error": type(e).__name__},
+            metadata={
+                "phone_last4": phone[-4:],
+                "twilio_error": type(e).__name__,
+                "channel": channel,
+            },
         )
-        raise HTTPException(status_code=400, detail=friendly)
+        # Return the retry hint in headers so the frontend can toggle the
+        # "Try a phone call instead" button. HTTPException(detail=…) doesn't
+        # let us attach a structured body cleanly, so we shape the detail as
+        # a dict — clients that just render `detail` still see the string
+        # message (formatApiError extracts .message first).
+        detail_body: dict = {"message": friendly}
+        if can_retry_by_call:
+            detail_body["can_retry_by_call"] = True
+        raise HTTPException(status_code=400, detail=detail_body)
 
     await _audit(
         "auth.phone.code_sent", request,
-        metadata={"phone_last4": phone[-4:], "status": status},
+        metadata={"phone_last4": phone[-4:], "status": status, "channel": channel},
     )
     return {**generic, "status": status}
 

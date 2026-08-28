@@ -83,6 +83,45 @@ def test_send_code_accepts_e164():
     assert r.json()["ok"] is True
 
 
+def test_send_code_defaults_to_sms_channel():
+    """When the client omits `channel`, the response echoes back `sms`."""
+    phone = _rand_phone()
+    with httpx.Client() as c:
+        r = c.post(f"{API_URL}/auth/phone/send-code", json={"phone_number": phone})
+    assert r.status_code == 200
+    assert r.json().get("channel") == "sms"
+    assert "SMS" in r.json().get("message", "")
+
+
+def test_send_code_accepts_call_channel():
+    """HF-036 voice-call fallback path: `channel=call` returns a call-shaped
+    success message so the frontend can render the right verify-step copy."""
+    phone = _rand_phone()
+    with httpx.Client() as c:
+        r = c.post(
+            f"{API_URL}/auth/phone/send-code",
+            json={"phone_number": phone, "channel": "call"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("channel") == "call"
+    # Message mentions "call" instead of "text".
+    assert "call" in body.get("message", "").lower()
+
+
+def test_send_code_whitelists_channel():
+    """Anything other than sms/call falls back to sms so a malformed client
+    can't smuggle a `channel=email` past Twilio."""
+    phone = _rand_phone()
+    with httpx.Client() as c:
+        r = c.post(
+            f"{API_URL}/auth/phone/send-code",
+            json={"phone_number": phone, "channel": "email"},
+        )
+    assert r.status_code == 200
+    assert r.json().get("channel") == "sms"
+
+
 # ---------- Verify-code endpoint -------------------------------------------
 
 def test_verify_code_returns_token_on_approved():
