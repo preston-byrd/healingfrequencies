@@ -759,3 +759,9 @@
   - **Files** — `backend/server.py` (`admin_sms_stats` rewritten, ~+70 LOC), `frontend/src/components/AdminSMSStats.jsx` (new), `frontend/src/components/AccountDashboard.jsx` (import + mount), `backend/tests/test_sms_notifications.py` (extended `test_admin_stats_shape` to lock in new fields).
   - **Verified** — 12/12 SMS-notification tests pass; live curl shows the enriched shape with real production-shaped counts (sent=43 · delivered=43 · verified_users=291 · by_category={transactional:43} · recent=10).
 
+
+- **HF-035 Admin phone-number smart input (Feb 2026)**: Follow-up to HF-033. Admins reported the Save button rejecting numbers like `19013049095` because the backend `_normalize_phone` requires an explicit `+`. Rather than train every operator on E.164, the admin modal now auto-normalizes on submit and shows a live "Will save as" preview.
+  - **Frontend** (`AdminUserProfileModal.jsx`): new module-level `normalizePhoneForSubmit(raw)` helper strips `()`, `-`, spaces, dots; preserves a leading `+`; adds `+1` for bare 10-digit US pastes; adds `+` for any other digit-only input. Wired into the `diff` payload so the backend receives valid E.164 without touching the field the admin typed. A subtle green "Will save as: +19013049095" hint appears below the input whenever normalization changes the string (data-testid `admin-profile-phone-preview`).
+  - **Accepts** — `19013049095`, `9013049095`, `+1 (901) 304-9095`, `  +19013049095  `, `+447700900123` — all normalize to correct E.164.
+  - **Files** — `frontend/src/components/AdminUserProfileModal.jsx` (~+40 LOC helper + preview).
+  - **Verified** — Curl round-trip with `+19013049095` PUT'd to `/admin/users/:id/profile` (confirm=true, phone_verified=true) returns `ok:true` and persists correctly. All 5 common paste variants normalize as expected.

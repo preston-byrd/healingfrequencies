@@ -78,9 +78,12 @@ export default function AdminUserProfileModal({ userId, open, onClose, onSaved }
     }
     // Phone number — normalise "empty" both sides so an untouched blank
     // field never registers as a diff. Trim whitespace so trailing spaces
-    // don't falsely trigger the sensitive-confirm gate.
+    // don't falsely trigger the sensitive-confirm gate. We also normalise
+    // common admin input styles (dashes, parens, spaces, no leading `+`)
+    // into E.164 so the backend validator doesn't reject perfectly-valid
+    // numbers just because support pasted "(901) 304-9095" or "19013049095".
     const curPhone = (profile.phone_number || '').trim();
-    const nextPhone = (form.phone_number || '').trim();
+    const nextPhone = normalizePhoneForSubmit(form.phone_number);
     if (nextPhone !== curPhone) {
       out.push(['phone_number', nextPhone]);
       sensitiveTouched.push('phone_number');
@@ -279,6 +282,24 @@ export default function AdminUserProfileModal({ userId, open, onClose, onSaved }
                       onChange={(e) => setForm((f) => ({ ...f, phone_number: e.target.value }))}
                       className="admin-input font-mono"
                     />
+                    {(() => {
+                      // Show the normalized E.164 the backend will actually
+                      // receive whenever it differs from the raw input, so
+                      // support staff can eyeball the auto-fix before hitting
+                      // Save (esp. important for bare 10-digit US numbers
+                      // which get an implicit +1 prepended).
+                      const raw = (form.phone_number || '').trim();
+                      const norm = normalizePhoneForSubmit(form.phone_number);
+                      if (!raw || !norm || norm === raw) return null;
+                      return (
+                        <div
+                          data-testid="admin-profile-phone-preview"
+                          className="mt-1 text-[10px] text-[#72C2AC] font-mono"
+                        >
+                          Will save as: {norm}
+                        </div>
+                      );
+                    })()}
                     <label className="mt-2 inline-flex items-center gap-2 text-[11px] text-[#8A9A92]">
                       <input
                         data-testid="admin-profile-phone-verified-toggle"
@@ -544,4 +565,30 @@ function Field({ label, hint, children }) {
       {children}
     </div>
   );
+}
+
+/**
+ * Normalise a phone string into E.164 for the /admin/users/:id/profile PUT
+ * payload. Accepts every common admin-paste variant:
+ *   "+1 (901) 304-9095"  →  "+19013049095"
+ *   "19013049095"        →  "+19013049095"
+ *   "9013049095"         →  "+19013049095"   (10-digit US shortcut)
+ *   "  "  or ""          →  ""               (clear-phone signal)
+ * If the input already starts with `+` we trust it and only strip formatting
+ * characters. If it's all digits we assume it's what the admin meant and
+ * prepend `+`, plus a `1` for bare 10-digit US numbers.
+ */
+export function normalizePhoneForSubmit(raw) {
+  if (raw === undefined || raw === null) return '';
+  const trimmed = String(raw).trim();
+  if (!trimmed) return '';
+  // Preserve a leading `+` while stripping every other non-digit.
+  const hasPlus = trimmed.startsWith('+');
+  const digits = trimmed.replace(/[^\d]/g, '');
+  if (!digits) return '';
+  if (hasPlus) return `+${digits}`;
+  // Bare-10-digit US shortcut → +1XXXXXXXXXX. Only assume this when the
+  // paste is exactly 10 digits so we never guess for international numbers.
+  if (digits.length === 10) return `+1${digits}`;
+  return `+${digits}`;
 }
