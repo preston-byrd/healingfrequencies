@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Bell, BellOff, Smartphone, Loader2 } from 'lucide-react';
+import { X, Bell, BellOff, Smartphone, Loader2, MessageSquare } from 'lucide-react';
 import api from '@/lib/api';
 import { pushSupported, currentPermission, subscribeToPush, unsubscribeFromPush } from '@/lib/pushClient';
 
@@ -40,6 +40,14 @@ export default function NotificationPreferencesModal({ open, onClose }) {
   const [permission, setPermission] = useState(currentPermission());
   const [pushBusy, setPushBusy] = useState(false);
   const [error, setError] = useState('');
+  // HF-031 SMS preferences — loaded in parallel with notification prefs so
+  // the modal is a single stop for every "how does Solarisound reach me?"
+  // decision. `null` until fetched; `false` if the fetch fails (rendered
+  // as a graceful "SMS unavailable" fallback rather than blocking the
+  // whole modal on a partial outage).
+  const [smsPrefs, setSmsPrefs] = useState(null);
+  const [smsError, setSmsError] = useState('');
+  const [smsSaving, setSmsSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -51,6 +59,14 @@ export default function NotificationPreferencesModal({ open, onClose }) {
         setPermission(currentPermission());
       } catch (e) {
         if (alive) setError('Could not load your preferences right now.');
+      }
+      // Fetch SMS prefs in a separate try so a 4xx here doesn't wipe the
+      // main prefs section.
+      try {
+        const { data } = await api.get('/me/sms-prefs');
+        if (alive) setSmsPrefs(data);
+      } catch (e) {
+        if (alive) setSmsPrefs(false);
       }
     })();
     return () => { alive = false; };
@@ -81,6 +97,31 @@ export default function NotificationPreferencesModal({ open, onClose }) {
       setError('That change couldn\'t be saved. Please try again.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  // HF-031 SMS toggle handler. Kept separate from `savePartial` so the
+  // in-flight UI reflects the SMS-specific status ("Confirming with your
+  // carrier…" if we ever add a delivery ping) without blocking the main
+  // notification-prefs section.
+  const saveSmsPartial = async (patch) => {
+    if (!smsPrefs) return;
+    setSmsError('');
+    const next = { ...smsPrefs };
+    Object.keys(patch).forEach((k) => {
+      if (k === 'categories' && patch.categories) next.categories = { ...next.categories, ...patch.categories };
+      else next[k] = patch[k];
+    });
+    setSmsPrefs(next);
+    setSmsSaving(true);
+    try {
+      const { data } = await api.put('/me/sms-prefs', patch);
+      setSmsPrefs(data);
+    } catch (e) {
+      const msg = e?.response?.data?.detail || 'Couldn\'t update your text preferences.';
+      setSmsError(typeof msg === 'string' ? msg : 'Couldn\'t update your text preferences.');
+    } finally {
+      setSmsSaving(false);
     }
   };
 
@@ -296,6 +337,99 @@ export default function NotificationPreferencesModal({ open, onClose }) {
             <div className="text-[10px] text-[#5A6B65] pt-2">
               {saving ? 'Saving…' : 'All changes are saved automatically.'}
             </div>
+
+            {/* HF-031: Text-message notifications. Rendered as its own
+                section so the consent, categories, and STOP disclosure
+                sit together and users clearly see them as a distinct
+                channel from push / in-app. */}
+            <section className="border-t border-white/5 pt-6">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-[#5A6B65] mb-3 flex items-center gap-2">
+                <MessageSquare size={11} /> Text messages
+              </div>
+              {smsPrefs === null && (
+                <div className="text-xs text-[#8A9A92] inline-flex items-center gap-1">
+                  <Loader2 size={11} className="animate-spin" /> Loading text preferences…
+                </div>
+              )}
+              {smsPrefs === false && (
+                <div className="text-xs text-[#8A9A92]">
+                  Text preferences are unavailable right now.
+                </div>
+              )}
+              {smsPrefs && typeof smsPrefs === 'object' && (
+                <div className="space-y-4">
+                  {!smsPrefs.phone_verified && (
+                    <div className="text-xs text-[#8A9A92] p-3 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                      Verify a phone number to enable text notifications. You can
+                      add one at the top of your account settings.
+                    </div>
+                  )}
+                  {smsPrefs.phone_verified && smsPrefs.stopped_at && (
+                    <div className="text-xs text-[#EFB067] p-3 rounded-lg bg-[#EFB067]/[0.06] border border-[#EFB067]/20">
+                      This number is unsubscribed from Solarisound texts.
+                      Reply <strong>START</strong> to any recent Solarisound
+                      message to re-subscribe.
+                    </div>
+                  )}
+                  {smsPrefs.phone_verified && !smsPrefs.stopped_at && (
+                    <>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <div className="text-sm text-[#E8E3D9]">
+                            Allow non-essential texts
+                          </div>
+                          <div className="text-xs text-[#8A9A92] mt-1 leading-snug">
+                            Texts to <span className="font-mono text-[#E8E3D9]">···{smsPrefs.phone_number_last4}</span>.
+                            Standard message rates may apply. Reply <strong>STOP</strong> anytime to unsubscribe;
+                            <strong> HELP</strong> for info. We never share your number.
+                          </div>
+                        </div>
+                        <TogglePill
+                          checked={!!smsPrefs.marketing_opted_in}
+                          disabled={smsSaving}
+                          testid="sms-marketing-toggle"
+                          onChange={(v) => saveSmsPartial({ marketing_opted_in: v })}
+                        />
+                      </div>
+                      {smsPrefs.marketing_opted_in && (
+                        <div className="space-y-3 pl-3 border-l-2 border-[#5C9E8C]/30">
+                          {[
+                            { key: 'reminders', label: 'Session reminders', hint: 'Gentle nudges when it\'s time for your daily practice.' },
+                            { key: 'recommendations', label: 'Frequency recommendations', hint: 'A suggested frequency or Soundscape for your day.' },
+                            { key: 'announcements', label: 'Feature announcements', hint: 'When something new lands in Solarisound.' },
+                          ].map(({ key, label, hint }) => (
+                            <div key={key} className="flex items-start justify-between gap-3">
+                              <div className="flex-1">
+                                <div className="text-sm text-[#E8E3D9]">{label}</div>
+                                <div className="text-xs text-[#8A9A92] mt-1 leading-snug">{hint}</div>
+                              </div>
+                              <TogglePill
+                                checked={!!(smsPrefs.categories && smsPrefs.categories[key])}
+                                disabled={smsSaving}
+                                testid={`sms-category-${key}`}
+                                onChange={(v) => saveSmsPartial({ categories: { [key]: v } })}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="text-[10px] text-[#5A6B65] leading-relaxed">
+                        We only send account-related texts (payment, verification)
+                        without your explicit opt-in. Every non-essential text
+                        respects your quiet hours and daily maximum, and includes
+                        clear opt-out language.
+                      </div>
+                    </>
+                  )}
+                  {smsError && (
+                    <div className="text-xs text-[#D96C6C]">{smsError}</div>
+                  )}
+                  {smsSaving && (
+                    <div className="text-[10px] text-[#5A6B65]">Saving text preferences…</div>
+                  )}
+                </div>
+              )}
+            </section>
           </div>
         )}
       </div>

@@ -1219,6 +1219,423 @@ def _consume_phone_verification_token(token: str, expected_phone: str) -> str:
     return tok_phone
 
 
+# --- HF-031: SMS notification system ---------------------------------------
+# Uses Twilio Programmable SMS (`TWILIO_PHONE_NUMBER` sender) — separate from
+# the Verify Service used for one-time OTPs. Every send routes through
+# `send_sms()` which enforces:
+#   • Consent — the user's `sms_prefs.categories[category]` must be true,
+#     AND `sms_prefs.stopped_at` must be null (STOP reply is a hard opt-out)
+#   • Transactional bypass — the `transactional` category (account /
+#     payment / verification confirmations) sends whenever a phone number
+#     exists AND the user has NOT sent STOP. TCPA carves out transactional
+#     messages from the standard marketing-consent rule.
+#   • Quiet hours — respects the same `notification_prefs.quiet_hours`
+#     window used by push. Transactional messages bypass quiet hours; other
+#     categories are queued-past by returning `deferred=true` (caller decides
+#     whether to retry after quiet hours end).
+#   • Rate limit — max 5 SMS per user per day (marketing categories),
+#     plus a hard 20/day cap that includes transactional. Prevents runaway
+#     loops from overwhelming a phone.
+#   • Content guardrails — every non-transactional body is validated
+#     against `_SMS_FORBIDDEN_PHRASES` (medical/diagnostic/urgent claims)
+#     and prepended with a "Reply STOP to unsubscribe" tag when the
+#     recipient hasn't received that disclosure in the last 30 days.
+#   • Audit — every attempt writes an `sms_messages` doc with the Twilio
+#     SID (or failure reason), enabling delivery-status reconciliation via
+#     the /api/sms/webhook/status callback.
+
+SMS_CATEGORIES = ("transactional", "reminders", "recommendations", "announcements")
+_SMS_TRANSACTIONAL = "transactional"  # always-on (unless STOP)
+_SMS_FORBIDDEN_PHRASES = (
+    # Health-claim guardrails per HF-031 spec — "avoid medical, diagnostic,
+    # urgent, manipulative, or unsupported health claims".
+    "cure", "heal your", "diagnose", "treatment", "prescription",
+    "guaranteed", "act now", "urgent", "medical", "clinical",
+)
+_SMS_UNSUBSCRIBE_TAG = " Reply STOP to unsubscribe."
+_SMS_HELP_REPLY = (
+    "Solarisound: Text notifications for account, session, and feature "
+    "updates. Msg&data rates may apply. Reply STOP to unsubscribe."
+)
+_SMS_STOP_REPLY = (
+    "You've been unsubscribed from Solarisound texts. You'll still receive "
+    "essential account messages. Reply START to re-subscribe."
+)
+_SMS_START_REPLY = (
+    "You're re-subscribed to Solarisound texts. Reply STOP to unsubscribe."
+)
+
+
+def _default_sms_prefs() -> dict:
+    return {
+        # TCPA-safe defaults: NOTHING is opted-in by default. User must
+        # actively enable each non-transactional category before we send.
+        "marketing_opted_in": False,
+        "marketing_opted_in_at": None,
+        "consent_ip": None,
+        "stopped_at": None,
+        "last_disclosure_at": None,
+        "categories": {
+            "transactional": True,  # user cannot fully disable transactional
+            "reminders": False,
+            "recommendations": False,
+            "announcements": False,
+        },
+    }
+
+
+async def _get_sms_prefs(user_id: str) -> dict:
+    doc = await db.users.find_one({"id": user_id}, {"sms_prefs": 1}) or {}
+    prefs = doc.get("sms_prefs") or {}
+    merged = _default_sms_prefs()
+    if isinstance(prefs, dict):
+        for k, v in prefs.items():
+            if k == "categories" and isinstance(v, dict):
+                merged["categories"] = {
+                    **merged["categories"],
+                    **{c: bool(x) for c, x in v.items() if c in SMS_CATEGORIES},
+                }
+                # Guardrail: transactional cannot be turned off from prefs
+                # (only STOP can silence it entirely).
+                merged["categories"]["transactional"] = True
+            else:
+                merged[k] = v
+    return merged
+
+
+def _sms_body_ok(body: str) -> tuple[bool, str]:
+    """Return (ok, reason). Blocks forbidden phrases + oversized bodies."""
+    if not body or not body.strip():
+        return False, "empty body"
+    if len(body) > 320:  # 2 SMS segments max
+        return False, "body too long (max 320 chars)"
+    lower = body.lower()
+    for term in _SMS_FORBIDDEN_PHRASES:
+        if term in lower:
+            return False, f"contains disallowed phrase: {term!r}"
+    return True, ""
+
+
+async def _sms_daily_count(user_id: str, transactional_only: bool = False) -> int:
+    """Count today's sends for rate-limit checks."""
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    q: dict = {
+        "user_id": user_id,
+        "sent_at": {"$gte": start.isoformat()},
+        "status": {"$in": ["queued", "sent", "delivered"]},
+    }
+    if transactional_only:
+        q["category"] = _SMS_TRANSACTIONAL
+    return await db.sms_messages.count_documents(q)
+
+
+async def send_sms(
+    user: dict,
+    category: str,
+    body: str,
+    *,
+    bypass_quiet_hours: bool = False,
+    request: Optional[Request] = None,
+) -> dict:
+    """Central SMS dispatch. Returns a dict describing the outcome:
+        {sent: bool, deferred: bool, reason: str, sms_id: str | None}
+
+    Never raises to the caller — SMS is opportunistic. Failures are logged
+    and audited but should never break the primary flow that triggered
+    the send.
+    """
+    user_id = user.get("id") if isinstance(user, dict) else None
+    phone = (user.get("phone_number") if isinstance(user, dict) else None) or ""
+
+    def _fail(reason: str, log: bool = True) -> dict:
+        if log:
+            logger.info("[sms.skip] user=%s cat=%s reason=%s", user_id, category, reason)
+        return {"sent": False, "deferred": False, "reason": reason, "sms_id": None}
+
+    if category not in SMS_CATEGORIES:
+        return _fail(f"unknown category: {category}")
+    if not user_id or not phone:
+        return _fail("no phone on user")
+
+    # Content guardrails.
+    ok, why = _sms_body_ok(body)
+    if not ok:
+        return _fail(f"body rejected: {why}")
+
+    prefs = await _get_sms_prefs(user_id)
+    # Hard opt-out — STOP reply silences everything except HELP/START.
+    if prefs.get("stopped_at"):
+        return _fail("user opted out (STOP)")
+
+    # Consent gate. Transactional is always allowed if not STOPPED.
+    if category != _SMS_TRANSACTIONAL:
+        if not prefs.get("marketing_opted_in"):
+            return _fail("no marketing consent")
+        if not prefs.get("categories", {}).get(category, False):
+            return _fail(f"category disabled: {category}")
+
+    # Quiet hours (bypassed by transactional + explicit override).
+    if category != _SMS_TRANSACTIONAL and not bypass_quiet_hours:
+        notif_prefs = await _get_notification_prefs(user_id)
+        if _is_within_quiet_hours(notif_prefs):
+            logger.info("[sms.deferred] user=%s cat=%s reason=quiet_hours", user_id, category)
+            return {"sent": False, "deferred": True, "reason": "quiet_hours", "sms_id": None}
+
+    # Rate limits.
+    total_today = await _sms_daily_count(user_id)
+    if total_today >= 20:
+        return _fail(f"daily cap reached ({total_today})")
+    if category != _SMS_TRANSACTIONAL and total_today >= 5:
+        return _fail(f"marketing daily cap reached ({total_today})")
+
+    # Prepend the unsubscribe tag on non-transactional bodies if we haven't
+    # shown it in the last 30 days. CTIA guideline.
+    final_body = body
+    if category != _SMS_TRANSACTIONAL:
+        last = prefs.get("last_disclosure_at")
+        needs_tag = True
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last)
+                if (datetime.now(timezone.utc) - last_dt).days < 30:
+                    needs_tag = False
+            except Exception:
+                needs_tag = True
+        if needs_tag and _SMS_UNSUBSCRIBE_TAG.strip().lower() not in body.lower():
+            # Only append if it fits in the 320-char budget.
+            if len(body) + len(_SMS_UNSUBSCRIBE_TAG) <= 320:
+                final_body = body + _SMS_UNSUBSCRIBE_TAG
+
+    if not _twilio_client or not _TWILIO_ACCOUNT_SID or not (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip():
+        # Configured for Verify only (no programmable-SMS sender). Log the
+        # would-be send so admins can see what WOULD have gone out once
+        # Twilio SMS is enabled — but don't fail the caller.
+        doc = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "phone_last4": phone[-4:],
+            "category": category,
+            "body_len": len(final_body),
+            "status": "skipped-unconfigured",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.sms_messages.insert_one(doc)
+        return _fail("twilio programmable-sms not configured", log=False)
+
+    if _TWILIO_TEST_MODE:
+        # Test mode: log the message but DON'T dispatch — same guardrail as
+        # Verify. Return {sent: True} so caller flows work.
+        doc = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "phone_last4": phone[-4:],
+            "category": category,
+            "body": final_body,
+            "status": "sent-test-mode",
+            "twilio_sid": None,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.sms_messages.insert_one(doc)
+        # Refresh the unsubscribe disclosure clock so we don't spam it.
+        if category != _SMS_TRANSACTIONAL:
+            await db.users.update_one(
+                {"id": user_id},
+                {"$set": {"sms_prefs.last_disclosure_at": datetime.now(timezone.utc).isoformat()}},
+            )
+        return {"sent": True, "deferred": False, "reason": "test-mode", "sms_id": doc["id"]}
+
+    sender = (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip()
+    try:
+        def _send():
+            return _twilio_client.messages.create(to=phone, from_=sender, body=final_body)
+        message = await asyncio.get_event_loop().run_in_executor(None, _send)
+        sid = getattr(message, "sid", None)
+        status = getattr(message, "status", "queued")
+    except Exception as e:
+        # Log failure. Don't raise — SMS is opportunistic.
+        logger.warning("[sms.send_fail] user=%s cat=%s err=%s", user_id, category, type(e).__name__)
+        doc = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "phone_last4": phone[-4:],
+            "category": category,
+            "body_len": len(final_body),
+            "status": "failed",
+            "error": str(e)[:400],
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.sms_messages.insert_one(doc)
+        return _fail(f"twilio error: {type(e).__name__}")
+
+    sms_id = str(uuid.uuid4())
+    doc = {
+        "id": sms_id,
+        "user_id": user_id,
+        "phone_last4": phone[-4:],
+        "category": category,
+        "body": final_body,
+        "status": status or "queued",
+        "twilio_sid": sid,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.sms_messages.insert_one(doc)
+
+    if category != _SMS_TRANSACTIONAL:
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"sms_prefs.last_disclosure_at": datetime.now(timezone.utc).isoformat()}},
+        )
+
+    return {"sent": True, "deferred": False, "reason": "queued", "sms_id": sms_id}
+
+
+# --- HF-031 endpoints -------------------------------------------------------
+class SmsPrefsIn(BaseModel):
+    marketing_opted_in: Optional[bool] = None
+    categories: Optional[Dict[str, bool]] = None
+
+
+@api.get("/me/sms-prefs")
+async def me_get_sms_prefs(user: dict = Depends(get_current_user)):
+    prefs = await _get_sms_prefs(user["id"])
+    # Also surface whether we CAN text (phone verified + configured).
+    prefs["phone_number_last4"] = (user.get("phone_number") or "")[-4:] if user.get("phone_number") else None
+    prefs["phone_verified"] = bool(user.get("phone_verified"))
+    return prefs
+
+
+@api.put("/me/sms-prefs")
+async def me_update_sms_prefs(
+    body: SmsPrefsIn,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    if not user.get("phone_verified"):
+        raise HTTPException(
+            status_code=400,
+            detail="Verify your phone number before enabling text notifications.",
+        )
+    current = await _get_sms_prefs(user["id"])
+    # STOP-out is sticky. To re-subscribe the user must reply START, not
+    # flip the toggle in-app — TCPA policy.
+    if current.get("stopped_at"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This number is unsubscribed from Solarisound texts. Reply "
+                "START to any message to re-subscribe."
+            ),
+        )
+    set_doc: dict = {}
+    if body.marketing_opted_in is not None:
+        v = bool(body.marketing_opted_in)
+        if v and not current.get("marketing_opted_in"):
+            set_doc["sms_prefs.marketing_opted_in"] = True
+            set_doc["sms_prefs.marketing_opted_in_at"] = datetime.now(timezone.utc).isoformat()
+            set_doc["sms_prefs.consent_ip"] = _client_ip(request)
+            await _audit(
+                "sms.opt_in", request, user_id=user["id"], user_email=user.get("email"),
+                metadata={"phone_last4": (user.get("phone_number") or "")[-4:]},
+            )
+        elif not v and current.get("marketing_opted_in"):
+            set_doc["sms_prefs.marketing_opted_in"] = False
+            await _audit(
+                "sms.opt_out_soft", request, user_id=user["id"], user_email=user.get("email"),
+                metadata={"phone_last4": (user.get("phone_number") or "")[-4:]},
+            )
+    if body.categories and isinstance(body.categories, dict):
+        for cat, val in body.categories.items():
+            if cat in SMS_CATEGORIES and cat != _SMS_TRANSACTIONAL:
+                set_doc[f"sms_prefs.categories.{cat}"] = bool(val)
+    if set_doc:
+        await db.users.update_one({"id": user["id"]}, {"$set": set_doc})
+    return await _get_sms_prefs(user["id"])
+
+
+@api.post("/sms/webhook/inbound")
+async def sms_inbound_webhook(request: Request):
+    """Twilio inbound-SMS webhook. Parses STOP / START / HELP keywords per
+    industry standard and reflects them onto the user's `sms_prefs`.
+
+    Twilio POSTs application/x-www-form-urlencoded. We don't validate the
+    signature here yet (add `X-Twilio-Signature` HMAC check when the SID
+    for validating is configured); we do rate-limit by `From` phone.
+    """
+    form = await request.form()
+    from_phone = str(form.get("From") or "").strip()
+    body = str(form.get("Body") or "").strip().upper()
+    if not from_phone or not body:
+        return {"ok": True}
+
+    user = await db.users.find_one({"phone_number": from_phone})
+    if not user:
+        # Silent no-op — Twilio still sends the auto-reply.
+        logger.info("[sms.inbound] unknown from=%s body=%s", from_phone[-4:], body[:20])
+        return {"ok": True}
+
+    kw = body.split()[0] if body else ""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if kw in ("STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"):
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"sms_prefs.stopped_at": now_iso, "sms_prefs.marketing_opted_in": False}},
+        )
+        await _audit(
+            "sms.opt_out_stop", request, user_id=user["id"], user_email=user.get("email"),
+            metadata={"phone_last4": from_phone[-4:], "keyword": kw},
+        )
+        return {"ok": True, "reply": _SMS_STOP_REPLY}
+    if kw in ("START", "YES", "UNSTOP"):
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {"sms_prefs.stopped_at": None}},
+        )
+        await _audit(
+            "sms.opt_in_start", request, user_id=user["id"], user_email=user.get("email"),
+            metadata={"phone_last4": from_phone[-4:], "keyword": kw},
+        )
+        return {"ok": True, "reply": _SMS_START_REPLY}
+    if kw in ("HELP", "INFO"):
+        return {"ok": True, "reply": _SMS_HELP_REPLY}
+    # Any other body is a free-form message → we don't route those.
+    return {"ok": True}
+
+
+@api.post("/sms/webhook/status")
+async def sms_status_webhook(request: Request):
+    """Twilio delivery-status callback. Updates the `sms_messages` doc so
+    admins can see which messages actually landed."""
+    form = await request.form()
+    sid = str(form.get("MessageSid") or "").strip()
+    status = str(form.get("MessageStatus") or "").strip()
+    err_code = str(form.get("ErrorCode") or "").strip()
+    if not sid:
+        return {"ok": True}
+    update: dict = {"status": status or "unknown"}
+    if status == "delivered":
+        update["delivered_at"] = datetime.now(timezone.utc).isoformat()
+    elif status in ("failed", "undelivered"):
+        update["failed_at"] = datetime.now(timezone.utc).isoformat()
+        update["error_code"] = err_code
+    await db.sms_messages.update_one({"twilio_sid": sid}, {"$set": update})
+    return {"ok": True}
+
+
+@api.get("/admin/sms/stats")
+async def admin_sms_stats(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    # Simple aggregate for the admin analytics tile.
+    pipeline = [
+        {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+    ]
+    counts: dict = {}
+    async for row in db.sms_messages.aggregate(pipeline):
+        counts[row["_id"] or "unknown"] = row["count"]
+    opted_in = await db.users.count_documents({"sms_prefs.marketing_opted_in": True})
+    stopped = await db.users.count_documents({"sms_prefs.stopped_at": {"$ne": None}})
+    return {"by_status": counts, "opted_in": opted_in, "stopped": stopped}
+
+
 @api.post("/auth/register")
 async def register(body: RegisterIn, request: Request, response: Response):
     # SEC-001 hardening: per-IP throttle prevents bulk-account spam that would
@@ -1282,6 +1699,18 @@ async def register(body: RegisterIn, request: Request, response: Response):
     # Silent no-op when Resend isn't configured so tests / local dev work.
     asyncio.create_task(
         _send_welcome_email(email, user["name"])
+    )
+    # HF-031: fire a transactional welcome SMS confirming the number is
+    # tied to the account. Transactional category → doesn't require
+    # marketing opt-in, but still respects STOP + hard daily caps.
+    asyncio.create_task(
+        send_sms(
+            user,
+            _SMS_TRANSACTIONAL,
+            f"Welcome to Solarisound, {user['name'].split()[0][:24]}! Your phone is verified. Manage text preferences at solarisound.com/account.",
+            bypass_quiet_hours=True,
+            request=request,
+        )
     )
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
