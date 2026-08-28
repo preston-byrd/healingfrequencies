@@ -243,6 +243,16 @@ def test_admin_stats_shape(admin_token):
     assert isinstance(body["by_status"], dict)
     assert isinstance(body["opted_in"], int)
     assert isinstance(body["stopped"], int)
+    # HF-034 enriched fields powering the admin SMS dashboard tile.
+    for k in ("sent", "delivered", "failed", "skipped", "sent_24h", "sent_7d",
+              "verified_users", "by_category", "recent", "generated_at"):
+        assert k in body, f"missing enriched field {k}"
+    assert isinstance(body["recent"], list)
+    assert isinstance(body["by_category"], dict)
+    # Buckets must never go negative.
+    for k in ("sent", "delivered", "failed", "skipped", "sent_24h", "sent_7d",
+              "verified_users"):
+        assert body[k] >= 0
 
 
 def test_admin_stats_requires_admin(fresh_user_with_phone):

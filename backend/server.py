@@ -1732,16 +1732,83 @@ async def sms_status_webhook(request: Request):
 @api.get("/admin/sms/stats")
 async def admin_sms_stats(user: dict = Depends(get_current_user)):
     _require_admin(user)
-    # Simple aggregate for the admin analytics tile.
+    # Aggregate raw status counts (kept for the existing tests + power users).
     pipeline = [
         {"$group": {"_id": "$status", "count": {"$sum": 1}}},
     ]
     counts: dict = {}
     async for row in db.sms_messages.aggregate(pipeline):
         counts[row["_id"] or "unknown"] = row["count"]
+
+    # Roll raw statuses into the four buckets the admin dashboard tile shows.
+    # `sent-test-mode` counts as sent+delivered because in preview we assume
+    # a happy path so operators can eyeball the pipeline before flipping the
+    # Twilio env vars on.
+    def _sum(*keys: str) -> int:
+        return sum(int(counts.get(k, 0)) for k in keys)
+
+    sent_bucket = _sum("queued", "sent", "delivered", "sent-test-mode")
+    delivered_bucket = _sum("delivered", "sent-test-mode")
+    failed_bucket = _sum("failed", "undelivered")
+    skipped_bucket = _sum("skipped-unconfigured")
+
+    # 24h / 7d rolling counts of "actually sent" messages so the tile shows
+    # program momentum, not just lifetime totals.
+    now = datetime.now(timezone.utc)
+    since_24h = (now - timedelta(hours=24)).isoformat()
+    since_7d = (now - timedelta(days=7)).isoformat()
+    sent_status_filter = {"$in": ["queued", "sent", "delivered", "sent-test-mode"]}
+    sent_24h = await db.sms_messages.count_documents({
+        "status": sent_status_filter, "sent_at": {"$gte": since_24h},
+    })
+    sent_7d = await db.sms_messages.count_documents({
+        "status": sent_status_filter, "sent_at": {"$gte": since_7d},
+    })
+
+    # Category breakdown across all-time — helps spot channel mix (reminders
+    # vs marketing vs transactional).
+    by_category: dict = {}
+    async for row in db.sms_messages.aggregate([
+        {"$match": {"status": sent_status_filter}},
+        {"$group": {"_id": "$category", "count": {"$sum": 1}}},
+    ]):
+        by_category[row["_id"] or "unknown"] = row["count"]
+
     opted_in = await db.users.count_documents({"sms_prefs.marketing_opted_in": True})
     stopped = await db.users.count_documents({"sms_prefs.stopped_at": {"$ne": None}})
-    return {"by_status": counts, "opted_in": opted_in, "stopped": stopped}
+    verified = await db.users.count_documents({"phone_verified": True})
+
+    # Recent sends (last 10) — small strip below the tile so the admin can
+    # verify the last texts landed without scrolling into a full log view.
+    recent: list[dict] = []
+    async for row in db.sms_messages.find(
+        {},
+        {
+            "_id": 0, "id": 1, "category": 1, "status": 1, "phone_last4": 1,
+            "sent_at": 1, "delivered_at": 1, "failed_at": 1, "error_code": 1,
+        },
+        sort=[("sent_at", -1)],
+        limit=10,
+    ):
+        recent.append(row)
+
+    return {
+        # Legacy fields — do not remove (test_sms_notifications relies on them).
+        "by_status": counts,
+        "opted_in": opted_in,
+        "stopped": stopped,
+        # New rolled-up tiles for AdminSMSStats.
+        "sent": sent_bucket,
+        "delivered": delivered_bucket,
+        "failed": failed_bucket,
+        "skipped": skipped_bucket,
+        "sent_24h": sent_24h,
+        "sent_7d": sent_7d,
+        "verified_users": verified,
+        "by_category": by_category,
+        "recent": recent,
+        "generated_at": now.isoformat(),
+    }
 
 
 @api.post("/auth/register")

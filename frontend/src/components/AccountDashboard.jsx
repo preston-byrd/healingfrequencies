@@ -9,6 +9,7 @@ import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import AdminSupportInbox from '@/components/AdminSupportInbox';
 import AdminEmailEngagement from '@/components/AdminEmailEngagement';
+import AdminSMSStats from '@/components/AdminSMSStats';
 import AdminFrequencyDefaults from '@/components/AdminFrequencyDefaults';
 import AdminUserProfileModal from '@/components/AdminUserProfileModal';
 import { UserCog } from 'lucide-react';
@@ -1256,6 +1257,11 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
 
         {/* Admin: Email Engagement — re-engagement nudge analytics. */}
         {sub.is_admin && <AdminEmailEngagement />}
+
+        {/* Admin: SMS Pipeline — sent/delivered/failed + consent + recent
+            sends tile. Sits right after AdminEmailEngagement so email + SMS
+            program health live side-by-side on the admin scroll. */}
+        {sub.is_admin && <AdminSMSStats />}
 
         {/* Admin: Per-frequency ideal default volume editor — lets the
             admin tune the starting tone volume applied when a given
