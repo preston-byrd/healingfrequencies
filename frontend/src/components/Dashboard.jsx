@@ -1547,7 +1547,17 @@ export default function Dashboard({ onOpenAccount }) {
         .forEach((k) => audioEngine.setAmbient(k, 0));
       Object.entries(data.ambient || {}).forEach(([k, v]) => audioEngine.setAmbient(k, v));
       setActiveSoundscape(null);
-      if (data.duration_min) setDuration(data.duration_min);
+      // Arm the player countdown for the prescription. Fall back to the
+      // 10-min product default when the AI didn't specify a duration so
+      // the transport never renders 00:00. Wall-clock anchor mirrors the
+      // Wellness Assistant fix — makes the countdown authoritative even
+      // if `state.playing` hasn't propagated by the time the effect runs.
+      const rxMin = (typeof data.duration_min === 'number' && data.duration_min > 0)
+        ? data.duration_min
+        : 10;
+      setDuration(rxMin);
+      setRemaining(rxMin * 60);
+      try { audioEngine.sessionEndAt = Date.now() + rxMin * 60 * 1000; } catch (_) {}
       setAiResult(data);
       // PLAYER CONTRACT: hand control over to the player so the UI shows the
       // correct Pause icon and a single tap can stop everything. If the user
