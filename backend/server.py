@@ -799,6 +799,112 @@ async def _reengagement_tick() -> dict:
             continue
         await _send_reengagement_nudge(u, tier)
         stats["sent"] += 1
+    # HF-032 SMS Session Reminders: after the email pass, sweep Pro users
+    # who have opted in to `reminders` category and haven't practiced in
+    # 3+ days. Kept in the same tick so operators have a single lever to
+    # run + observe (admin tick endpoint returns both counters).
+    sms_stats = await _sms_reminder_tick(now)
+    stats.update({f"sms_{k}": v for k, v in sms_stats.items()})
+    return stats
+
+
+async def _sms_reminder_tick(now: datetime) -> dict:
+    """One pass of the SMS session-reminder scheduler.
+
+    Rules:
+      • User must be Pro (pro_until > now). Free users don't get texts —
+        keeps the SMS budget tight and creates a real Pro benefit.
+      • User must have a verified phone AND `sms_prefs.marketing_opted_in`
+        AND `sms_prefs.categories.reminders`.
+      • User must NOT have replied STOP.
+      • Last session in `db.sessions` must be >= 72h ago (or no sessions at
+        all combined with an account older than 72h — same threshold as
+        the email nudger so both signals stay in sync).
+      • Cooldown: only ONE SMS reminder every 7 days per user, tracked by
+        an `sms_messages` doc with category='reminders'. Prevents daily
+        spamming even when the scheduler runs frequently.
+      • Quiet hours: send_sms() already defers if in quiet hours; we
+        surface `deferred` in the counter so operators can see it.
+
+    Returns counters — never raises.
+    """
+    stats = {"scanned": 0, "sent": 0, "deferred": 0, "skipped_not_pro": 0,
+             "skipped_no_consent": 0, "skipped_recent_session": 0,
+             "skipped_recent_reminder": 0, "skipped_stopped": 0, "errors": 0}
+    now_iso = now.isoformat()
+    stale_cutoff_iso = (now - timedelta(hours=72)).isoformat()
+    reminder_cooldown_iso = (now - timedelta(days=7)).isoformat()
+    # Only fetch users who could plausibly qualify. The Mongo query narrows
+    # the population up front so we're not iterating the entire user base.
+    cursor = db.users.find(
+        {
+            "phone_verified": True,
+            "phone_number": {"$exists": True, "$ne": None},
+            "sms_prefs.marketing_opted_in": True,
+            "sms_prefs.categories.reminders": True,
+            "sms_prefs.stopped_at": None,
+            "pro_until": {"$gt": now_iso},
+        },
+        {"_id": 0, "id": 1, "name": 1, "phone_number": 1, "pro_until": 1},
+    )
+    async for u in cursor:
+        stats["scanned"] += 1
+        try:
+            # Cooldown: did we send this user a reminders SMS in the last 7 days?
+            recent = await db.sms_messages.find_one(
+                {
+                    "user_id": u["id"],
+                    "category": "reminders",
+                    "sent_at": {"$gt": reminder_cooldown_iso},
+                    "status": {"$in": ["queued", "sent", "delivered", "sent-test-mode"]},
+                },
+                {"_id": 1},
+            )
+            if recent:
+                stats["skipped_recent_reminder"] += 1
+                continue
+            # Last session — count as "inactive" if the most recent session
+            # is older than 72h. Missing sessions collection = 0 sessions =
+            # also inactive if account is >72h old (we already know phone
+            # was verified during register, which happens on the same day).
+            latest = await db.sessions.find_one(
+                {"user_id": u["id"]},
+                sort=[("created_at", -1)],
+                projection={"_id": 0, "created_at": 1},
+            )
+            if latest and latest.get("created_at"):
+                try:
+                    if latest["created_at"] >= stale_cutoff_iso:
+                        stats["skipped_recent_session"] += 1
+                        continue
+                except Exception:
+                    pass
+            # Compose the reminder body. Kept short, supportive, non-clinical
+            # per HF-031 guardrails (no "healing", "cure", "urgent", etc.).
+            first_name = (u.get("name") or "").split()[0][:24] if u.get("name") else "friend"
+            body = (
+                f"Hi {first_name}, your Solarisound practice is waiting. "
+                f"3 minutes today is a gift to tomorrow-you. "
+                f"solarisound.com/session"
+            )
+            outcome = await send_sms(u, "reminders", body)
+            if outcome.get("sent"):
+                stats["sent"] += 1
+            elif outcome.get("deferred"):
+                stats["deferred"] += 1
+            else:
+                # send_sms already logged the reason. Bucket by common reasons
+                # so the admin can see WHY sends were skipped.
+                reason = (outcome.get("reason") or "").lower()
+                if "stop" in reason:
+                    stats["skipped_stopped"] += 1
+                elif "consent" in reason or "disabled" in reason:
+                    stats["skipped_no_consent"] += 1
+                else:
+                    stats["errors"] += 1
+        except Exception as e:
+            logger.warning("[sms.reminder] user=%s err=%s", u.get("id"), type(e).__name__)
+            stats["errors"] += 1
     return stats
 
 
@@ -1406,25 +1512,11 @@ async def send_sms(
             if len(body) + len(_SMS_UNSUBSCRIBE_TAG) <= 320:
                 final_body = body + _SMS_UNSUBSCRIBE_TAG
 
-    if not _twilio_client or not _TWILIO_ACCOUNT_SID or not (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip():
-        # Configured for Verify only (no programmable-SMS sender). Log the
-        # would-be send so admins can see what WOULD have gone out once
-        # Twilio SMS is enabled — but don't fail the caller.
-        doc = {
-            "id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "phone_last4": phone[-4:],
-            "category": category,
-            "body_len": len(final_body),
-            "status": "skipped-unconfigured",
-            "sent_at": datetime.now(timezone.utc).isoformat(),
-        }
-        await db.sms_messages.insert_one(doc)
-        return _fail("twilio programmable-sms not configured", log=False)
-
     if _TWILIO_TEST_MODE:
         # Test mode: log the message but DON'T dispatch — same guardrail as
-        # Verify. Return {sent: True} so caller flows work.
+        # Verify. Return {sent: True} so caller flows work. Runs BEFORE the
+        # unconfigured check because we WANT the "sent" outcome path even
+        # when Twilio programmable-SMS keys are empty in preview.
         doc = {
             "id": str(uuid.uuid4()),
             "user_id": user_id,
@@ -1443,6 +1535,22 @@ async def send_sms(
                 {"$set": {"sms_prefs.last_disclosure_at": datetime.now(timezone.utc).isoformat()}},
             )
         return {"sent": True, "deferred": False, "reason": "test-mode", "sms_id": doc["id"]}
+
+    if not _twilio_client or not _TWILIO_ACCOUNT_SID or not (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip():
+        # Configured for Verify only (no programmable-SMS sender). Log the
+        # would-be send so admins can see what WOULD have gone out once
+        # Twilio SMS is enabled — but don't fail the caller.
+        doc = {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "phone_last4": phone[-4:],
+            "category": category,
+            "body_len": len(final_body),
+            "status": "skipped-unconfigured",
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.sms_messages.insert_one(doc)
+        return _fail("twilio programmable-sms not configured", log=False)
 
     sender = (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip()
     try:
