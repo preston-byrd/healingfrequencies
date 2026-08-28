@@ -46,6 +46,15 @@ class AudioEngine {
     this.isoSmoother = null;
     this.isoFadeIn = null;
 
+    // Auto-recovery mutex. `_recoveryInProgress` is set true only while
+    // `_postStartHealthCheck` is actively rebuilding the graph after a
+    // detected failure. `_recoveryAborted` is set by manual stop()/start()
+    // during that window so the recovery routine bails out and lets the
+    // user's intent win. Together they prevent the "auto-recovery starts
+    // audio right after the user tapped stop" race.
+    this._recoveryInProgress = false;
+    this._recoveryAborted = false;
+
     // Analyser for real-time visualizers (Chladni, ripples). Created lazily
     // and tapped off the master bus so it sees everything (tone + ambient).
     this.analyser = null;
@@ -467,6 +476,11 @@ class AudioEngine {
   // ---- Tone ------------------------------------------------------------------
   async start() {
     if (this.playing || this._starting) return;
+    // If a background recovery is running, its own stop() has already fired
+    // — a concurrent manual start() would race the recovery's follow-up
+    // start(). Flip the abort flag so the recovery bails at its next async
+    // boundary rather than starting a second time on top of us.
+    if (this._recoveryInProgress) this._recoveryAborted = true;
     this._starting = true;
     try {
       await this._ensureCtx();
@@ -765,6 +779,10 @@ class AudioEngine {
   }
 
   stop() {
+    // If a background recovery rebuild is mid-flight, its follow-up start()
+    // would fight this stop(). Flip the abort flag so the recovery bails at
+    // its next async boundary and the user's stop intent wins.
+    if (this._recoveryInProgress) this._recoveryAborted = true;
     const ctx = this.ctx;
     // Snapshot the currently-playing ambient volumes BEFORE we fade them out — a
     // subsequent start() (i.e., Pause → Play) will restore exactly this mix so
@@ -1009,26 +1027,67 @@ class AudioEngine {
   // graph invariants are broken, we do a silent stop → start restart at the
   // SAME frequency/settings without user action.
   //
-  // Invariants:
+  // Invariants (all must hold, else we rebuild):
   //   • ctx exists and is 'running'
   //   • gateGain still connected (numberOfInputs > 0 is a weak proxy, but the
   //     more reliable signal is: gateGain === null while this.playing → broken)
   //   • at least one oscillator is bound to this instance
+  //   • master.gain is > 0.001 — a stuck-at-zero master bus is silent even
+  //     though everything else looks connected (happens if a resume-ramp
+  //     gets interrupted mid-fade)
+  //   • toneGain.gain is > 0.001 whenever the user's intended toneVolume > 0
+  //     — catches the failed ramp case where linearRampToValueAtTime never
+  //     climbed off zero
+  //   • the background <audio> sink is not paused — a paused sink silently
+  //     kills background/lock-screen playback even when the graph is fine
+  //
+  // Concurrency: A `_recoveryInProgress` guard blocks two health checks from
+  // running rebuild logic at the same time. Any manual stop()/start() during
+  // recovery flips `_recoveryAborted`, and the recovery function bails at
+  // each async boundary so the user's intent always wins.
   async _postStartHealthCheck() {
     // Give the audio graph a brief settle so linearRampToValueAtTime has
     // moved toneGain off zero before we probe.
     await new Promise((r) => setTimeout(r, 500));
     if (!this.playing) return;
+    if (this._recoveryInProgress) return; // don't stack recoveries
+    const wantAudible = (this.toneVolume || 0) > 0.001;
+    const masterVal = (this.master && typeof this.master.gain?.value === 'number')
+      ? this.master.gain.value : null;
+    const toneVal = (this.toneGain && typeof this.toneGain.gain?.value === 'number')
+      ? this.toneGain.gain.value : null;
+    const sinkPaused = !!(this._sinkEl && this._sinkEl.paused);
     const broken =
       !this.ctx ||
       this.ctx.state !== 'running' ||
       !this.gateGain ||
-      !this.osc;
+      !this.osc ||
+      (masterVal !== null && masterVal < 0.001) ||
+      (wantAudible && toneVal !== null && toneVal < 0.001) ||
+      sinkPaused;
     if (!broken) return;
     _warn('audio.health', new Error(
       `broken audio graph after start — ctx=${this.ctx && this.ctx.state}, ` +
-      `gateGain=${!!this.gateGain}, osc=${!!this.osc}. Rebuilding silently.`
+      `gateGain=${!!this.gateGain}, osc=${!!this.osc}, ` +
+      `master=${masterVal}, tone=${toneVal}, wantAudible=${wantAudible}, ` +
+      `sinkPaused=${sinkPaused}. Rebuilding silently.`
     ));
+    // Cheap sink revive: if the ONLY problem is the sink being paused (graph
+    // otherwise fine and ctx running), try to un-pause without tearing down.
+    // The sink can pause on Android Chrome without breaking the rest of the
+    // graph — a full rebuild for that alone is overkill and audible.
+    const onlySinkIssue = sinkPaused
+      && this.ctx && this.ctx.state === 'running'
+      && this.gateGain && this.osc
+      && (masterVal === null || masterVal >= 0.001)
+      && (!wantAudible || toneVal === null || toneVal >= 0.001);
+    if (onlySinkIssue && this._sinkEl) {
+      try { await this._sinkEl.play(); } catch (_) { /* graceful */ }
+      return;
+    }
+    // Full rebuild path — take the recovery lock.
+    this._recoveryInProgress = true;
+    this._recoveryAborted = false;
     // Silent rebuild — carry current user settings forward.
     const carry = {
       frequency: this.frequency,
@@ -1045,8 +1104,15 @@ class AudioEngine {
       this.stop();
     } catch (e) { _warn('audio.health.stop', e); }
     // Wait for the 850ms cleanup timeout to finish before restarting so we
-    // don't collide with our own stale disconnect.
+    // don't collide with our own stale disconnect. Manual stop/start during
+    // this window flips _recoveryAborted — we bail rather than fight the
+    // user's intent.
     await new Promise((r) => setTimeout(r, 900));
+    if (this._recoveryAborted) {
+      this._recoveryInProgress = false;
+      this._recoveryAborted = false;
+      return;
+    }
     // Restore settings + pending ambient so start() reproduces the mix.
     this.frequency = carry.frequency;
     this.waveform = carry.waveform;
@@ -1058,20 +1124,39 @@ class AudioEngine {
       this._pendingAmbient = carry.ambientSnapshot;
     }
     try {
-      await this.start();
+      if (!this._recoveryAborted) await this.start();
     } catch (e) { _warn('audio.health.restart', e); }
+    this._recoveryInProgress = false;
+    this._recoveryAborted = false;
   }
 
 
   setFrequency(hz) {
     this.frequency = hz;
-    if (this.osc) this.osc.frequency.setTargetAtTime(hz, this.ctx.currentTime, 0.05);
-    if (this.oscR) this.oscR.frequency.setTargetAtTime(hz + this.binaural, this.ctx.currentTime, 0.05);
-    this.phiOscs.forEach(({ osc, mult }) => {
-      const f = hz * mult;
-      const safe = f > 4000 ? f / 2 : f;
-      osc.frequency.setTargetAtTime(safe, this.ctx.currentTime, 0.05);
-    });
+    const applyFreqSchedules = () => {
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      if (this.osc) this.osc.frequency.setTargetAtTime(hz, now, 0.05);
+      if (this.oscR) this.oscR.frequency.setTargetAtTime(hz + this.binaural, now, 0.05);
+      this.phiOscs.forEach(({ osc, mult }) => {
+        const f = hz * mult;
+        const safe = f > 4000 ? f / 2 : f;
+        osc.frequency.setTargetAtTime(safe, now, 0.05);
+      });
+    };
+    // If the user is switching frequencies mid-session AND the audio thread
+    // has silently suspended (mobile screen-lock lag, background tab throttle,
+    // Android Chrome's opportunistic pause), scheduling setTargetAtTime
+    // against a suspended clock has no audible effect — the player would
+    // appear to change frequency but the ear hears nothing. Resume first,
+    // then apply the schedules against the freshly-running clock so the new
+    // tone actually plays. When ctx is already running (the vast majority of
+    // switches), this fast-path is a no-op.
+    if (this.playing && this.ctx && this.ctx.state !== 'running') {
+      this.ensureRunning().then(applyFreqSchedules).catch(() => applyFreqSchedules());
+    } else {
+      applyFreqSchedules();
+    }
     this._emit();
   }
 

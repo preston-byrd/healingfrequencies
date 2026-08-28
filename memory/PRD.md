@@ -688,3 +688,12 @@
   - **Verified** — Frontend smoke: dashboard mounts clean, no page errors, webpack compiles cleanly (only pre-existing eslint hook warnings). Static syntax check via @babel/parser passes. Auditory verification requires a screen-lock/unlock cycle on a physical mobile device — user to confirm on production after redeploy.
   - **NOTE** — production-observable. Redeploy required (Save to Github).
 
+
+- **Audio robustness hardening (Feb 2026)**: Three targeted fixes closing edge cases in the audio engine.
+  - **Switch-frequency-while-playing resume path** — `setFrequency(hz)` used to schedule `setTargetAtTime` calls unconditionally against `ctx.currentTime`. If the AudioContext had silently suspended (mobile screen-lock lag, background tab, Android Chrome opportunistic pause), those schedules were no-ops and the player would appear to change frequency while producing silence. New behaviour: when the engine is playing but ctx is not running, we call `ensureRunning()` first and apply the schedules only once the clock is live. When ctx is already running, the fast path is unchanged.
+  - **Auto-recovery vs manual play/pause mutex** — added `_recoveryInProgress` + `_recoveryAborted` flags. `_postStartHealthCheck` sets `_recoveryInProgress=true` during a rebuild. Manual `stop()` and `start()` both set `_recoveryAborted=true` while a recovery is running. The recovery routine checks `_recoveryAborted` at each async boundary and bails cleanly if the user's intent should win. Prevents the "user tapped stop but the auto-recovery restarted audio a beat later" race.
+  - **Extended health check** — the invariants set now also verifies: `master.gain > 0.001` (catches a stuck-at-zero master bus, e.g. an interrupted resume ramp), `toneGain.gain > 0.001` when the user's intended `toneVolume > 0` (catches a failed linearRamp that never climbed off zero), and `_sinkEl.paused === false` (catches Android Chrome's silent sink pause that kills background playback). Sink-paused-only issues are recovered cheaply via a single `_sinkEl.play()` call, without a full graph rebuild.
+  - **Files** — `frontend/src/lib/audioEngine.js` (setFrequency, start(), stop(), constructor field init, `_postStartHealthCheck`).
+  - **Verified** — Frontend smoke: dashboard mounts clean, no page errors, webpack compiles, static syntax check passes.
+  - **NOTE** — production-observable. Redeploy required (Save to Github).
+
