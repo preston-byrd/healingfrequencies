@@ -43,6 +43,8 @@ class AudioEngine {
     this.isoLfo = null;
     this.isoOffset = null;
     this.isoScale = null;
+    this.isoSmoother = null;
+    this.isoFadeIn = null;
 
     // Analyser for real-time visualizers (Chladni, ripples). Created lazily
     // and tapped off the master bus so it sees everything (tone + ambient).
@@ -672,10 +674,11 @@ class AudioEngine {
   // Isochronic: drive gateGain.gain between 0 and 1 at `hz` via a square LFO
   // + DC offset (so the param sees a 0..1 signal, not -1..1). Cancels the
   // constant 1.0 baseline by setting gain.value=0 before connecting.
-  _spawnIsochronicLFO(hz) {
+  _spawnIsochronicLFO(hz, opts = {}) {
     if (!this.ctx || !this.gateGain) return;
     this._killIsochronicLFO(0); // idempotent
     const ctx = this.ctx;
+    const fadeInMs = Math.max(0, Number(opts.fadeInMs) || 0);
     const lfo = ctx.createOscillator();
     lfo.type = 'square';
     lfo.frequency.value = Math.max(0.5, Math.min(40, hz));
@@ -694,23 +697,41 @@ class AudioEngine {
     scale.gain.value = 0.5; // shape into ±0.5
     const offset = ctx.createConstantSource();
     offset.offset.value = 0.5; // shift to 0..1
+    // fadeIn: a summing GainNode that both the (smoothed) LFO and the DC
+    // offset feed into BEFORE reaching gateGain.gain. Its own .gain is
+    // ramped from 0 → 1 over `fadeInMs` when the LFO is being rebuilt on
+    // resume, so the reconstituted pulse ramps in smoothly instead of
+    // cold-starting at whatever square-wave phase the LFO happens to be
+    // at. When fadeInMs === 0 (normal setIsochronic path), gain.value = 1
+    // and this node is a unity pass-through — no runtime cost.
+    const fadeIn = ctx.createGain();
+    if (fadeInMs > 0) {
+      fadeIn.gain.setValueAtTime(0.0001, ctx.currentTime);
+      fadeIn.gain.linearRampToValueAtTime(1.0, ctx.currentTime + fadeInMs / 1000);
+    } else {
+      fadeIn.gain.value = 1.0;
+    }
     // Clear the static baseline (was 1.0) so the LFO + offset are the only drivers.
     this.gateGain.gain.cancelScheduledValues(ctx.currentTime);
     this.gateGain.gain.setValueAtTime(0, ctx.currentTime);
-    lfo.connect(smoother).connect(scale).connect(this.gateGain.gain);
-    offset.connect(this.gateGain.gain);
+    lfo.connect(smoother).connect(scale).connect(fadeIn);
+    offset.connect(fadeIn);
+    // fadeIn is an AudioNode whose output must drive an AudioParam
+    // (gateGain.gain). Web Audio permits node → AudioParam connections.
+    fadeIn.connect(this.gateGain.gain);
     lfo.start();
     offset.start();
     this.isoLfo = lfo;
     this.isoSmoother = smoother;
     this.isoScale = scale;
     this.isoOffset = offset;
+    this.isoFadeIn = fadeIn;
   }
 
   _killIsochronicLFO(restoreBaseline = 1) {
     if (!this.ctx) return;
     const ctx = this.ctx;
-    [this.isoLfo, this.isoSmoother, this.isoScale, this.isoOffset].forEach((n) => {
+    [this.isoLfo, this.isoSmoother, this.isoScale, this.isoOffset, this.isoFadeIn].forEach((n) => {
       if (!n) return;
       try { if (typeof n.stop === 'function') n.stop(); } catch (e) { _warn('audio', e); }
       try { n.disconnect(); } catch (e) { _warn('audio', e); }
@@ -719,6 +740,7 @@ class AudioEngine {
     this.isoSmoother = null;
     this.isoScale = null;
     this.isoOffset = null;
+    this.isoFadeIn = null;
     if (this.gateGain && restoreBaseline) {
       this.gateGain.gain.cancelScheduledValues(ctx.currentTime);
       this.gateGain.gain.setValueAtTime(restoreBaseline, ctx.currentTime);
@@ -830,6 +852,61 @@ class AudioEngine {
 
   // ---- Robustness: ensureRunning, health check, visibility handling ---------
 
+  // Ramp master.gain from 0 → 1 over ~50 ms. Called whenever the AudioContext
+  // transitions back to 'running' after a suspend / interrupt. Masks the
+  // audible pop/discontinuity at the moment the OS restores the audio thread
+  // — the pop is present whether or not isochronic pulsing is active (a plain
+  // sine tone or any ambient layer produces a smaller but still audible
+  // artifact on resume). Idempotent: safe to call repeatedly.
+  _rampMasterOnResume() {
+    if (!this.ctx || !this.master) return;
+    try {
+      const t = this.ctx.currentTime;
+      const g = this.master.gain;
+      g.cancelScheduledValues(t);
+      // Snap to 0 first so the ramp origin is deterministic. A tiny epsilon
+      // avoids setValueAtTime(exactly-zero) edge cases on some engines.
+      g.setValueAtTime(0.0001, t);
+      // 50 ms exponential-ish ramp to unity using linearRampToValueAtTime —
+      // audibly smooth on all browsers we support (Web Audio's setTarget
+      // never fully reaches the target, which would leave a subtle static
+      // attenuation on the master bus).
+      g.linearRampToValueAtTime(1.0, t + 0.05);
+    } catch (_) { /* graceful */ }
+  }
+
+  // Consolidated resume reconciler. Both entry points — the AudioContext's
+  // own 'statechange' → 'running' event (mobile screen-unlock, primary) and
+  // the Dashboard's visibilitychange DOM listener (desktop fallback) — call
+  // through here. A single debounced timer guarantees the isochronic LFO
+  // is never rebuilt twice per unlock, no matter which path fires first
+  // or in what order.
+  _scheduleResumeReconciliation() {
+    clearTimeout(this._resumeReconcileT);
+    this._resumeReconcileT = setTimeout(() => {
+      if (!this.playing || !this.gateGain) {
+        // If playback was fully stopped between suspend and resume, drop
+        // the frozen-iso flag so a subsequent play doesn't try to rebuild
+        // stale rate state.
+        this._isoFrozen = false;
+        this._isoRateBeforeHide = 0;
+        return;
+      }
+      if (this._isoFrozen && this._isoRateBeforeHide > 0) {
+        this._isoFrozen = false;
+        this.isochronic = this._isoRateBeforeHide;
+        this._isoRateBeforeHide = 0;
+        try {
+          // Short fade-in on rebuild so the first pulse's leading edge
+          // ramps in over ~40 ms instead of cold-starting from silence
+          // at whatever phase the LFO happens to be at. Prevents the
+          // "phantom first pulse" artifact users notice on unlock.
+          this._spawnIsochronicLFO(this.isochronic, { fadeInMs: 40 });
+        } catch (e) { _warn('audio.isoResume', e); }
+      }
+    }, 220);
+  }
+
   // Fires whenever ctx.state changes. On mobile screen-lock the OS transitions
   // us to 'suspended' *before* any DOM event (visibilitychange / pagehide /
   // blur) can reach us. If we don't tear down the isochronic LFO in the same
@@ -849,7 +926,7 @@ class AudioEngine {
       if (this.playing && this.isochronic > 0 && !this._isoFrozen) {
         this._isoRateBeforeHide = this.isochronic;
         try {
-          [this.isoLfo, this.isoSmoother, this.isoScale, this.isoOffset].forEach((n) => {
+          [this.isoLfo, this.isoSmoother, this.isoScale, this.isoOffset, this.isoFadeIn].forEach((n) => {
             if (!n) return;
             try { n.disconnect(); } catch (_) {}
             try { if (typeof n.stop === 'function') n.stop(); } catch (_) {}
@@ -859,24 +936,21 @@ class AudioEngine {
         this.isoSmoother = null;
         this.isoScale = null;
         this.isoOffset = null;
+        this.isoFadeIn = null;
         if (this.gateGain) {
           try { this.gateGain.gain.value = 1; } catch (_) {}
         }
         this._isoFrozen = true;
       }
     } else if (st === 'running') {
-      // Rebuild the LFO after a brief debounce so the audio thread has
-      // fully spun back up before we schedule fresh oscillator start().
-      if (this._isoFrozen && this.playing && this._isoRateBeforeHide > 0) {
-        clearTimeout(this._isoResumeT);
-        this._isoResumeT = setTimeout(() => {
-          if (!this.playing || !this.gateGain) { this._isoFrozen = false; return; }
-          this._isoFrozen = false;
-          this.isochronic = this._isoRateBeforeHide;
-          this._isoRateBeforeHide = 0;
-          try { this._spawnIsochronicLFO(this.isochronic); } catch (e) { _warn('audio.isoResume', e); }
-        }, 220);
-      }
+      // Whole-graph master fade-in masks the resume discontinuity even when
+      // isochronic pulsing is off (a plain sine tone or ambient layer still
+      // clicks slightly on ctx wake). Immediate, not debounced — the pop
+      // is at the resume instant.
+      this._rampMasterOnResume();
+      // Iso rebuild goes through the shared debounced reconciler so DOM
+      // visibilitychange + statechange never rebuild the LFO twice.
+      this._scheduleResumeReconciliation();
     }
   }
 
@@ -914,18 +988,20 @@ class AudioEngine {
   }
 
   // Called when the tab is visible again and the ctx has been resumed.
-  // Rebuilds the LFO at the original rate so pulsing resumes seamlessly.
-  // Idempotent — if statechange already handled the rebuild we no-op.
+  // Belt-and-suspenders for browsers where AudioContext.statechange does not
+  // fire on unhide (desktop Firefox and some Android Chrome builds).
+  // Delegates to the shared debounced reconciler so no matter which path
+  // wins the race (this one or _onCtxStateChange('running')) the isochronic
+  // LFO is rebuilt exactly once. Also runs the 50ms master fade-in — cheap,
+  // idempotent, and needed on the browsers where statechange doesn't fire.
   resumeIsochronicAfterBackground() {
+    if (!this.ctx) return;
+    // If ctx is still suspended, defer — the eventual statechange handler
+    // will do it. We can't schedule audio ramps against a suspended clock.
+    if (this.ctx.state !== 'running') return;
+    this._rampMasterOnResume();
     if (!this._isoFrozen) return;
-    // If ctx is still suspended, defer — the statechange handler will do it.
-    if (this.ctx && this.ctx.state !== 'running') return;
-    this._isoFrozen = false;
-    const rate = this._isoRateBeforeHide;
-    this._isoRateBeforeHide = 0;
-    if (!this.playing || rate <= 0 || !this.gateGain) return;
-    this.isochronic = rate;
-    this._spawnIsochronicLFO(rate);
+    this._scheduleResumeReconciliation();
   }
 
   // Post-start audio health check. Fires ~500ms after any start() to detect
