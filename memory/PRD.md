@@ -659,3 +659,9 @@
   - **NOTE** — production-observable. Redeploy required. The scheduler starts automatically on backend boot; if you want to hand-fire on prod for testing, use the admin `POST /api/admin/email-engagement/tick` endpoint (also exposed via the "Trigger tick" button in the admin panel).
 
 
+
+- **Wellness Assistant timer sync (Feb 2026)**: Fixed the timer defaulting to 00:00 after selecting a recommended frequency from the Wellness Assistant. Assistant-triggered sessions now default to **10 minutes** (was 5) and the countdown starts immediately upon playback. Manual timer adjustments mid-session remain fully supported.
+  - **Root cause** — race condition between `sf:agent:suggestion-taken` event handler setting `remaining` and the audio engine `state.playing` flag propagating. Countdown effect early-returned when `state.playing=false`, leaving the display frozen at 00:00 while audio played.
+  - **Fix** — `Dashboard.jsx` line 958: `DEFAULT_MIN = 10`. Line 969: proactively stamp `audioEngine.sessionEndAt = Date.now() + DEFAULT_MIN * 60 * 1000` on the audio engine singleton so the countdown is authoritative and survives the React commit race. The wall-clock anchor also survives a Dashboard remount (initial `useState` reads from it on mount).
+  - **Files** — `frontend/src/components/Dashboard.jsx` (lines 944-974).
+  - **NOTE** — production-observable. Redeploy required (Save to Github) to reach solarisound.com. User verifying manually on production.

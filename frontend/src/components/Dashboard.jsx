@@ -951,9 +951,22 @@ export default function Dashboard({ onOpenAccount }) {
         (kind === 'haptic_combo' && ![30, 60, 120, 240, 480].includes(detail.duration_min))
       );
       if (armsTimer) {
-        const DEFAULT_MIN = 5;
+        // Product spec: assistant-triggered sessions default to 10 minutes
+        // so the user has enough time for the recommendation to actually
+        // land. Users can still manually adjust up/down mid-session via
+        // the normal timer controls.
+        const DEFAULT_MIN = 10;
         setDuration(DEFAULT_MIN);
         setRemaining(DEFAULT_MIN * 60);
+        // Also stamp the wall-clock end on the audioEngine singleton so
+        // the countdown is authoritative even if state.playing hasn't yet
+        // propagated by the time this event handler runs. Without this,
+        // a fast user tap or a slow React commit can leave `remaining`
+        // set but `state.playing=false`, so the countdown effect returns
+        // early and the timer visibly sticks at 00:00. Wall-clock stamp
+        // makes the countdown survive that race and any subsequent
+        // Dashboard remount.
+        try { audioEngine.sessionEndAt = Date.now() + DEFAULT_MIN * 60 * 1000; } catch (_) {}
         // Mark this session as Wellness-Assistant-owned so the timer-expiry
         // branch knows to surface the "How are you feeling now?" check-in
         // once the fade completes.
