@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { RefreshCw, Eye, EyeOff } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { RefreshCw, Eye, EyeOff, ArrowLeft, ShieldCheck } from 'lucide-react';
+import PhoneInput, { isValidPhoneNumber } from 'react-phone-number-input';
+import 'react-phone-number-input/style.css';
 import { useAuth } from '@/contexts/AuthContext';
-import { formatApiError, warmBackend } from '@/lib/api';
+import api, { formatApiError, warmBackend } from '@/lib/api';
 import ForgotPasswordModal from '@/components/ForgotPasswordModal';
 import { LOGIN } from '@/constants/testIds/auth';
 
@@ -18,37 +20,63 @@ function isNetworkError(err) {
   return false;
 }
 
+// Signup uses a two-step flow so we can verify the phone number before
+// committing the account:
+//   'form'   → user fills email / password / name / phone
+//   'verify' → user enters 6-digit SMS OTP; on success we complete
+//              /auth/register with the phone_verification_token
+const REGISTER_STEP_FORM = 'form';
+const REGISTER_STEP_VERIFY = 'verify';
+
 export default function AuthScreen() {
   const { login, register } = useAuth();
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
   const [err, setErr] = useState('');
   const [canRetry, setCanRetry] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
-  // Local toggle for masking/unmasking the password input. Off by default
-  // for shoulder-surf safety; a tap on the eye icon reveals the value so
-  // the user can double-check what they typed on flaky mobile keyboards.
   const [showPassword, setShowPassword] = useState(false);
 
-  // Warm the backend the moment the sign-in screen mounts so DNS + TLS
-  // + any Cloudflare/cold-start latency happens while the user is
-  // typing their credentials, not during the actual login POST. On
-  // cellular this often turns a would-be "Network Error" (first-POST
-  // race with the origin still spinning up) into a successful sign-in.
+  // Signup 2-step wizard state.
+  const [registerStep, setRegisterStep] = useState(REGISTER_STEP_FORM);
+  const [otpCode, setOtpCode] = useState('');
+  const [phoneVerificationToken, setPhoneVerificationToken] = useState('');
+  const [verifiedPhone, setVerifiedPhone] = useState(''); // exactly-as-sent E.164
+  // Resend cooldown — Twilio Verify already throttles at the API layer,
+  // but a client-side cooldown prevents the user from mashing "Resend"
+  // and racking up 429s. 45s is the sweet spot for SMS delivery jitter.
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const cooldownTimerRef = useRef(null);
+
   useEffect(() => {
     warmBackend();
   }, []);
 
-  const attempt = async () => {
+  // Cooldown ticker.
+  useEffect(() => {
+    if (resendCooldown <= 0) return undefined;
+    cooldownTimerRef.current = setTimeout(() => setResendCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(cooldownTimerRef.current);
+  }, [resendCooldown]);
+
+  const resetSignupWizard = () => {
+    setRegisterStep(REGISTER_STEP_FORM);
+    setOtpCode('');
+    setPhoneVerificationToken('');
+    setVerifiedPhone('');
+    setResendCooldown(0);
+  };
+
+  const attemptLogin = async () => {
     setErr('');
     setCanRetry(false);
     setBusy(true);
     try {
-      if (mode === 'login') await login(email, password);
-      else await register(email, password, name);
+      await login(email, password);
     } catch (e) {
       setErr(formatApiError(e));
       setCanRetry(isNetworkError(e));
@@ -57,10 +85,101 @@ export default function AuthScreen() {
     }
   };
 
+  // Step 1: user filled the form → send SMS OTP.
+  const attemptSendOtp = async () => {
+    setErr('');
+    setCanRetry(false);
+    // Client-side format check up front so we don't waste a Twilio API
+    // call on obviously-broken input.
+    if (!phone || !isValidPhoneNumber(phone)) {
+      setErr("Please enter a valid phone number including country code.");
+      return;
+    }
+    if (!email || !password) {
+      setErr("Please fill in every field.");
+      return;
+    }
+    if (password.length < 8) {
+      setErr("Password must be at least 8 characters.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post('/auth/phone/send-code', { phone_number: phone });
+      setVerifiedPhone(phone);
+      setRegisterStep(REGISTER_STEP_VERIFY);
+      setResendCooldown(45);
+    } catch (e) {
+      setErr(formatApiError(e));
+      setCanRetry(isNetworkError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Step 2a: user entered OTP → verify.
+  const attemptVerifyOtp = async () => {
+    setErr('');
+    if (!otpCode || otpCode.replace(/\s/g, '').length < 4) {
+      setErr("Please enter the code from your text message.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { data } = await api.post('/auth/phone/verify-code', {
+        phone_number: verifiedPhone,
+        code: otpCode.trim(),
+      });
+      setPhoneVerificationToken(data.phone_verification_token);
+      // Now finalize registration with the freshly-minted proof.
+      await register(email, password, name, {
+        phone_number: verifiedPhone,
+        phone_verification_token: data.phone_verification_token,
+      });
+      // AuthContext will flip user, App unmounts this component.
+    } catch (e) {
+      setErr(formatApiError(e));
+      setCanRetry(isNetworkError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Step 2b: user asked for a new code.
+  const attemptResendOtp = async () => {
+    if (resendCooldown > 0 || busy) return;
+    setErr('');
+    setBusy(true);
+    try {
+      await api.post('/auth/phone/send-code', { phone_number: verifiedPhone });
+      setResendCooldown(45);
+    } catch (e) {
+      setErr(formatApiError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = (e) => {
     e.preventDefault();
-    attempt();
+    if (mode === 'login') return attemptLogin();
+    if (registerStep === REGISTER_STEP_FORM) return attemptSendOtp();
+    return attemptVerifyOtp();
   };
+
+  const heading = (() => {
+    if (mode === 'login') return 'Welcome back';
+    if (registerStep === REGISTER_STEP_VERIFY) return 'Verify your phone';
+    return 'Begin your journey';
+  })();
+  const subhead = (() => {
+    if (mode === 'login') return 'Tune in. Settle down. Resonate.';
+    if (registerStep === REGISTER_STEP_VERIFY) {
+      const last4 = verifiedPhone.slice(-4);
+      return `We sent a code to the number ending in ${last4}. Enter it below to finish creating your account.`;
+    }
+    return 'A quiet space to listen, breathe, and restore.';
+  })();
 
   return (
     <div className="min-h-screen flex items-center justify-center relative px-4">
@@ -70,64 +189,167 @@ export default function AuthScreen() {
         <div className="text-center mb-8">
           <div className="label-tiny mb-3">Healing Frequencies</div>
           <h1 className="font-display text-5xl font-light tracking-tight text-[#E8E3D9]">
-            {mode === 'login' ? 'Welcome back' : 'Begin your journey'}
+            {heading}
           </h1>
           <p className="text-[#8A9A92] mt-3 text-sm">
-            {mode === 'login' ? 'Tune in. Settle down. Resonate.' : 'A quiet space to listen, breathe, and restore.'}
+            {subhead}
           </p>
         </div>
 
         <form onSubmit={submit} className="space-y-4">
-          {mode === 'register' && (
-            <div>
-              <label className="label-tiny block mb-2">Name</label>
-              <input
-                data-testid="auth-name-input"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] transition-colors"
-                placeholder="Your name"
-              />
-            </div>
+          {mode === 'register' && registerStep === REGISTER_STEP_FORM && (
+            <>
+              <div>
+                <label className="label-tiny block mb-2">Name</label>
+                <input
+                  data-testid="auth-name-input"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] transition-colors"
+                  placeholder="Your name"
+                />
+              </div>
+              <div>
+                <label className="label-tiny block mb-2">Email</label>
+                <input
+                  data-testid="auth-email-input"
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] transition-colors"
+                  placeholder="you@example.com"
+                />
+              </div>
+              <div>
+                <label className="label-tiny block mb-2">Password</label>
+                <div className="relative">
+                  <input
+                    data-testid="auth-password-input"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    minLength={8}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 pr-9 text-[#E8E3D9] transition-colors"
+                    placeholder="At least 8 characters"
+                  />
+                  <button
+                    type="button"
+                    data-testid="auth-password-toggle"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPassword}
+                    tabIndex={-1}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[#8A9A92] hover:text-[#C9DED6] transition-colors"
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="label-tiny block mb-2">Phone number</label>
+                <div className="phone-input-wrap">
+                  <PhoneInput
+                    data-testid="auth-phone-input"
+                    international
+                    defaultCountry="US"
+                    value={phone}
+                    onChange={(v) => setPhone(v || '')}
+                    placeholder="+1 415 555 2671"
+                    className="w-full"
+                  />
+                </div>
+                <p className="text-[10px] text-[#8A9A92] mt-1.5 leading-relaxed">
+                  We'll text you a 6-digit code to confirm this number. Standard
+                  message rates apply. We never share your number.
+                </p>
+              </div>
+            </>
           )}
-          <div>
-            <label className="label-tiny block mb-2">Email</label>
-            <input
-              data-testid="auth-email-input"
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] transition-colors"
-              placeholder="you@example.com"
-            />
-          </div>
-          <div>
-            <label className="label-tiny block mb-2">Password</label>
-            <div className="relative">
-              <input
-                data-testid="auth-password-input"
-                type={showPassword ? 'text' : 'password'}
-                required
-                minLength={6}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 pr-9 text-[#E8E3D9] transition-colors"
-                placeholder="•••••••"
-              />
-              <button
-                type="button"
-                data-testid="auth-password-toggle"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? 'Hide password' : 'Show password'}
-                aria-pressed={showPassword}
-                tabIndex={-1}
-                className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[#8A9A92] hover:text-[#C9DED6] transition-colors"
-              >
-                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-          </div>
+
+          {mode === 'register' && registerStep === REGISTER_STEP_VERIFY && (
+            <>
+              <div>
+                <label className="label-tiny block mb-2">Verification code</label>
+                <input
+                  data-testid="auth-otp-input"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  required
+                  maxLength={10}
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value.replace(/[^\d]/g, ''))}
+                  className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] text-2xl tracking-[0.4em] font-mono text-center transition-colors"
+                  placeholder="••••••"
+                />
+                <div className="mt-3 flex items-center justify-between text-xs text-[#8A9A92]">
+                  <button
+                    type="button"
+                    data-testid="auth-otp-back"
+                    onClick={() => { resetSignupWizard(); setErr(''); }}
+                    className="inline-flex items-center gap-1 hover:text-[#72C2AC] transition-colors"
+                  >
+                    <ArrowLeft size={12} />
+                    Change number
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="auth-otp-resend"
+                    onClick={attemptResendOtp}
+                    disabled={resendCooldown > 0 || busy}
+                    className="hover:text-[#72C2AC] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend code'}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {mode === 'login' && (
+            <>
+              <div>
+                <label className="label-tiny block mb-2">Email</label>
+                <input
+                  data-testid="auth-email-input"
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 text-[#E8E3D9] transition-colors"
+                  placeholder="you@example.com"
+                />
+              </div>
+              <div>
+                <label className="label-tiny block mb-2">Password</label>
+                <div className="relative">
+                  <input
+                    data-testid="auth-password-input"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    minLength={6}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full bg-transparent border-b border-[rgba(92,158,140,0.25)] focus:border-[#72C2AC] outline-none py-2 pr-9 text-[#E8E3D9] transition-colors"
+                    placeholder="•••••••"
+                  />
+                  <button
+                    type="button"
+                    data-testid="auth-password-toggle"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    aria-pressed={showPassword}
+                    tabIndex={-1}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 text-[#8A9A92] hover:text-[#C9DED6] transition-colors"
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
 
           {err && (
             <div className="space-y-2" data-testid="auth-error-block">
@@ -135,7 +357,9 @@ export default function AuthScreen() {
               {canRetry && (
                 <button
                   type="button"
-                  onClick={attempt}
+                  onClick={mode === 'login' ? attemptLogin
+                    : registerStep === REGISTER_STEP_FORM ? attemptSendOtp
+                    : attemptVerifyOtp}
                   disabled={busy}
                   data-testid="auth-retry-button"
                   className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-[#72C2AC] hover:text-[#C4A67A] transition-colors disabled:opacity-40"
@@ -151,9 +375,12 @@ export default function AuthScreen() {
             data-testid="auth-submit-button"
             type="submit"
             disabled={busy}
-            className="w-full mt-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors duration-300 disabled:opacity-50"
+            className="w-full mt-6 py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium tracking-wide transition-colors duration-300 disabled:opacity-50 inline-flex items-center justify-center gap-2"
           >
-            {busy ? 'One moment…' : mode === 'login' ? 'Sign in' : 'Create account'}
+            {busy ? 'One moment…'
+              : mode === 'login' ? 'Sign in'
+              : registerStep === REGISTER_STEP_FORM ? 'Send verification code'
+              : (<><ShieldCheck size={16} /> Verify &amp; create account</>)}
           </button>
         </form>
 
@@ -175,7 +402,11 @@ export default function AuthScreen() {
           <button
             data-testid="auth-mode-toggle"
             type="button"
-            onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setErr(''); }}
+            onClick={() => {
+              setMode(mode === 'login' ? 'register' : 'login');
+              setErr('');
+              resetSignupWizard();
+            }}
             className="text-[#72C2AC] hover:text-[#C4A67A] transition-colors"
           >
             {mode === 'login' ? 'Create an account' : 'Sign in'}
@@ -189,6 +420,45 @@ export default function AuthScreen() {
           onClose={() => setShowForgot(false)}
         />
       )}
+
+      {/* Themed overrides for react-phone-number-input to match the rest
+          of the auth form (transparent + underline). Kept scoped here so
+          the raw library CSS still ships default styles elsewhere. */}
+      <style>{`
+        .phone-input-wrap .PhoneInput {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          border-bottom: 1px solid rgba(92,158,140,0.25);
+          padding: 8px 0;
+          transition: border-color 0.2s;
+        }
+        .phone-input-wrap .PhoneInput:focus-within {
+          border-bottom-color: #72C2AC;
+        }
+        .phone-input-wrap .PhoneInputCountry {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          color: #E8E3D9;
+        }
+        .phone-input-wrap .PhoneInputInput {
+          flex: 1;
+          background: transparent;
+          border: none;
+          color: #E8E3D9;
+          outline: none;
+          font-size: 1rem;
+          padding: 0;
+        }
+        .phone-input-wrap .PhoneInputCountrySelect {
+          color: #E8E3D9;
+          background: transparent;
+        }
+        .phone-input-wrap .PhoneInputCountrySelectArrow {
+          color: #8A9A92;
+        }
+      `}</style>
     </div>
   );
 }

@@ -41,8 +41,20 @@ def target_user():
     suffix = uuid.uuid4().hex[:8]
     email = f"admin_profile_target_{suffix}@example.com"
     password = "TestPass123!"
+    # HF-030: register now requires a verified phone. Use TWILIO_TEST_MODE=1
+    # test-code path to mint a real verification token.
+    n = uuid.uuid4().int % 10000000
+    phone = f"+1555{n:07d}"
     with httpx.Client() as c:
-        r = c.post(f"{API_URL}/auth/register", json={"email": email, "password": password, "name": "Target User"})
+        c.post(f"{API_URL}/auth/phone/send-code", json={"phone_number": phone})
+        vr = c.post(f"{API_URL}/auth/phone/verify-code",
+                    json={"phone_number": phone, "code": "123456"})
+        vr.raise_for_status()
+        token = vr.json()["phone_verification_token"]
+        r = c.post(f"{API_URL}/auth/register", json={
+            "email": email, "password": password, "name": "Target User",
+            "phone_number": phone, "phone_verification_token": token,
+        })
         r.raise_for_status()
         uid = r.json()["id"]
     yield {"id": uid, "email": email, "password": password}

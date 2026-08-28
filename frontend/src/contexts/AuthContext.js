@@ -27,8 +27,13 @@ export function AuthProvider({ children }) {
     return data;
   }, []);
 
-  const register = useCallback(async (email, password, name) => {
-    const { data } = await api.post('/auth/register', { email, password, name });
+  const register = useCallback(async (email, password, name, extra = {}) => {
+    // HF-030: `extra` carries the phone_number + phone_verification_token
+    // minted by /api/auth/phone/verify-code so the backend can bind the
+    // verified phone to the newly created account. Keep the positional
+    // (email, password, name) signature stable so any older callers that
+    // don't need phone verification (test harnesses) still work.
+    const { data } = await api.post('/auth/register', { email, password, name, ...extra });
     if (data.token) localStorage.setItem('token', data.token);
     setUser(data);
     return data;

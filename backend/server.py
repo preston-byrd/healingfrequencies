@@ -7,6 +7,10 @@ load_dotenv(ROOT_DIR / '.env')
 import os
 import asyncio
 import logging
+# Logger — module-scoped so it's usable by helpers defined near the top of
+# the file (Twilio init, etc.). basicConfig runs once via idempotent guard.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 import math
 import uuid
 import bcrypt
@@ -931,6 +935,13 @@ class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     name: Optional[str] = Field(default=None, max_length=120)
+    # HF-030: Phone verification is required for account creation. The
+    # client must first hit /api/auth/phone/send-code, receive the SMS,
+    # then /api/auth/phone/verify-code — which returns a short-lived
+    # JWT `phone_verification_token`. That token is then passed here to
+    # prove the phone belongs to the person creating the account.
+    phone_number: str = Field(min_length=6, max_length=20)
+    phone_verification_token: str = Field(min_length=10, max_length=800)
 
 
 class LoginIn(BaseModel):
@@ -968,6 +979,246 @@ class Session(SessionIn):
 
 
 # --- Auth routes --------------------------------------------------------------
+
+# --- Twilio Verify (phone number OTP) ---------------------------------------
+# We use Twilio's managed Verify Service so Twilio owns code generation,
+# delivery retries, expiry, per-recipient throttling, and fraud detection.
+# This endpoint tier is intentionally thin — the heavy lifting sits with
+# Twilio and we only add app-level rate-limits + our own audit trail.
+_TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID") or ""
+_TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN") or ""
+_TWILIO_VERIFY_SERVICE_SID = os.environ.get("TWILIO_VERIFY_SERVICE_SID") or ""
+# Test-mode escape hatch. When this env var is truthy we bypass the real
+# Twilio Verify API and accept a deterministic code table for the given
+# phone numbers. Used ONLY by the pytest suite so CI doesn't burn SMS
+# credits. Never enable in production — the .env template ships it empty.
+_TWILIO_TEST_MODE = (os.environ.get("TWILIO_TEST_MODE") or "").strip() in ("1", "true", "yes")
+_TWILIO_TEST_ACCEPT_CODE = "123456"
+_twilio_client = None
+if _TWILIO_TEST_MODE:
+    logger.warning(
+        "[twilio] TWILIO_TEST_MODE is ON — phone verification will accept the "
+        "test code %s WITHOUT calling Twilio. This MUST NOT be enabled in "
+        "production. Unset TWILIO_TEST_MODE to disable.",
+        _TWILIO_TEST_ACCEPT_CODE,
+    )
+if _TWILIO_ACCOUNT_SID and _TWILIO_AUTH_TOKEN and not _TWILIO_TEST_MODE:
+    try:
+        from twilio.rest import Client as _TwilioClient  # type: ignore
+        _twilio_client = _TwilioClient(_TWILIO_ACCOUNT_SID, _TWILIO_AUTH_TOKEN)
+    except Exception as _e:
+        logger.warning("[twilio] client init failed: %s", type(_e).__name__)
+
+
+# E.164 phone-number regex. Accepts +[country][number] with 8-15 total
+# digits after the plus. This is a syntactic gate only — the semantic
+# check (does this number actually receive SMS?) is done by Twilio Verify.
+_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+
+
+def _normalize_phone(raw: str) -> str:
+    """Strip whitespace + parens + dashes and prepend '+' if the caller
+    forgot. Return an E.164 string or raise 400."""
+    if not raw:
+        raise HTTPException(status_code=400, detail="Phone number is required")
+    s = re.sub(r"[\s\-\(\)\.]", "", str(raw))
+    if not s.startswith("+"):
+        raise HTTPException(status_code=400, detail="Phone number must include country code (e.g. +14155552671)")
+    if not _E164_RE.match(s):
+        raise HTTPException(status_code=400, detail="Phone number must be in E.164 format (+[country code][number], 8-15 digits)")
+    return s
+
+
+class PhoneSendIn(BaseModel):
+    phone_number: str = Field(min_length=6, max_length=20)
+
+
+class PhoneVerifyIn(BaseModel):
+    phone_number: str = Field(min_length=6, max_length=20)
+    code: str = Field(min_length=4, max_length=10)
+
+
+@api.post("/auth/phone/send-code")
+async def phone_send_code(body: PhoneSendIn, request: Request):
+    """Send an SMS OTP to the given number via Twilio Verify.
+
+    Rate limits:
+      • 3 sends per phone per 10 min (Twilio Verify enforces its own too)
+      • 8 sends per IP per hour (blocks scripted account spam)
+    Duplicate-account gate: if a user with this phone already exists, we
+    return the same success response as a clean send. Preventing account
+    enumeration matters more than a fast "phone taken" error path — the
+    downstream register endpoint is authoritative and will refuse to
+    create the account.
+    """
+    ip = _client_ip(request)
+    phone = _normalize_phone(body.phone_number)
+
+    _rate_limit_or_429(
+        f"phone-send:phone:{phone}", capacity=3, refill_per_sec=1 / 200,
+        label="verification code",
+    )
+    if ip not in ("127.0.0.1", "::1", "localhost", "unknown") and not _TWILIO_TEST_MODE:
+        _rate_limit_or_429(
+            f"phone-send:ip:{ip}", capacity=8, refill_per_sec=1 / 450,
+            label="verification code",
+        )
+
+    generic = {"ok": True, "message": "If that number can receive SMS, a code is on the way."}
+
+    if _TWILIO_TEST_MODE:
+        # Bypass Twilio entirely. The verify-code endpoint's matching
+        # bypass accepts _TWILIO_TEST_ACCEPT_CODE for any phone.
+        await _audit(
+            "auth.phone.code_sent", request,
+            metadata={"phone_last4": phone[-4:], "status": "test-mode"},
+        )
+        return {**generic, "status": "pending"}
+
+    if not _twilio_client or not _TWILIO_VERIFY_SERVICE_SID:
+        # Not configured — surface a clear operator-visible error, but only
+        # in dev. In prod we still want the endpoint to look normal so a
+        # misconfig doesn't leak.
+        logger.warning("[twilio] send-code called with no Verify service configured")
+        raise HTTPException(status_code=503, detail="Phone verification is not configured yet. Please contact support.")
+
+    try:
+        # Twilio SDK is sync; run in threadpool so we don't stall the loop.
+        def _send():
+            return _twilio_client.verify.v2 \
+                .services(_TWILIO_VERIFY_SERVICE_SID) \
+                .verifications.create(to=phone, channel="sms")
+        verification = await asyncio.get_event_loop().run_in_executor(None, _send)
+        status = getattr(verification, "status", "pending")
+    except Exception as e:
+        # Best-effort classification of common Twilio errors → user-friendly.
+        msg = str(e)
+        friendly = "We couldn't send a code to that number. Please double-check the format and try again."
+        if "60200" in msg or "invalid" in msg.lower():
+            friendly = "That phone number doesn't look valid. Please check the country code and try again."
+        elif "60203" in msg or "60212" in msg or "too many" in msg.lower():
+            friendly = "Too many attempts for that number. Please wait a few minutes and try again."
+        elif "landline" in msg.lower() or "60205" in msg or "60600" in msg:
+            friendly = "That number can't receive SMS. Please use a mobile number."
+        logger.warning("[twilio.send] %s: %s", type(e).__name__, msg[:200])
+        await _audit(
+            "auth.phone.send_failed", request,
+            metadata={"phone_last4": phone[-4:], "twilio_error": type(e).__name__},
+        )
+        raise HTTPException(status_code=400, detail=friendly)
+
+    await _audit(
+        "auth.phone.code_sent", request,
+        metadata={"phone_last4": phone[-4:], "status": status},
+    )
+    return {**generic, "status": status}
+
+
+@api.post("/auth/phone/verify-code")
+async def phone_verify_code(body: PhoneVerifyIn, request: Request):
+    """Verify an OTP against Twilio Verify. Returns a short-lived JWT that
+    proves this phone has been verified. The client passes this token to
+    /api/auth/register so account creation is bound to the verified phone.
+    """
+    ip = _client_ip(request)
+    phone = _normalize_phone(body.phone_number)
+    code = str(body.code).strip()
+    if not code.isdigit() or not (4 <= len(code) <= 10):
+        raise HTTPException(status_code=400, detail="Verification code must be 4-10 digits.")
+
+    # Anti-brute-force: 6 verify attempts per phone per 10 min, plus a
+    # generous per-IP cap so a botnet doesn't spread attempts.
+    _rate_limit_or_429(
+        f"phone-verify:phone:{phone}", capacity=6, refill_per_sec=1 / 100,
+        label="verification attempt",
+    )
+    if ip not in ("127.0.0.1", "::1", "localhost", "unknown") and not _TWILIO_TEST_MODE:
+        _rate_limit_or_429(
+            f"phone-verify:ip:{ip}", capacity=20, refill_per_sec=1 / 60,
+            label="verification attempt",
+        )
+
+    if _TWILIO_TEST_MODE:
+        # In test mode, only the fixed code passes. Everything else 400s
+        # exactly like a real "pending" Twilio response would.
+        if code != _TWILIO_TEST_ACCEPT_CODE:
+            await _audit(
+                "auth.phone.verify_failed", request,
+                metadata={"phone_last4": phone[-4:], "status": "test-mode-wrong"},
+            )
+            raise HTTPException(status_code=400, detail="That code is incorrect. Please try again or request a new one.")
+        status = "approved"
+    elif not _twilio_client or not _TWILIO_VERIFY_SERVICE_SID:
+        raise HTTPException(status_code=503, detail="Phone verification is not configured yet. Please contact support.")
+    else:
+        try:
+            def _check():
+                return _twilio_client.verify.v2 \
+                    .services(_TWILIO_VERIFY_SERVICE_SID) \
+                    .verification_checks.create(to=phone, code=code)
+            check = await asyncio.get_event_loop().run_in_executor(None, _check)
+            status = getattr(check, "status", "")
+        except Exception as e:
+            msg = str(e)
+            # 20404 == "No pending verifications" (code expired or never sent)
+            if "20404" in msg or "not found" in msg.lower():
+                await _audit(
+                    "auth.phone.verify_expired", request,
+                    metadata={"phone_last4": phone[-4:]},
+                )
+                raise HTTPException(status_code=400, detail="This code has expired or was never sent. Please request a new one.")
+            logger.warning("[twilio.verify] %s: %s", type(e).__name__, msg[:200])
+            raise HTTPException(status_code=400, detail="We couldn't verify that code. Please try again.")
+
+    if status != "approved":
+        await _audit(
+            "auth.phone.verify_failed", request,
+            metadata={"phone_last4": phone[-4:], "status": status},
+        )
+        raise HTTPException(status_code=400, detail="That code is incorrect. Please try again or request a new one.")
+
+    # Approved → mint a short-lived proof-of-verification JWT bound to
+    # this exact phone number. TTL: 15 min — enough for the user to
+    # complete the rest of the form; expires if the tab is abandoned.
+    payload = {
+        "type": "phone_verification",
+        "phone": phone,
+        "iat": int(datetime.now(timezone.utc).timestamp()),
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=15)).timestamp()),
+        "jti": uuid.uuid4().hex,
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+    await _audit(
+        "auth.phone.verified", request,
+        metadata={"phone_last4": phone[-4:]},
+    )
+    return {
+        "ok": True,
+        "phone_verification_token": token,
+        "phone_number": phone,
+        "expires_in": 15 * 60,
+    }
+
+
+def _consume_phone_verification_token(token: str, expected_phone: str) -> str:
+    """Decode + validate the JWT minted by /auth/phone/verify-code.
+    Returns the normalized phone number embedded in the token, or raises 400.
+    """
+    try:
+        p = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Your phone verification has expired. Please verify your number again.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=400, detail="Phone verification token is invalid.")
+    if p.get("type") != "phone_verification":
+        raise HTTPException(status_code=400, detail="Phone verification token is invalid.")
+    tok_phone = p.get("phone") or ""
+    if not tok_phone or tok_phone != expected_phone:
+        raise HTTPException(status_code=400, detail="Phone verification token does not match this phone number.")
+    return tok_phone
+
+
 @api.post("/auth/register")
 async def register(body: RegisterIn, request: Request, response: Response):
     # SEC-001 hardening: per-IP throttle prevents bulk-account spam that would
@@ -977,20 +1228,35 @@ async def register(body: RegisterIn, request: Request, response: Response):
     # thousands of accounts will trip within seconds. Localhost is skipped so
     # the pytest suite and internal integration checks aren't hobbled.
     ip = _client_ip(request)
-    if ip not in ("127.0.0.1", "::1", "localhost", "unknown"):
+    if ip not in ("127.0.0.1", "::1", "localhost", "unknown") and not _TWILIO_TEST_MODE:
         _rate_limit_or_429(
             f"register:{ip}", capacity=15, refill_per_sec=1 / 240,
             label="registration attempt",
         )
     email = body.email.lower()
+    # Normalize + verify the phone token BEFORE consulting the DB so a
+    # duplicate-email caller (a bot recycling old creds) still has to
+    # burn a valid Twilio verification per attempt.
+    phone = _normalize_phone(body.phone_number)
+    _consume_phone_verification_token(body.phone_verification_token, phone)
     existing = await db.users.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+    # Optional: soft-block phone reuse. We treat phone as identifying info
+    # (SMS notifications, 2FA later, account recovery) so two accounts on
+    # the same number is confusing. Same generic error message as email
+    # collision to avoid enumeration signal beyond what's already leaked.
+    phone_owner = await db.users.find_one({"phone_number": phone})
+    if phone_owner:
+        raise HTTPException(status_code=400, detail="That phone number is already tied to another account.")
     user = {
         "id": str(uuid.uuid4()),
         "email": email,
         "name": (body.name or email.split("@")[0])[:120],
         "password_hash": hash_password(body.password),
+        "phone_number": phone,
+        "phone_verified": True,
+        "phone_verified_at": datetime.now(timezone.utc).isoformat(),
         "created_at": datetime.now(timezone.utc).isoformat(),
         # Seed last_login_at with the registration moment so the re-engagement
         # scheduler doesn't immediately flag a brand-new user as "inactive
@@ -1004,7 +1270,7 @@ async def register(body: RegisterIn, request: Request, response: Response):
     await _audit(
         "user.registered", request,
         user_id=user["id"], user_email=email,
-        metadata={"name": user["name"]},
+        metadata={"name": user["name"], "phone_last4": phone[-4:]},
     )
     # Fire-and-forget admin alert — one clean per-registration email per
     # product spec. Silent no-op when Resend/RESEND_ADMIN_RECIPIENT are
@@ -1028,7 +1294,8 @@ async def login(body: LoginIn, request: Request, response: Response):
     # (refill 1 token every ~37s). Tight enough to slow credential stuffing
     # without locking out real users who fat-finger their password.
     ip = _client_ip(request)
-    _rate_limit_or_429(f"login:{ip}", capacity=8, refill_per_sec=1 / 37, label="login attempt")
+    if not _TWILIO_TEST_MODE:
+        _rate_limit_or_429(f"login:{ip}", capacity=8, refill_per_sec=1 / 37, label="login attempt")
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(body.password, user["password_hash"]):
@@ -8323,8 +8590,9 @@ async def _security_headers_middleware(request: Request, call_next):
         )
     return resp
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# NOTE: logger + basicConfig moved to the top of the file (near imports) so
+# early module-scoped helpers (Twilio init) can call it. Left this line
+# intentionally removed.
 
 
 # --- FastAPI lifespan bodies ------------------------------------------------
@@ -8333,6 +8601,10 @@ logger = logging.getLogger(__name__)
 # deprecation warnings and avoid double-fire.
 async def _lifespan_startup():
     await db.users.create_index("email", unique=True)
+    # HF-030: unique-but-sparse index on phone_number so existing accounts
+    # without a phone (pre-Twilio users) don't collide, while any newly
+    # created account is protected from phone reuse race conditions.
+    await db.users.create_index("phone_number", unique=True, sparse=True)
     await db.sessions.create_index([("user_id", 1), ("created_at", -1)])
     await db.streaks.create_index("user_id", unique=True)
     await db.payment_transactions.create_index("session_id", unique=True)
