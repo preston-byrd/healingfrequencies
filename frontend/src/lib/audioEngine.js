@@ -17,6 +17,26 @@ function _warn(ctx, err) {
   }
 }
 
+// HF-037 Android audio optimizations. Mid-range Android devices routinely
+// distort or chop when the Web Audio graph asks for anything above the
+// hardware sample rate (48 kHz on most modern Androids, 44.1 kHz on
+// budget/older devices) — the browser resamples on-the-fly and the audio
+// thread can't keep up. We also give the OS driver a little headroom
+// beneath unity because Android's mixer clips earlier than iOS's.
+const _IS_ANDROID = typeof navigator !== 'undefined'
+  && /android/i.test(navigator.userAgent || '');
+// Master ceiling: 1.0 on desktop/iOS (transparent), 0.85 on Android so the
+// summed peak (tone + ambient + isochronic gate) has ~1.4 dB of headroom
+// beneath the OS mixer's clip point. Tuned empirically — lower kills the
+// perceived "presence" of the tone, higher lets the buzzy distortion
+// leak back in on Pixel/Samsung mid-range hardware.
+const _MASTER_CEILING = _IS_ANDROID ? 0.85 : 1.0;
+// Scheduling lead-time before an oscillator .start() call. Desktop hits
+// 50 ms comfortably; Android needs ~120 ms so the audio thread can pack
+// the buffer without underrunning between the JS-thread schedule call
+// and the audio-thread render deadline.
+const _SCHEDULE_LEAD_MS = _IS_ANDROID ? 120 : 50;
+
 class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -101,14 +121,14 @@ class AudioEngine {
     let created = false;
     if (!this.ctx) {
       // Fidelity audit: request the highest sample rate the browser + hardware
-      // will accept. Attempts 96 kHz → 48 kHz → browser default. Any request
-      // above what the OS device supports throws NotSupportedError (esp. iOS
-      // Safari), which is why each tier is wrapped in its own try/catch.
-      // The final untyped `new AudioContext()` always succeeds and uses the
-      // browser default (usually 48000 on Chrome/Edge, 44100 on Firefox).
-      // We store the actual rate for reporting via getState().
+      // will accept. Desktops + iOS handle 96 kHz cleanly; on Android we
+      // skip that tier entirely because the mixer runs at 48 kHz (or
+      // 44.1 kHz on older devices) and asking for 96 kHz forces the browser
+      // into on-the-fly resampling — the #1 cause of the "buzzy, choppy"
+      // audio users report on mid-range Android. Attempts fall through to
+      // the browser default which always succeeds.
       const Ctor = window.AudioContext || window.webkitAudioContext;
-      const attempts = [96000, 48000];
+      const attempts = _IS_ANDROID ? [48000, 44100] : [96000, 48000];
       for (const sr of attempts) {
         try {
           this.ctx = new Ctor({ sampleRate: sr, latencyHint: 'playback' });
@@ -123,8 +143,12 @@ class AudioEngine {
       // no WaveShaper, no Limiter anywhere — sums land on ctx.destination raw so
       // sine oscillators render in their exact mathematical form. See getState()
       // for the resolved sampleRate on the current device.
+      //
+      // HF-037: on Android we hold master at 0.85 (≈−1.4 dB) so the OS
+      // mixer has clipping headroom when tone + ambient + isochronic gate
+      // sum together. Desktop/iOS stays at true unity.
       this.master = this.ctx.createGain();
-      this.master.gain.value = 1;
+      this.master.gain.value = _MASTER_CEILING;
       this.master.connect(this.ctx.destination);
       // Bind statechange BEFORE anything else. This is the ONLY event that
       // fires reliably when the OS suspends/resumes the audio thread on
@@ -444,7 +468,15 @@ class AudioEngine {
   // Pre-build every ambient layer at the SAME audio-context time so that all loops
   // are sample-accurately aligned for the entire session — no drift between layers.
   // Each source has gain=0 until the user opens a slider, so this is silent until used.
+  //
+  // HF-037: on Android we skip the eager prebuild entirely. Eight looping
+  // noise BufferSources + four LFOs firing forever burn ~5-8% of the audio
+  // thread's budget even at gain=0 (they're still rendered into the mix),
+  // enough to trigger buffer underruns on mid-range hardware. Instead we
+  // lazily build each layer the first time setAmbient() is called for it
+  // — the fallback path already handles this cleanly.
   _prebuildAllAmbient() {
+    if (_IS_ANDROID) return;
     const kinds = ['rain', 'ocean', 'forest', 'wind', 'crickets', 'bowls', 'brown', 'white'];
     const startAt = this.ctx.currentTime + 0.05;
     kinds.forEach((kind) => {
@@ -470,6 +502,11 @@ class AudioEngine {
       // Fidelity audit — resolved AudioContext sample rate (Hz). Reflects
       // the highest rate the device accepted; null when ctx isn't built yet.
       sampleRate: this.ctx ? this.ctx.sampleRate : null,
+      // HF-037 debug hooks — surfaced so the admin fidelity panel + support
+      // triage can see which platform-tuning path this session is on.
+      androidMode: _IS_ANDROID,
+      masterCeiling: _MASTER_CEILING,
+      scheduleLeadMs: _SCHEDULE_LEAD_MS,
     };
   }
 
@@ -496,7 +533,7 @@ class AudioEngine {
       // next session would be silent. Set instantly inside the user-gesture
       // call stack — no ramp needed since toneGain itself fades in below.
       this.master.gain.cancelScheduledValues(ctx.currentTime);
-      this.master.gain.setValueAtTime(1, ctx.currentTime);
+      this.master.gain.setValueAtTime(_MASTER_CEILING, ctx.currentTime);
       this._sessionFadeActive = false;
       this._sessionFadeEndsAt = 0;
 
@@ -517,9 +554,12 @@ class AudioEngine {
       // t = startAt. Without this, JS execution timing between successive
       // .start() calls can land the oscillators in different 128-sample
       // render quanta, producing a small but audible phase offset that
-      // subtly cancels harmonic partials. A 50 ms scheduling lead-time keeps
-      // the start-moment safely in the future relative to `currentTime`.
-      const startAt = ctx.currentTime + 0.05;
+      // subtly cancels harmonic partials.
+      // HF-037: Android needs more scheduling headroom (120 ms vs 50 ms on
+      // desktop/iOS) so the audio thread has time to pack the render
+      // buffer without underrunning between the JS schedule call and the
+      // audio-thread render deadline — the root of "choppy" playback.
+      const startAt = ctx.currentTime + _SCHEDULE_LEAD_MS / 1000;
 
       if (this.binaural > 0) {
         const merger = ctx.createChannelMerger(2);
@@ -889,7 +929,7 @@ class AudioEngine {
       // audibly smooth on all browsers we support (Web Audio's setTarget
       // never fully reaches the target, which would leave a subtle static
       // attenuation on the master bus).
-      g.linearRampToValueAtTime(1.0, t + 0.05);
+      g.linearRampToValueAtTime(_MASTER_CEILING, t + 0.05);
     } catch (_) { /* graceful */ }
   }
 
@@ -1297,10 +1337,10 @@ class AudioEngine {
     const t = ctx.currentTime;
     this.master.gain.cancelScheduledValues(t);
     if (restoreInstantly) {
-      this.master.gain.setValueAtTime(1, t);
+      this.master.gain.setValueAtTime(_MASTER_CEILING, t);
     } else {
       this.master.gain.setValueAtTime(this.master.gain.value, t);
-      this.master.gain.linearRampToValueAtTime(1, t + 0.4);
+      this.master.gain.linearRampToValueAtTime(_MASTER_CEILING, t + 0.4);
     }
     this._sessionFadeActive = false;
     this._sessionFadeEndsAt = 0;
