@@ -133,57 +133,158 @@ def _client_ip(request: Request) -> str:
     Priority order (most reliable first):
       1. `CF-Connecting-IP` — Cloudflare's own header carrying the real
          client IP. Cloudflare fronts solarisound.com so this is present
-         and cannot be spoofed by clients (only Cloudflare sets it).
+         and cannot be spoofed by clients (Cloudflare's edge strips any
+         inbound client-supplied CF-Connecting-IP and re-writes it to
+         the true origin IP).
       2. `True-Client-IP` — Akamai/CF Enterprise variant, same trust
          model as CF-Connecting-IP.
       3. `X-Real-IP` — set by some ingress controllers (nginx-ingress)
          to the immediate client.
       4. `X-Forwarded-For` RIGHT-most public entry (walking r→l,
          skipping private hops) — spoof-resistant fallback used only
-         when none of the 1–3 headers are present. On multi-hop
-         topologies this can land on our own outer LB (`34.160.64.205`
-         — which is why every audit-log row on solarisound.com had that
-         same IP before this fix), but that's still preferable to
-         trusting a left-most value that clients can prepend.
+         when none of the 1–3 headers are present.
       5. `request.client.host` — direct peer, only useful when nothing
          else is present.
 
-    We only trust the headers when the direct peer is one of our known
-    proxy hops (private-range IP). If the pod is reached directly from
-    a public IP, we ignore all forwarded headers and use the peer.
+    HF-039: The Cloudflare-family headers (CF-Connecting-IP + True-Client-IP)
+    are now trusted UNCONDITIONALLY when `TRUST_CLOUDFLARE_HEADERS=true`
+    (default). Previously we only trusted them when the direct peer was
+    private — but Emergent's GCP load balancer hands requests to the pod
+    with a PUBLIC peer IP (34.x.x.x), so the old logic returned the LB IP
+    for every request on solarisound.com and the real client never landed
+    in the audit log. This is safe because Cloudflare's edge strips any
+    inbound client-supplied CF-Connecting-IP header before forwarding.
+    Deployments that don't front their pods with Cloudflare can set
+    `TRUST_CLOUDFLARE_HEADERS=false` to revert to the private-peer gate.
     """
+    # 1 & 2: Cloudflare-family headers — trusted when the operator has
+    # confirmed the deployment sits behind Cloudflare. Default TRUE
+    # because that's the production topology.
+    if _TRUST_CLOUDFLARE_HEADERS:
+        for header in ("cf-connecting-ip", "true-client-ip"):
+            val = (request.headers.get(header) or "").strip()
+            if val and _is_valid_public_ip(val):
+                return val[:64]
+
     peer = ""
     try:
         peer = (request.client.host or "")
     except Exception:
         peer = ""
 
-    # If the direct peer is public, we're not behind a trusted proxy
-    # (e.g. local dev without ingress). Ignore forwarded headers.
+    # If the direct peer is public AND we're not behind a Cloudflare-family
+    # proxy (checked above), we're being hit directly (local dev / test).
+    # Ignore forwarded headers to prevent client-side XFF spoofing.
     if not _is_private_peer(peer):
+        # Even with cf-trust OFF, we still honour cf-headers when the peer
+        # itself is a trusted proxy — but that's the pre-HF-039 legacy path.
+        if not _TRUST_CLOUDFLARE_HEADERS:
+            return (peer or "unknown")[:64]
         return (peer or "unknown")[:64]
 
-    # Behind a proxy — walk the trusted-header priority list.
-    for header in ("cf-connecting-ip", "true-client-ip", "x-real-ip"):
-        val = (request.headers.get(header) or "").strip()
-        if val and not _is_private_peer(val):
-            return val[:64]
+    # Behind a private-range proxy — walk the remaining trusted headers.
+    # (When TRUST_CLOUDFLARE_HEADERS is off we still check them here.)
+    if not _TRUST_CLOUDFLARE_HEADERS:
+        for header in ("cf-connecting-ip", "true-client-ip"):
+            val = (request.headers.get(header) or "").strip()
+            if val and _is_valid_public_ip(val):
+                return val[:64]
+    val = (request.headers.get("x-real-ip") or "").strip()
+    if val and not _is_private_peer(val):
+        return val[:64]
 
-    # Fall back to XFF. Take the RIGHT-most public entry (walking right-
-    # to-left, skipping private hops) — that's the entry added by our
-    # outermost trusted proxy and cannot be spoofed by clients further
-    # out (they can only prepend; the proxy always appends). May still
-    # land on our own outer LB (`34.160.64.205`), but on solarisound.com
-    # the CF-Connecting-IP path above catches the real client first, so
-    # this XFF fallback only fires on edge cases (pod hit directly by an
-    # ingress that doesn't set X-Real-IP or CF headers).
+    # Fall back to XFF. HF-039 improvement: when the chain contains a
+    # Cloudflare-owned IP, the entry IMMEDIATELY TO ITS LEFT is the true
+    # client — Cloudflare always appends the origin BEFORE their own hop
+    # (`client, cf-edge, our-lb`). This handles the preview + free/pro CF
+    # topology where CF-Connecting-IP isn't propagated to the pod but
+    # Cloudflare is still doing the TLS termination.
     xff = request.headers.get("x-forwarded-for") or ""
     candidates = [c.strip() for c in xff.split(",") if c.strip()]
-    for ip in reversed(candidates):
-        if not _is_private_peer(ip):
-            return ip[:64]
+    if candidates:
+        # Walk right→left, tracking the previous IP. When we hit a CF
+        # edge, the previous (leftward) IP is the client.
+        for i in range(len(candidates) - 1, -1, -1):
+            ip = candidates[i]
+            if _is_cloudflare_ip(ip) and i > 0:
+                left = candidates[i - 1]
+                if _is_valid_public_ip(left):
+                    return left[:64]
+        # No CF hop found — fall back to the right-most public entry
+        # (spoof-resistant against left-side prepending).
+        for ip in reversed(candidates):
+            if not _is_private_peer(ip):
+                return ip[:64]
 
     return (peer or "unknown")[:64]
+
+
+def _is_valid_public_ip(ip: str) -> bool:
+    """True when `ip` parses AND is a routable public address. Used to
+    gate the CF-Connecting-IP / True-Client-IP trust path so a malformed
+    header value can't leak "unknown" or a private-range string into the
+    audit log."""
+    if not ip:
+        return False
+    try:
+        import ipaddress
+        obj = ipaddress.ip_address(ip)
+        # Reject the same buckets `_is_private_peer` flags, so a spoofed
+        # "127.0.0.1" or "10.0.0.1" header can't smuggle through.
+        return not (obj.is_private or obj.is_loopback
+                    or obj.is_link_local or obj.is_reserved
+                    or obj.is_multicast or obj.is_unspecified)
+    except ValueError:
+        return False
+
+
+# HF-039: operator switch for the unconditional Cloudflare-header trust
+# path. Default TRUE — production solarisound.com sits behind Cloudflare +
+# GCP LB and the LB always presents a public peer IP. Set to "false" only
+# in deployments that expose the pod directly to the public internet.
+_TRUST_CLOUDFLARE_HEADERS = (
+    os.environ.get("TRUST_CLOUDFLARE_HEADERS", "true").strip().lower()
+    not in ("false", "0", "no", "off", "")
+)
+
+
+# HF-039: known Cloudflare IP ranges. Used to anchor XFF resolution when
+# CF-Connecting-IP isn't propagated to the pod (some plans / proxy chains
+# strip it). When we walk XFF right-to-left and hit a CF-owned IP, the
+# entry immediately to its LEFT is the true client — Cloudflare always
+# appends the origin before their own hop.
+# List from https://www.cloudflare.com/ips-v4/ + /ips-v6/ (Feb 2026 snapshot).
+# Refresh only if CF publishes new ranges (rare — has been stable for years).
+_CLOUDFLARE_CIDRS = (
+    # IPv4
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
+    "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
+    "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
+    "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    # IPv6
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32",
+    "2405:b500::/32", "2405:8100::/32", "2a06:98c0::/29",
+    "2c0f:f248::/32",
+)
+
+
+def _is_cloudflare_ip(ip: str) -> bool:
+    """True when `ip` is inside any published Cloudflare range."""
+    if not ip:
+        return False
+    try:
+        import ipaddress
+        obj = ipaddress.ip_address(ip)
+        for cidr in _CLOUDFLARE_CIDRS:
+            try:
+                if obj in ipaddress.ip_network(cidr, strict=False):
+                    return True
+            except ValueError:
+                continue
+        return False
+    except ValueError:
+        return False
 
 
 def _is_private_peer(ip: str) -> bool:
@@ -3042,6 +3143,30 @@ async def _get_plan_config() -> dict:
 def _require_admin(user: dict):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+
+
+@api.get("/admin/health/ip-trace")
+async def _admin_health_ip_trace(request: Request, user: dict = Depends(get_current_user)):
+    """HF-039: admin-only trace endpoint that echoes back the derived
+    client IP alongside the raw proxy headers we consider. Used to debug
+    the audit-log IP resolution in production without leaking header
+    dumps to the public. Non-admins get 403.
+    """
+    _require_admin(user)
+    hdr = request.headers
+    return {
+        "derived_ip": _client_ip(request),
+        "peer_host": (request.client.host if request.client else None),
+        "trust_cloudflare_headers": _TRUST_CLOUDFLARE_HEADERS,
+        "headers_seen": {
+            "cf-connecting-ip": hdr.get("cf-connecting-ip"),
+            "true-client-ip": hdr.get("true-client-ip"),
+            "x-real-ip": hdr.get("x-real-ip"),
+            "x-forwarded-for": hdr.get("x-forwarded-for"),
+            "x-forwarded-host": hdr.get("x-forwarded-host"),
+            "x-forwarded-proto": hdr.get("x-forwarded-proto"),
+        },
+    }
 
 
 class PasswordChangeIn(BaseModel):

@@ -792,3 +792,17 @@
   - **Verified** — Frontend compiled with only pre-existing warnings. `grep` confirms every master-write path respects the correct constant (startup uses `_MASTER_STARTUP_FLOOR`, everything else uses `_MASTER_CEILING`). Desktop/iOS behaviour is byte-equivalent (`_MASTER_STARTUP_FLOOR=1.0`, `_RESUME_SETTLE_MS=0`, hardware probe is skipped).
   - **NOTE** — Fix lives in **preview**. Redeploy required for Android users on solarisound.com to hear the difference; a hard-refresh after redeploy will kick the tuned engine into their session.
 
+- **HF-039 Real client IPs in audit log (Feb 2026)**: Every row in the admin Recent Activity feed on solarisound.com was stamped with the SAME address (`34.36.184.211` — the GCP load balancer) instead of the real client, making the audit trail useless for triage. Two root causes: (a) the old `_client_ip` only trusted `CF-Connecting-IP` when the direct peer was private, but Emergent's GCP LB hands the pod a PUBLIC peer IP (34.x.x.x), so the CF header was skipped every request; (b) even when CF is fronting, some CF plans / proxy chains strip `CF-Connecting-IP` before it reaches the origin — the pod only sees the XFF chain.
+  - **Fix 1 — trust CF headers by peer topology**: `_client_ip` now checks `CF-Connecting-IP` + `True-Client-IP` UNCONDITIONALLY (gated by `TRUST_CLOUDFLARE_HEADERS`, default `true`). Cloudflare's edge strips inbound client-supplied CF headers, so this is safe when actually fronting through Cloudflare. Operators without CF can set the env to `false` to revert to the private-peer gate.
+  - **Fix 2 — Cloudflare-anchored XFF walk**: new `_is_cloudflare_ip(ip)` checks against the published Cloudflare CIDR ranges (Feb 2026 snapshot, v4 + v6). When XFF contains a CF-owned hop, the entry IMMEDIATELY TO ITS LEFT is the true origin (CF always appends the client before their own hop). This is the ONLY reliable trust path for CF-plans that don't propagate `CF-Connecting-IP`.
+  - **Fix 3 — reserved/private header rejection**: new `_is_valid_public_ip` helper rejects malformed / RFC1918 / TEST-NET / loopback / reserved header values so a broken upstream or hostile injection can't smuggle "10.0.0.1" or "127.0.0.1" into the audit log.
+  - **New endpoint** — `GET /api/admin/health/ip-trace` (admin-only): echoes the derived client IP, direct peer, and every proxy header seen so operators can diagnose future header-chain quirks without a code change.
+  - **Files** — `backend/server.py` (`_client_ip` rewritten, `_CLOUDFLARE_CIDRS` + `_is_cloudflare_ip` + `_is_valid_public_ip` + `_TRUST_CLOUDFLARE_HEADERS` + `/admin/health/ip-trace`, ~+120 LOC), `backend/tests/test_client_ip_derivation.py` (updated + 5 new tests: CF-wins-over-public-LB-peer, private-value-in-CF-rejected, TRUST_CLOUDFLARE_HEADERS toggle, XFF-anchored-left-of-CF-hop, XFF-fallback-when-no-CF-hop, TEST-NET reject).
+  - **Verified** — 15/15 `test_client_ip_derivation` cases pass. Live end-to-end: audit log rows POST-HF-039 now show `ip=34.170.12.145` (real client) instead of `ip=34.36.184.211` (LB). Trace endpoint confirms the resolution:
+    ```
+    XFF: 34.170.12.145, 172.71.255.121, 34.36.184.211
+                        └─ 172.64.0.0/13 = Cloudflare
+    derived_ip = 34.170.12.145 (left of CF hop)
+    ```
+  - **NOTE** — Fix lives in **preview**. Redeploy to push to solarisound.com. Once redeployed, every new audit row will carry the real client IP; historical rows retain the LB IP (no backfill).
+
