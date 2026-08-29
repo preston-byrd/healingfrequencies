@@ -31,11 +31,55 @@ const _IS_ANDROID = typeof navigator !== 'undefined'
 // perceived "presence" of the tone, higher lets the buzzy distortion
 // leak back in on Pixel/Samsung mid-range hardware.
 const _MASTER_CEILING = _IS_ANDROID ? 0.85 : 1.0;
+// HF-038: Android startup floor. The first ~250 ms of playback is when
+// the audio thread is most fragile — buffer allocation + oscillator
+// scheduling + noise-buffer render can all coincide inside a single
+// render quantum and clip. We open at 0.65 (~−3.7 dB) on Android and
+// ramp up to the ceiling AFTER we've confirmed ctx.state === 'running',
+// giving the driver breathing room during the exact window when it's
+// most likely to distort.
+const _MASTER_STARTUP_FLOOR = _IS_ANDROID ? 0.65 : 1.0;
 // Scheduling lead-time before an oscillator .start() call. Desktop hits
 // 50 ms comfortably; Android needs ~120 ms so the audio thread can pack
 // the buffer without underrunning between the JS-thread schedule call
 // and the audio-thread render deadline.
 const _SCHEDULE_LEAD_MS = _IS_ANDROID ? 120 : 50;
+// HF-038: pre-ramp settle window on Android. When AudioContext transitions
+// from 'suspended'|'interrupted' → 'running' the audio clock advances a
+// few tens of ms in a burst — starting the master fade-in ramp inside
+// that burst produces an audible 'tick' or brief stutter. Waiting one
+// render quantum (128 samples at 48 kHz ≈ 2.7 ms) plus a driver-side
+// commit slack is the sweet spot. Zero on desktop/iOS which resume cleanly.
+const _RESUME_SETTLE_MS = _IS_ANDROID ? 30 : 0;
+
+/**
+ * HF-038: probe the browser's default AudioContext to discover the exact
+ * hardware sample rate the OS mixer is using. Creating a throwaway context
+ * with no options resolves the "native" rate (48000 on most Android and
+ * Chrome/Edge, 44100 on some older Android + Firefox). We then feed that
+ * exact value into the real context so no on-the-fly resampling ever
+ * happens — the largest single cause of Android choppiness.
+ *
+ * Returns null if the probe fails (Safari private mode / very old browser),
+ * which lets the caller fall back to the multi-tier attempts list.
+ */
+function _probeHardwareSampleRate() {
+  if (typeof window === 'undefined') return null;
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) return null;
+  let probe = null;
+  try {
+    probe = new Ctor();
+    const rate = probe.sampleRate;
+    return typeof rate === 'number' && rate > 0 ? rate : null;
+  } catch (_) {
+    return null;
+  } finally {
+    if (probe && typeof probe.close === 'function') {
+      try { probe.close(); } catch (_) { /* graceful */ }
+    }
+  }
+}
 
 class AudioEngine {
   constructor() {
@@ -121,14 +165,24 @@ class AudioEngine {
     let created = false;
     if (!this.ctx) {
       // Fidelity audit: request the highest sample rate the browser + hardware
-      // will accept. Desktops + iOS handle 96 kHz cleanly; on Android we
-      // skip that tier entirely because the mixer runs at 48 kHz (or
-      // 44.1 kHz on older devices) and asking for 96 kHz forces the browser
-      // into on-the-fly resampling — the #1 cause of the "buzzy, choppy"
-      // audio users report on mid-range Android. Attempts fall through to
-      // the browser default which always succeeds.
+      // will accept. Desktops + iOS handle 96 kHz cleanly. On Android we
+      // FIRST probe the OS's native rate via a throwaway context, then
+      // force an exact match — no on-the-fly resampling ever happens
+      // (largest single cause of Android choppiness). Falls back to the
+      // multi-tier attempts list if the probe fails.
       const Ctor = window.AudioContext || window.webkitAudioContext;
-      const attempts = _IS_ANDROID ? [48000, 44100] : [96000, 48000];
+      let attempts;
+      if (_IS_ANDROID) {
+        const hw = _probeHardwareSampleRate();
+        // Prefer the probed hardware rate; keep 48k / 44.1k as safety nets
+        // in case the probe returned a legal-but-non-standard value that
+        // the constructor rejects when re-passed explicitly (rare).
+        attempts = hw ? [hw, 48000, 44100] : [48000, 44100];
+        this._hardwareSampleRate = hw || null;
+      } else {
+        attempts = [96000, 48000];
+        this._hardwareSampleRate = null;
+      }
       for (const sr of attempts) {
         try {
           this.ctx = new Ctor({ sampleRate: sr, latencyHint: 'playback' });
@@ -144,11 +198,14 @@ class AudioEngine {
       // sine oscillators render in their exact mathematical form. See getState()
       // for the resolved sampleRate on the current device.
       //
-      // HF-037: on Android we hold master at 0.85 (≈−1.4 dB) so the OS
-      // mixer has clipping headroom when tone + ambient + isochronic gate
-      // sum together. Desktop/iOS stays at true unity.
+      // HF-037/038: on Android we OPEN the master bus at the startup floor
+      // (0.65 ≈ −3.7 dB) so the audio thread has clipping headroom during
+      // the fragile first ~250 ms of playback (oscillator schedule + noise
+      // buffer alloc + first render quantum all coincide). Once ctx.state
+      // is confirmed 'running' and the settle window elapses, we ramp up
+      // to the ceiling (0.85 ≈ −1.4 dB). Desktop/iOS opens at true unity.
       this.master = this.ctx.createGain();
-      this.master.gain.value = _MASTER_CEILING;
+      this.master.gain.value = _MASTER_STARTUP_FLOOR;
       this.master.connect(this.ctx.destination);
       // Bind statechange BEFORE anything else. This is the ONLY event that
       // fires reliably when the OS suspends/resumes the audio thread on
@@ -193,8 +250,47 @@ class AudioEngine {
         this._pendingProfile = null;
         this._applyEqChain(p);
       }
+      // HF-038: on Android, ramp the master bus from the startup floor
+      // (0.65) up to the ceiling (0.85) AFTER the audio clock has had a
+      // chance to settle. `_settleMasterAfterCreate` waits for the settle
+      // window (one render quantum + driver commit slack) before scheduling
+      // the ramp so the first audible tick happens on a synchronized clock,
+      // not mid-burst as ctx.state flips to 'running'.
+      if (_IS_ANDROID && this.master) {
+        this._settleMasterAfterCreate();
+      }
     }
     return this.ctx;
+  }
+
+  /**
+   * HF-038: post-context-creation settle ramp for Android. Waits
+   * `_RESUME_SETTLE_MS` (default 30 ms on Android) so the audio clock has
+   * committed at least one render quantum, THEN linearly ramps master
+   * from the startup floor (0.65) up to the ceiling (0.85) over 250 ms.
+   * The 250 ms window is long enough to be inaudible as a fade but short
+   * enough to hit the target before the user perceives any attenuation.
+   *
+   * If a later start() overrides master.gain via cancelScheduledValues
+   * + setValueAtTime(_MASTER_CEILING), that write wins and we're
+   * automatically at the ceiling — no cleanup needed here.
+   */
+  _settleMasterAfterCreate() {
+    setTimeout(() => {
+      if (!this.ctx || !this.master) return;
+      // Only lift if we're still parked at the startup floor. If the user
+      // already tapped Play (which snaps master to the ceiling) or if a
+      // smart-fade has taken over, we bail so we don't fight a scheduled
+      // ramp mid-flight.
+      const cur = this.master.gain.value;
+      if (Math.abs(cur - _MASTER_STARTUP_FLOOR) > 0.02) return;
+      try {
+        const t = this.ctx.currentTime;
+        this.master.gain.cancelScheduledValues(t);
+        this.master.gain.setValueAtTime(cur, t);
+        this.master.gain.linearRampToValueAtTime(_MASTER_CEILING, t + 0.25);
+      } catch (e) { _warn('audio.settle', e); }
+    }, _RESUME_SETTLE_MS);
   }
 
   // ---- Hearing-profile EQ chain ------------------------------------------
@@ -502,11 +598,15 @@ class AudioEngine {
       // Fidelity audit — resolved AudioContext sample rate (Hz). Reflects
       // the highest rate the device accepted; null when ctx isn't built yet.
       sampleRate: this.ctx ? this.ctx.sampleRate : null,
-      // HF-037 debug hooks — surfaced so the admin fidelity panel + support
-      // triage can see which platform-tuning path this session is on.
+      // HF-037/038 debug hooks — surfaced so the admin fidelity panel + support
+      // triage can see which platform-tuning path this session is on and whether
+      // the hardware-native sample rate was probed correctly.
       androidMode: _IS_ANDROID,
       masterCeiling: _MASTER_CEILING,
+      masterStartupFloor: _MASTER_STARTUP_FLOOR,
       scheduleLeadMs: _SCHEDULE_LEAD_MS,
+      resumeSettleMs: _RESUME_SETTLE_MS,
+      hardwareSampleRate: this._hardwareSampleRate ?? null,
     };
   }
 
@@ -910,27 +1010,42 @@ class AudioEngine {
 
   // ---- Robustness: ensureRunning, health check, visibility handling ---------
 
-  // Ramp master.gain from 0 → 1 over ~50 ms. Called whenever the AudioContext
+  // Ramp master.gain from 0 → ceiling over ~50 ms (desktop/iOS) or after a
+  // 30 ms settle window (Android). Called whenever the AudioContext
   // transitions back to 'running' after a suspend / interrupt. Masks the
   // audible pop/discontinuity at the moment the OS restores the audio thread
   // — the pop is present whether or not isochronic pulsing is active (a plain
   // sine tone or any ambient layer produces a smaller but still audible
   // artifact on resume). Idempotent: safe to call repeatedly.
+  //
+  // HF-038: on Android we DEFER the ramp scheduling by `_RESUME_SETTLE_MS`
+  // (~30 ms) because the audio clock advances in a small burst as ctx.state
+  // flips to 'running'. Starting a linear ramp inside that burst was
+  // producing the initial "pop / stutter" users heard right after unlock.
+  // Waiting one render quantum + driver commit slack puts the ramp origin
+  // on a stable clock.
   _rampMasterOnResume() {
     if (!this.ctx || !this.master) return;
-    try {
-      const t = this.ctx.currentTime;
-      const g = this.master.gain;
-      g.cancelScheduledValues(t);
-      // Snap to 0 first so the ramp origin is deterministic. A tiny epsilon
-      // avoids setValueAtTime(exactly-zero) edge cases on some engines.
-      g.setValueAtTime(0.0001, t);
-      // 50 ms exponential-ish ramp to unity using linearRampToValueAtTime —
-      // audibly smooth on all browsers we support (Web Audio's setTarget
-      // never fully reaches the target, which would leave a subtle static
-      // attenuation on the master bus).
-      g.linearRampToValueAtTime(_MASTER_CEILING, t + 0.05);
-    } catch (_) { /* graceful */ }
+    const schedule = () => {
+      if (!this.ctx || !this.master) return;
+      try {
+        const t = this.ctx.currentTime;
+        const g = this.master.gain;
+        g.cancelScheduledValues(t);
+        // Snap to 0 first so the ramp origin is deterministic. A tiny epsilon
+        // avoids setValueAtTime(exactly-zero) edge cases on some engines.
+        g.setValueAtTime(0.0001, t);
+        // 50 ms linearRampToValueAtTime — audibly smooth on all browsers we
+        // support (Web Audio's setTarget never fully reaches the target,
+        // which would leave a subtle static attenuation on the master bus).
+        g.linearRampToValueAtTime(_MASTER_CEILING, t + 0.05);
+      } catch (_) { /* graceful */ }
+    };
+    if (_RESUME_SETTLE_MS > 0) {
+      setTimeout(schedule, _RESUME_SETTLE_MS);
+    } else {
+      schedule();
+    }
   }
 
   // Consolidated resume reconciler. Both entry points — the AudioContext's
