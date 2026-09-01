@@ -343,6 +343,19 @@ export default function HarmonicBlueprintSheet({ open, onClose, isPro = true, on
       setPendingFindings([]);
       setSelectedKeys(new Set());
       setStep('results');
+      // HF-042 Weekly Alignment Streak: notify the milestone card that a
+      // fresh capture landed. Backend already computed the streak — the
+      // card polls /me/alignment-streak on this event and shows the
+      // "4-week milestone" celebration when eligible.
+      try {
+        window.dispatchEvent(new CustomEvent('sf:alignment:capture', {
+          detail: {
+            streak: data.alignment_streak,
+            credited: data.alignment_streak_credited,
+            new_milestone: data.alignment_streak_new_milestone,
+          },
+        }));
+      } catch (_) { /* graceful */ }
       // Phase 12b — after every 5th capture, gently celebrate progress by
       // surfacing the before/after map. Fetch is non-blocking; failure just
       // means no overlay this session.

@@ -26,6 +26,7 @@ import SoundBathPanel from '@/components/SoundBathPanel';
 import MeditationSoundsPanel from '@/components/MeditationSoundsPanel';
 import HarmonicBlueprintCard from '@/components/HarmonicBlueprintCard';
 import HarmonicBlueprintSheet from '@/components/HarmonicBlueprintSheet';
+import AlignmentStreakMilestone from '@/components/AlignmentStreakMilestone';
 import NotificationBell from '@/components/NotificationBell';
 import SessionImpactPrompt from '@/components/SessionImpactPrompt';
 import MyMilestones from '@/components/MyMilestones';
@@ -664,20 +665,47 @@ export default function Dashboard({ onOpenAccount }) {
     const now = new Date();
     const weekday = now.getDay();
     const hour = now.getHours();
+    const tzOff = now.getTimezoneOffset();
+    // Any morning check-in message (SMS ack OR proactive) requires the
+    // Sun/Mon 7-11 AM local window. Outside the window we short-circuit.
     if (!(weekday === 0 || weekday === 1) || hour < 7 || hour >= 11) return null;
     try {
       const res = await Promise.race([
-        api.get('/me/alignment-checkin/status'),
+        api.get(`/me/alignment-checkin/status?tz_offset_minutes=${tzOff}`),
         new Promise((resolve) => setTimeout(() => resolve(null), 900)),
       ]);
-      if (!res || !res.data || !res.data.eligible_data) return null;
-      const hasBp = !!res.data.has_blueprint;
+      if (!res || !res.data) return null;
+      const { sms_ack_pending, eligible_data, has_blueprint } = res.data;
       const first = (name || '').split(' ')[0] || name || '';
+
+      // HF-042: SMS acknowledgment path wins over the proactive greeting
+      // — if we texted them THIS morning, the assistant should feel like
+      // it knows why they showed up.
+      if (sms_ack_pending) {
+        api.post('/me/alignment-checkin/sms-ack')
+          .catch((e) => console.warn('[align] sms-ack failed', e));
+        const greeting = first
+          ? `Glad you made it for your check-in, ${first}. Ready to see where your frequencies are today?`
+          : "Glad you made it for your check-in. Ready to see where your frequencies are today?";
+        return {
+          greeting,
+          suggestions: [
+            {
+              kind: 'harmonic_blueprint',
+              label: has_blueprint ? 'Yes — run the Alignment Check-in' : 'Yes — capture my blueprint',
+              pro_only: true,
+            },
+            { kind: 'alignment_snooze', label: 'Not today' },
+          ],
+        };
+      }
+
+      if (!eligible_data) return null;
       // Two greeting variants — rotate so returning users don't see the
       // same string every week. First-time capture users get a slightly
       // gentler variant that doesn't say "drifted" (they have no baseline
       // to have drifted from).
-      const variants = hasBp
+      const variants = has_blueprint
         ? [
             first
               ? `Good morning ${first}. It's a new week — would you like to run a quick Alignment Check-in to see if your frequencies have drifted?`
@@ -697,7 +725,7 @@ export default function Dashboard({ onOpenAccount }) {
         suggestions: [
           {
             kind: 'harmonic_blueprint',
-            label: hasBp ? 'Yes — run the Alignment Check-in' : 'Yes — capture my blueprint',
+            label: has_blueprint ? 'Yes — run the Alignment Check-in' : 'Yes — capture my blueprint',
             pro_only: true,
           },
           {
@@ -2193,6 +2221,7 @@ export default function Dashboard({ onOpenAccount }) {
             journeyEntryId={lastJourneyEntryId}
             onShare={shareSession ? () => setShareOpen(true) : undefined}
           />
+          <AlignmentStreakMilestone />
           <SessionShareCard
             open={shareOpen}
             onClose={() => setShareOpen(false)}

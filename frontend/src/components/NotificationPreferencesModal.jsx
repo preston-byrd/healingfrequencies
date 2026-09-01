@@ -395,6 +395,7 @@ export default function NotificationPreferencesModal({ open, onClose }) {
                         <div className="space-y-3 pl-3 border-l-2 border-[#5C9E8C]/30">
                           {[
                             { key: 'reminders', label: 'Session reminders', hint: 'Gentle nudges when it\'s time for your daily practice.' },
+                            { key: 'alignment_checkin', label: 'Weekly Alignment Check-in', hint: 'Monday morning text if it\'s been a week since your last Harmonic Blueprint.' },
                             { key: 'recommendations', label: 'Frequency recommendations', hint: 'A suggested frequency or Soundscape for your day.' },
                             { key: 'announcements', label: 'Feature announcements', hint: 'When something new lands in Solarisound.' },
                           ].map(({ key, label, hint }) => (

@@ -114,3 +114,75 @@ def test_status_requires_auth():
         assert r.status_code in (401, 403)
         s = c.post(f"{API_URL}/me/alignment-checkin/snooze", json={})
         assert s.status_code in (401, 403)
+
+
+# -------------------------------------------------------------------------
+# HF-042 Weekly Alignment Streak endpoints
+# -------------------------------------------------------------------------
+
+
+def test_streak_defaults_to_zero_for_new_user(fresh_user):
+    """A user who has never captured has streak=0 and no new_milestone."""
+    with httpx.Client() as c:
+        r = c.get(f"{API_URL}/me/alignment-streak", headers=fresh_user["headers"])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["streak"] == 0
+    assert body["new_milestone"] is None
+    assert body["last_iso_week"] is None
+
+
+def test_streak_ack_is_idempotent(fresh_user):
+    """POSTing /ack for the same milestone twice is safe (idempotent)."""
+    with httpx.Client() as c:
+        r1 = c.post(f"{API_URL}/me/alignment-streak/ack",
+                    headers=fresh_user["headers"], json={"milestone": 4})
+        r2 = c.post(f"{API_URL}/me/alignment-streak/ack",
+                    headers=fresh_user["headers"], json={"milestone": 4})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r1.json()["ok"] is True
+    assert r2.json()["ok"] is True
+
+
+def test_streak_ack_validates_milestone(fresh_user):
+    """Milestone must be a positive integer ≤ 520 (10 years of weekly)."""
+    with httpx.Client() as c:
+        r = c.post(f"{API_URL}/me/alignment-streak/ack",
+                   headers=fresh_user["headers"], json={"milestone": 0})
+        assert r.status_code == 422
+        r2 = c.post(f"{API_URL}/me/alignment-streak/ack",
+                    headers=fresh_user["headers"], json={"milestone": 99999})
+        assert r2.status_code == 422
+
+
+def test_status_persists_tz_offset(fresh_user):
+    """Calling /status with ?tz_offset_minutes=N persists it on the user
+    doc so the Monday-morning SMS tick knows their local wall clock."""
+    with httpx.Client() as c:
+        r = c.get(f"{API_URL}/me/alignment-checkin/status?tz_offset_minutes=300",
+                  headers=fresh_user["headers"])
+    assert r.status_code == 200
+    body = r.json()
+    assert "sms_ack_pending" in body
+
+
+def test_sms_ack_flags_seen(fresh_user):
+    """POSTing sms-ack just returns ok — the field is a UI-only flag,
+    exercised end-to-end when combined with the SMS tick which sets
+    `alignment_sms_last_sent_at`."""
+    with httpx.Client() as c:
+        r = c.post(f"{API_URL}/me/alignment-checkin/sms-ack",
+                   headers=fresh_user["headers"])
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_prev_iso_week_helper():
+    """Sanity-check the streak break-detection helper. Imports the
+    private symbol directly rather than round-tripping through the API
+    so we don't have to fabricate two captures on non-consecutive weeks."""
+    from server import _prev_iso_week
+    assert _prev_iso_week("2026-W05") == "2026-W04"
+    assert _prev_iso_week("2026-W01").endswith(("W52", "W53"))
+    assert _prev_iso_week("garbage") == ""

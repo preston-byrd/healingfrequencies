@@ -906,6 +906,116 @@ async def _reengagement_tick() -> dict:
     # run + observe (admin tick endpoint returns both counters).
     sms_stats = await _sms_reminder_tick(now)
     stats.update({f"sms_{k}": v for k, v in sms_stats.items()})
+    # HF-042 Weekly Alignment Check-in SMS: fire a Monday-morning text to
+    # opted-in users whose local wall-clock is between 9:00-9:59 AM AND
+    # who haven't captured a Harmonic Blueprint in the last 6 days.
+    align_stats = await _sms_alignment_checkin_tick(now)
+    stats.update({f"align_{k}": v for k, v in align_stats.items()})
+    return stats
+
+
+async def _sms_alignment_checkin_tick(now: datetime) -> dict:
+    """Monday-morning Weekly Alignment Check-in SMS.
+
+    Rules:
+      • User must be Pro, phone-verified, `sms_prefs.marketing_opted_in`,
+        `sms_prefs.categories.alignment_checkin`, not STOPped.
+      • Local time (derived via stored `alignment_checkin_tz_offset_minutes`,
+        defaulting to UTC when missing) must be Monday 9:00-9:59.
+      • Haven't captured an HB profile in the last 6 days.
+      • Haven't received an alignment SMS in the last 6 days (cooldown).
+      • Alignment check-in not snoozed.
+
+    Returns counters — never raises. Runs after `_sms_reminder_tick` so
+    both share the same tick and the admin sees a single set of counters.
+    """
+    stats = {"scanned": 0, "sent": 0, "skipped_wrong_hour": 0,
+             "skipped_recent_hb": 0, "skipped_recent_sms": 0,
+             "skipped_snoozed": 0, "errors": 0}
+    six_days_ago_iso = (now - timedelta(days=6)).isoformat()
+    cursor = db.users.find(
+        {
+            "phone_verified": True,
+            "phone_number": {"$exists": True, "$ne": None},
+            "sms_prefs.marketing_opted_in": True,
+            "sms_prefs.categories.alignment_checkin": True,
+            "sms_prefs.stopped_at": None,
+            "pro_until": {"$gt": now.isoformat()},
+        },
+        {
+            "_id": 0, "id": 1, "name": 1, "phone_number": 1,
+            "alignment_checkin_tz_offset_minutes": 1,
+            "alignment_checkin_snoozed_until": 1,
+            "alignment_sms_last_sent_at": 1,
+        },
+    )
+    async for u in cursor:
+        stats["scanned"] += 1
+        try:
+            # Local wall-clock gate. JS's getTimezoneOffset() is UTC-local
+            # in minutes, positive when local is BEHIND UTC — subtract to
+            # get local time from UTC. Missing offset → treat as UTC (fine
+            # for the many users who never opened the assistant, since
+            # they naturally opt into that fallback).
+            tz_off = int(u.get("alignment_checkin_tz_offset_minutes") or 0)
+            local_now = now - timedelta(minutes=tz_off)
+            if local_now.weekday() != 0 or local_now.hour != 9:
+                stats["skipped_wrong_hour"] += 1
+                continue
+
+            # Snooze check.
+            sn = u.get("alignment_checkin_snoozed_until")
+            if sn:
+                try:
+                    until = datetime.fromisoformat(sn.replace("Z", "+00:00"))
+                    if until > now:
+                        stats["skipped_snoozed"] += 1
+                        continue
+                except Exception:
+                    pass
+
+            # SMS cooldown — 6 days since last alignment SMS.
+            last_sms = u.get("alignment_sms_last_sent_at")
+            if last_sms:
+                try:
+                    lt = datetime.fromisoformat(last_sms.replace("Z", "+00:00"))
+                    if (now - lt) < timedelta(days=6):
+                        stats["skipped_recent_sms"] += 1
+                        continue
+                except Exception:
+                    pass
+
+            # HB recency — skip if user captured a blueprint in the last 6 days.
+            latest = await db.resonance_profiles.find_one(
+                {"user_id": u["id"], "created_at": {"$gt": six_days_ago_iso}},
+                {"_id": 1},
+            )
+            if latest:
+                stats["skipped_recent_hb"] += 1
+                continue
+
+            first_name = (u.get("name") or "").split()[0][:24] if u.get("name") else "friend"
+            # HF-042 spec copy — kept short, warm, contains a single actionable link.
+            body = (
+                f"Good morning {first_name}, it's time for your Solarisound "
+                f"Weekly Alignment Check-in. Come tune in at solarisound.com"
+            )
+            outcome = await send_sms(u, "alignment_checkin", body)
+            if outcome.get("sent"):
+                # Persist send-at + reset the ack flag so the assistant
+                # will show the warmer "Glad you made it" greeting on
+                # the user's next visit (within the 18h ack window).
+                await db.users.update_one(
+                    {"id": u["id"]},
+                    {"$set": {
+                        "alignment_sms_last_sent_at": now.isoformat(),
+                        "alignment_sms_ack_seen": False,
+                    }},
+                )
+                stats["sent"] += 1
+        except Exception as e:
+            logger.warning("[sms.align] user=%s err=%s", u.get("id"), type(e).__name__)
+            stats["errors"] += 1
     return stats
 
 
@@ -1485,7 +1595,7 @@ def _consume_phone_verification_token(token: str, expected_phone: str) -> str:
 #     SID (or failure reason), enabling delivery-status reconciliation via
 #     the /api/sms/webhook/status callback.
 
-SMS_CATEGORIES = ("transactional", "reminders", "recommendations", "announcements")
+SMS_CATEGORIES = ("transactional", "reminders", "recommendations", "announcements", "alignment_checkin")
 _SMS_TRANSACTIONAL = "transactional"  # always-on (unless STOP)
 _SMS_FORBIDDEN_PHRASES = (
     # Health-claim guardrails per HF-031 spec — "avoid medical, diagnostic,
@@ -1521,6 +1631,9 @@ def _default_sms_prefs() -> dict:
             "reminders": False,
             "recommendations": False,
             "announcements": False,
+            # HF-042 Weekly Alignment Check-in: default OFF. User opts in
+            # through the SMS Preferences modal — TCPA safe.
+            "alignment_checkin": False,
         },
     }
 
@@ -3807,7 +3920,111 @@ async def save_harmonic_profile(
         },
     )
     doc.pop("_id", None)
-    return {"ok": True, "profile": doc, "is_eigenmode": is_first_ever}
+    # HF-042 Weekly Alignment Streak: increment when this capture lands
+    # on a Sunday or Monday (user's local time — TZ derived from the
+    # profile's `generated_at` string if it carries an offset, else UTC).
+    streak_state = await _update_alignment_streak_on_capture(user["id"], doc)
+    return {"ok": True, "profile": doc, "is_eigenmode": is_first_ever, **streak_state}
+
+
+# ==========================================================================
+# HF-042 Weekly Alignment Streak — tracks consecutive Sun/Mon HB captures.
+# --------------------------------------------------------------------------
+# State stored on the user doc:
+#   alignment_streak: int       — current streak length
+#   alignment_streak_last_iso   — ISO week key (YYYY-Www) of last credited
+#                                 capture, so multiple captures in the
+#                                 same weekend only count once
+#   alignment_streak_milestone_shown: {"4": bool, "8": bool, ...} — which
+#                                     milestones have been surfaced to
+#                                     the user (frontend clears the flag
+#                                     via /me/alignment-streak/ack)
+# --------------------------------------------------------------------------
+
+
+def _local_weekday_from_iso(iso: str) -> tuple[int | None, str | None]:
+    """Parse an ISO timestamp and return (weekday, iso-week-key).
+    weekday: Python convention (Mon=0..Sun=6). Falls back to UTC now if
+    parsing fails. Week-key is the ISO year+week of the parsed instant,
+    used to dedupe multiple captures in a single weekend."""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except Exception:
+        dt = datetime.now(timezone.utc)
+    iso_year, iso_week, _ = dt.isocalendar()
+    return dt.weekday(), f"{iso_year}-W{iso_week:02d}"
+
+
+async def _update_alignment_streak_on_capture(user_id: str, profile_doc: dict) -> dict:
+    """Called on every HB save. If the capture lands on Sun/Mon and the
+    user hasn't already been credited this ISO week, increment the streak.
+    Returns a snapshot the client can render immediately without a
+    round-trip. Never raises — streak is a UX enhancement, not a
+    guarantee, and a bad write should not fail the capture endpoint."""
+    try:
+        weekday, week_key = _local_weekday_from_iso(profile_doc.get("generated_at") or profile_doc.get("created_at") or "")
+        u = await db.users.find_one(
+            {"id": user_id},
+            {"_id": 0, "alignment_streak": 1, "alignment_streak_last_iso": 1,
+             "alignment_streak_milestone_shown": 1},
+        ) or {}
+        cur = int(u.get("alignment_streak") or 0)
+        last_week = u.get("alignment_streak_last_iso")
+        milestones = u.get("alignment_streak_milestone_shown") or {}
+
+        # Only credit Sun/Mon captures. All other days = neutral (no
+        # increment, no reset — user gets the whole week to align).
+        credited = False
+        new_milestone = None
+        if weekday in (0, 6) and week_key != last_week:
+            # Break-detection: if the last credited week is NOT the ISO week
+            # immediately prior, reset to 1 (streak broken by a skipped week).
+            prev_key = _prev_iso_week(week_key)
+            if last_week == prev_key:
+                cur += 1
+            else:
+                cur = 1
+            credited = True
+            set_doc = {
+                "alignment_streak": cur,
+                "alignment_streak_last_iso": week_key,
+                "alignment_streak_updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            # Milestone check — surface the "one month of alignment" card
+            # once per milestone. Only the 4-week milestone is spec'd in
+            # HF-042; the shape allows adding more (8, 12, …) without a
+            # schema change.
+            for m in (4,):
+                if cur >= m and not milestones.get(str(m)):
+                    new_milestone = m
+                    set_doc[f"alignment_streak_milestone_shown.{m}"] = True
+                    break
+            await db.users.update_one({"id": user_id}, {"$set": set_doc})
+
+        return {
+            "alignment_streak": cur,
+            "alignment_streak_credited": credited,
+            "alignment_streak_new_milestone": new_milestone,
+        }
+    except Exception as e:
+        logger.warning("[alignment.streak] user=%s err=%s", user_id, type(e).__name__)
+        return {"alignment_streak": 0, "alignment_streak_credited": False,
+                "alignment_streak_new_milestone": None}
+
+
+def _prev_iso_week(week_key: str) -> str:
+    """Given "YYYY-Www", return the immediately preceding ISO week key.
+    Handles year boundary via `%G-W%V` parsing."""
+    try:
+        year, wk = week_key.split("-W")
+        year, wk = int(year), int(wk)
+        if wk > 1:
+            return f"{year}-W{wk-1:02d}"
+        # Wrap: last week of previous ISO year (52 or 53).
+        last_wk = datetime(year - 1, 12, 28).isocalendar().week  # per ISO 8601
+        return f"{year - 1}-W{last_wk:02d}"
+    except Exception:
+        return ""
 
 
 @api.post("/harmonic-blueprint/eigenmode/promote/{profile_id}")
@@ -6984,11 +7201,20 @@ async def hb_nudge_dismiss(
 
 
 @api.get("/me/alignment-checkin/status")
-async def alignment_checkin_status(user: dict = Depends(get_current_user)):
+async def alignment_checkin_status(
+    request: Request,
+    tz_offset_minutes: Optional[int] = None,
+    user: dict = Depends(get_current_user),
+):
     """Return the raw data the frontend needs to decide whether to open
     the AIAgentSheet with the Alignment Check-in greeting. The Sunday /
     Monday local-time window is checked client-side (server doesn't know
     the user's TZ) — this endpoint only reports data facts.
+
+    HF-042: the caller can also pass `?tz_offset_minutes=N` (JS's
+    `Date.getTimezoneOffset()` convention). When supplied we persist it
+    on the user doc so the Monday-morning SMS tick knows their local
+    wall clock without another round-trip.
 
     Response shape:
       {
@@ -6997,9 +7223,20 @@ async def alignment_checkin_status(user: dict = Depends(get_current_user)):
         "has_blueprint": bool,
         "eligible_data": bool,               # ≥ 6 days since last capture
                                              # AND snooze not active
+        "sms_ack_pending": bool,             # user was texted this morning
+                                             # AND assistant hasn't ack'd yet
       }
-    Frontend combines `eligible_data` with the local time-window check.
     """
+    # Persist the caller's TZ (best-effort — never fail the request).
+    if tz_offset_minutes is not None and -720 <= tz_offset_minutes <= 840:
+        try:
+            await db.users.update_one(
+                {"id": user["id"]},
+                {"$set": {"alignment_checkin_tz_offset_minutes": int(tz_offset_minutes)}},
+            )
+        except Exception:
+            pass
+
     latest = await db.resonance_profiles.find_one(
         {"user_id": user["id"]},
         {"_id": 0, "created_at": 1},
@@ -7016,7 +7253,11 @@ async def alignment_checkin_status(user: dict = Depends(get_current_user)):
 
     udoc = await db.users.find_one(
         {"id": user["id"]},
-        {"_id": 0, "alignment_checkin_snoozed_until": 1},
+        {
+            "_id": 0, "alignment_checkin_snoozed_until": 1,
+            "alignment_sms_last_sent_at": 1,
+            "alignment_sms_ack_seen": 1,
+        },
     ) or {}
     snoozed_until = udoc.get("alignment_checkin_snoozed_until")
     snooze_active = False
@@ -7027,10 +7268,19 @@ async def alignment_checkin_status(user: dict = Depends(get_current_user)):
         except Exception:
             snooze_active = False
 
-    # 6-day window: user opened alignment check-in only when no HB session
-    # in the last 6 days. Never captured = also eligible (has_blueprint=False
-    # gates the client's copy so it invites the FIRST capture instead of a
-    # "rescan" prompt).
+    # SMS acknowledgment window: if we sent the alignment SMS today
+    # (< 18h ago) and the user hasn't yet been ack'd, the assistant
+    # opens with the warmer "Glad you made it" greeting.
+    sms_ack_pending = False
+    last_sms = udoc.get("alignment_sms_last_sent_at")
+    if last_sms and not udoc.get("alignment_sms_ack_seen"):
+        try:
+            sent_at = datetime.fromisoformat(last_sms.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - sent_at) < timedelta(hours=18):
+                sms_ack_pending = True
+        except Exception:
+            sms_ack_pending = False
+
     eligible_data = (
         not snooze_active
         and (days_since is None or days_since >= 6)
@@ -7041,7 +7291,20 @@ async def alignment_checkin_status(user: dict = Depends(get_current_user)):
         "snoozed_until": snoozed_until,
         "has_blueprint": latest is not None,
         "eligible_data": eligible_data,
+        "sms_ack_pending": sms_ack_pending,
     }
+
+
+@api.post("/me/alignment-checkin/sms-ack")
+async def alignment_checkin_sms_ack(user: dict = Depends(get_current_user)):
+    """Called by the frontend after the assistant surfaces the "Glad you
+    made it for your check-in" greeting so we don't loop that copy on
+    every subsequent visit within the 18-hour ack window."""
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"alignment_sms_ack_seen": True}},
+    )
+    return {"ok": True}
 
 
 class AlignmentCheckinSnoozeIn(BaseModel):
@@ -7050,6 +7313,10 @@ class AlignmentCheckinSnoozeIn(BaseModel):
     (or malformed) we fall back to +7 days from now in UTC — always safe
     because the frontend also gates on the local weekday, so a UTC-based
     snooze that's slightly off is still absorbed by that gate.
+
+    HF-042: the offset is ALSO persisted on the user doc so the Monday-
+    morning SMS tick (`_sms_alignment_checkin_tick`) can approximate
+    each user's local wall-clock time when picking who to text.
     """
     tz_offset_minutes: Optional[int] = Field(default=None, ge=-720, le=840)
 
@@ -7085,9 +7352,69 @@ async def alignment_checkin_snooze(
 
     await db.users.update_one(
         {"id": user["id"]},
-        {"$set": {"alignment_checkin_snoozed_until": snoozed_until}},
+        {"$set": {
+            "alignment_checkin_snoozed_until": snoozed_until,
+            # HF-042: remember the caller's TZ so the SMS Monday tick can
+            # approximate their local wall-clock without another round-trip.
+            "alignment_checkin_tz_offset_minutes": tz_off,
+        }},
     )
     return {"ok": True, "snoozed_until": snoozed_until}
+
+
+@api.get("/me/alignment-streak")
+async def alignment_streak_get(user: dict = Depends(get_current_user)):
+    """HF-042: return the user's current Weekly Alignment Streak plus any
+    unacknowledged milestone (so the dashboard can render the celebration
+    card immediately after a Sun/Mon HB capture)."""
+    u = await db.users.find_one(
+        {"id": user["id"]},
+        {
+            "_id": 0,
+            "alignment_streak": 1,
+            "alignment_streak_last_iso": 1,
+            "alignment_streak_milestone_shown": 1,
+            "alignment_streak_ack_seen": 1,
+            "alignment_sms_last_sent_at": 1,
+        },
+    ) or {}
+    shown = u.get("alignment_streak_milestone_shown") or {}
+    ack = u.get("alignment_streak_ack_seen") or {}
+    # A milestone is "new" if it's been credited (shown[m]=true) but the
+    # user hasn't acknowledged it via /ack yet.
+    new_milestone = None
+    for m_str, credited in shown.items():
+        if credited and not ack.get(m_str):
+            try:
+                m = int(m_str)
+                if new_milestone is None or m > new_milestone:
+                    new_milestone = m
+            except Exception:
+                continue
+    return {
+        "streak": int(u.get("alignment_streak") or 0),
+        "last_iso_week": u.get("alignment_streak_last_iso"),
+        "new_milestone": new_milestone,
+        "alignment_sms_last_sent_at": u.get("alignment_sms_last_sent_at"),
+    }
+
+
+class AlignmentStreakAckIn(BaseModel):
+    milestone: int = Field(ge=1, le=520)
+
+
+@api.post("/me/alignment-streak/ack")
+async def alignment_streak_ack(
+    body: AlignmentStreakAckIn,
+    user: dict = Depends(get_current_user),
+):
+    """User dismissed a milestone celebration card. Mark it acknowledged
+    so /alignment-streak stops returning it as `new_milestone`."""
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {f"alignment_streak_ack_seen.{body.milestone}": True}},
+    )
+    return {"ok": True}
 
 
 # ==========================================================================
