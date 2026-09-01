@@ -653,6 +653,64 @@ export default function Dashboard({ onOpenAccount }) {
   // Fetch saved sessions
   useEffect(() => { refreshSessions(); }, []);
 
+  // HF-041 Weekly Alignment Check-in: return the alignment greeting +
+  // suggestions ONLY when the local wall clock is inside the Sun/Mon
+  // 7-11 AM window AND the server reports the user is data-eligible
+  // (≥6 days since last HB capture, snooze inactive). Returns null when
+  // the check-in isn't due — the caller falls through to the normal
+  // pattern-based greeting flow.
+  const _fetchAlignmentGreeting = useCallback(async (name) => {
+    // Window gate — Sun (0) or Mon (1), 7:00 ≤ local hour < 11:00.
+    const now = new Date();
+    const weekday = now.getDay();
+    const hour = now.getHours();
+    if (!(weekday === 0 || weekday === 1) || hour < 7 || hour >= 11) return null;
+    try {
+      const res = await Promise.race([
+        api.get('/me/alignment-checkin/status'),
+        new Promise((resolve) => setTimeout(() => resolve(null), 900)),
+      ]);
+      if (!res || !res.data || !res.data.eligible_data) return null;
+      const hasBp = !!res.data.has_blueprint;
+      const first = (name || '').split(' ')[0] || name || '';
+      // Two greeting variants — rotate so returning users don't see the
+      // same string every week. First-time capture users get a slightly
+      // gentler variant that doesn't say "drifted" (they have no baseline
+      // to have drifted from).
+      const variants = hasBp
+        ? [
+            first
+              ? `Good morning ${first}. It's a new week — would you like to run a quick Alignment Check-in to see if your frequencies have drifted?`
+              : "Good morning. It's a new week — would you like to run a quick Alignment Check-in to see if your frequencies have drifted?",
+            first
+              ? `Happy Monday ${first}. Your system might be ready for a reset — shall we check your Harmonic Blueprint this morning?`
+              : "Happy Monday. Your system might be ready for a reset — shall we check your Harmonic Blueprint this morning?",
+          ]
+        : [
+            first
+              ? `Good morning ${first}. It's a new week — a great moment to capture your first Harmonic Blueprint. Shall we?`
+              : "Good morning. It's a new week — a great moment to capture your first Harmonic Blueprint. Shall we?",
+          ];
+      const greeting = variants[Math.floor(Math.random() * variants.length)];
+      return {
+        greeting,
+        suggestions: [
+          {
+            kind: 'harmonic_blueprint',
+            label: hasBp ? 'Yes — run the Alignment Check-in' : 'Yes — capture my blueprint',
+            pro_only: true,
+          },
+          {
+            kind: 'alignment_snooze',
+            label: 'Not now',
+          },
+        ],
+      };
+    } catch (_) {
+      return null;
+    }
+  }, []);
+
   // ---- Wellness Assistant sheet (controlled by Dashboard) ------------------------
   // Greeting on each login is personalised ("Hello [Name], how are you feeling
   // right now?"). PRIOR_INSIGHTS (last 3 mood→suggestion check-ins) are
@@ -689,6 +747,10 @@ export default function Dashboard({ onOpenAccount }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [agentGreeting, setAgentGreeting] = useState('');
   const [agentInitialSuggestion, setAgentInitialSuggestion] = useState(null);
+  // HF-041: Weekly Alignment Check-in seeds the first assistant turn with
+  // a "Yes / Not now" pair. Falls back to the single `agentInitialSuggestion`
+  // for the pattern-driven callback flow.
+  const [agentInitialSuggestions, setAgentInitialSuggestions] = useState(null);
   useEffect(() => {
     if (!user) return;
     if (state.playing) return;
@@ -705,6 +767,21 @@ export default function Dashboard({ onOpenAccount }) {
     let cancelled = false;
     const stagger = setTimeout(async () => {
       if (audioEngine.playing) return;   // re-check at fire time
+      // HF-041: FIRST check the Weekly Alignment Check-in. When it fires
+      // (Sun/Mon 7-11 AM local + no HB in last 6 days + not snoozed) it
+      // takes precedence over the pattern-based greeting — one attention-
+      // grab per morning is enough.
+      const align = await _fetchAlignmentGreeting(name);
+      if (cancelled) return;
+      if (align) {
+        try { localStorage.setItem(key, today); } catch (_) { /* graceful */ }
+        setAgentGreeting(align.greeting);
+        setAgentInitialSuggestion(null);
+        setAgentInitialSuggestions(align.suggestions);
+        setAgentOpen(true);
+        return;
+      }
+      setAgentInitialSuggestions(null);
       let patternMsg = null;
       let patternCta = null;
       let patternKey = null;
@@ -756,6 +833,7 @@ export default function Dashboard({ onOpenAccount }) {
   const openCompanion = useCallback(() => {
     setAgentGreeting('How can I help you?');
     setAgentInitialSuggestion(null);
+    setAgentInitialSuggestions(null);
     setAgentOpen(true);
   }, []);
 
@@ -1096,6 +1174,16 @@ export default function Dashboard({ onOpenAccount }) {
     };
     window.addEventListener('sf:agent:sleep', onAgentSleep);
     return () => window.removeEventListener('sf:agent:sleep', onAgentSleep);
+  }, []);
+
+  // HF-041 Weekly Alignment Check-in: AIAgentSheet fires this event when
+  // the user accepts the alignment prompt. We open the HarmonicBlueprint
+  // sheet (which routes through the intro / tips ritual by default) so
+  // the "morning ritual" tips are the very first thing the user sees.
+  useEffect(() => {
+    const onOpenBlueprint = () => setHbOpen(true);
+    window.addEventListener('sf:agent:open-blueprint', onOpenBlueprint);
+    return () => window.removeEventListener('sf:agent:open-blueprint', onOpenBlueprint);
   }, []);
   // Wellness Prescription pre-fill handoff: AIAgentSheet calls this to open the
   // AI panel with the user's intent already typed in.
@@ -2700,6 +2788,7 @@ export default function Dashboard({ onOpenAccount }) {
         open={agentOpen}
         greeting={agentGreeting}
         initialSuggestion={agentInitialSuggestion}
+        initialSuggestions={agentInitialSuggestions}
         isPro={isPro}
         onClose={() => setAgentOpen(false)}
         onOpenAccount={onOpenAccount}

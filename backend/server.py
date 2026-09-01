@@ -6973,6 +6973,124 @@ async def hb_nudge_dismiss(
 
 
 # ==========================================================================
+# HF-041 — Weekly Alignment Check-in
+# --------------------------------------------------------------------------
+# Every Sunday & Monday morning (7–11 AM LOCAL time — gated frontend-side)
+# the Wellness Assistant opens with a proactive "Alignment Check-in" greeting
+# IF the user hasn't captured a Harmonic Blueprint in the last 6 days. Snooze
+# state is persisted so a "Not now" tap silences the prompt until the
+# following Sunday.
+# --------------------------------------------------------------------------
+
+
+@api.get("/me/alignment-checkin/status")
+async def alignment_checkin_status(user: dict = Depends(get_current_user)):
+    """Return the raw data the frontend needs to decide whether to open
+    the AIAgentSheet with the Alignment Check-in greeting. The Sunday /
+    Monday local-time window is checked client-side (server doesn't know
+    the user's TZ) — this endpoint only reports data facts.
+
+    Response shape:
+      {
+        "days_since_last_hb": int | null,   # null when never captured
+        "snoozed_until": iso str | null,     # server-side snooze expiry
+        "has_blueprint": bool,
+        "eligible_data": bool,               # ≥ 6 days since last capture
+                                             # AND snooze not active
+      }
+    Frontend combines `eligible_data` with the local time-window check.
+    """
+    latest = await db.resonance_profiles.find_one(
+        {"user_id": user["id"]},
+        {"_id": 0, "created_at": 1},
+        sort=[("created_at", -1)],
+    )
+    days_since = None
+    if latest and latest.get("created_at"):
+        try:
+            captured = datetime.fromisoformat(latest["created_at"].replace("Z", "+00:00"))
+            delta = datetime.now(timezone.utc) - captured
+            days_since = max(0, int(delta.total_seconds() // 86400))
+        except Exception:
+            days_since = None
+
+    udoc = await db.users.find_one(
+        {"id": user["id"]},
+        {"_id": 0, "alignment_checkin_snoozed_until": 1},
+    ) or {}
+    snoozed_until = udoc.get("alignment_checkin_snoozed_until")
+    snooze_active = False
+    if snoozed_until:
+        try:
+            until = datetime.fromisoformat(snoozed_until.replace("Z", "+00:00"))
+            snooze_active = until > datetime.now(timezone.utc)
+        except Exception:
+            snooze_active = False
+
+    # 6-day window: user opened alignment check-in only when no HB session
+    # in the last 6 days. Never captured = also eligible (has_blueprint=False
+    # gates the client's copy so it invites the FIRST capture instead of a
+    # "rescan" prompt).
+    eligible_data = (
+        not snooze_active
+        and (days_since is None or days_since >= 6)
+    )
+
+    return {
+        "days_since_last_hb": days_since,
+        "snoozed_until": snoozed_until,
+        "has_blueprint": latest is not None,
+        "eligible_data": eligible_data,
+    }
+
+
+class AlignmentCheckinSnoozeIn(BaseModel):
+    """Optional client-supplied local-time snapshot so the server can
+    compute "next Sunday midnight" in the user's timezone. When omitted
+    (or malformed) we fall back to +7 days from now in UTC — always safe
+    because the frontend also gates on the local weekday, so a UTC-based
+    snooze that's slightly off is still absorbed by that gate.
+    """
+    tz_offset_minutes: Optional[int] = Field(default=None, ge=-720, le=840)
+
+
+@api.post("/me/alignment-checkin/snooze")
+async def alignment_checkin_snooze(
+    body: AlignmentCheckinSnoozeIn,
+    user: dict = Depends(get_current_user),
+):
+    """Silence the Alignment Check-in prompt until the NEXT Sunday
+    morning. If the caller supplies its `tz_offset_minutes` (JS's
+    `new Date().getTimezoneOffset()` value — inverted-sign vs POSIX)
+    we compute Sunday 00:00 local time; otherwise +7 days from UTC now.
+    """
+    now = datetime.now(timezone.utc)
+    # JS: Date.prototype.getTimezoneOffset() returns UTC-local in MINUTES
+    # (positive when local is BEHIND UTC). Our server-side comparison
+    # runs in UTC, so we add that offset back when computing local now.
+    tz_off = body.tz_offset_minutes if body.tz_offset_minutes is not None else 0
+    local_now = now - timedelta(minutes=tz_off)
+    # Python's weekday(): Mon=0 … Sun=6. Days to add so we land on Sunday.
+    days_to_sunday = (6 - local_now.weekday()) % 7
+    # If already Sunday, snooze to NEXT Sunday, not today (avoids re-firing
+    # 15 minutes later in the same local-morning window).
+    if days_to_sunday == 0:
+        days_to_sunday = 7
+    local_next_sunday = local_now.replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    ) + timedelta(days=days_to_sunday)
+    # Convert back to UTC for storage.
+    utc_next_sunday = local_next_sunday + timedelta(minutes=tz_off)
+    snoozed_until = utc_next_sunday.isoformat()
+
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"alignment_checkin_snoozed_until": snoozed_until}},
+    )
+    return {"ok": True, "snoozed_until": snoozed_until}
+
+
+# ==========================================================================
 # NOTIFICATIONS — Phase 10 (Feb 2026)
 # --------------------------------------------------------------------------
 # Multi-surface notification system with the following user-facing surfaces:

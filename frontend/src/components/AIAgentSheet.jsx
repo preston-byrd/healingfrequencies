@@ -21,6 +21,7 @@ export default function AIAgentSheet({
   open,
   greeting,
   initialSuggestion,
+  initialSuggestions,
   isPro,
   onClose,
   onOpenAccount,
@@ -51,7 +52,14 @@ export default function AIAgentSheet({
   useEffect(() => {
     if (!open) return;
     nextIdRef.current = 0;
-    setMessages([{ id: mkId(), role: 'assistant', text: greeting || 'How can I help you?', suggestions: [] }]);
+    // HF-041: honour any host-supplied initial suggestions so the first
+    // assistant turn can offer one-tap actions (e.g. the Weekly Alignment
+    // Check-in's "Yes / Not now" pair). Falls back to the single
+    // `initialSuggestion` prop for pre-HF-041 callers, then an empty list.
+    const seedSuggestions = Array.isArray(initialSuggestions) && initialSuggestions.length > 0
+      ? initialSuggestions
+      : (initialSuggestion ? [initialSuggestion] : []);
+    setMessages([{ id: mkId(), role: 'assistant', text: greeting || 'How can I help you?', suggestions: seedSuggestions }]);
     setInput('');
     setErr('');
     setSettingsOpen(false);
@@ -223,6 +231,30 @@ export default function AIAgentSheet({
         window.dispatchEvent(new CustomEvent('sf:agent:sleep', { detail: { duration_min: s.duration_min } }));
       } else if (s.kind === 'ai_prescription') {
         onTriggerAIPrescription && onTriggerAIPrescription(s.intent);
+      } else if (s.kind === 'harmonic_blueprint') {
+        // HF-041 Weekly Alignment Check-in: user tapped "Yes, run it".
+        // Delegate to the Dashboard which owns HarmonicBlueprintSheet
+        // state — the sheet opens on the intro step and (if the user
+        // hasn't opted out) routes through the tips ritual on Begin.
+        window.dispatchEvent(new CustomEvent('sf:agent:open-blueprint'));
+      } else if (s.kind === 'alignment_snooze') {
+        // HF-041: user tapped "Not now". Persist the snooze then continue
+        // the conversation with a normal check-in greeting so the user
+        // isn't kicked out of the assistant. `close()` at the end of
+        // applySuggestion is skipped via the early-return below.
+        const tzOff = new Date().getTimezoneOffset();
+        api.post('/me/alignment-checkin/snooze', { tz_offset_minutes: tzOff })
+          .catch((e) => console.warn('[AIAgentSheet] alignment snooze failed', e));
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: mkId(),
+            role: 'assistant',
+            text: "No problem — I'll circle back next Sunday. Meanwhile, how are you feeling right now?",
+            suggestions: [],
+          },
+        ]);
+        return;
       } else if (s.kind === 'haptic_combo') {
         // One-tap card: turn haptics on with the chosen pattern, then lay
         // down the (optional) carrier sound underneath, then either start a
