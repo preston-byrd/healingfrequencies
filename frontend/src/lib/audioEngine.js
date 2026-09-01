@@ -164,49 +164,71 @@ class AudioEngine {
   async _ensureCtx() {
     let created = false;
     if (!this.ctx) {
-      // Fidelity audit: request the highest sample rate the browser + hardware
-      // will accept. Desktops + iOS handle 96 kHz cleanly. On Android we
-      // FIRST probe the OS's native rate via a throwaway context, then
-      // force an exact match — no on-the-fly resampling ever happens
-      // (largest single cause of Android choppiness). Falls back to the
-      // multi-tier attempts list if the probe fails.
+      // HF-040 Android overhaul:
+      //   - No latencyHint on Android. `'playback'` requests a large
+      //     buffer that causes underruns (choppiness) on mid-range
+      //     Android hardware. Omitting it lets the browser pick the
+      //     driver-preferred latency profile, which on Android is
+      //     usually the small "interactive" buffer.
+      //   - No forced sampleRate on Android. Forcing an explicit rate
+      //     (even the probed hardware rate) triggers the very
+      //     resampling path we were trying to avoid on some devices —
+      //     the browser will re-open the driver at a different rate
+      //     than the constructor requested and resample. Constructing
+      //     with defaults lets the browser adopt the driver's native
+      //     rate directly. We still stash `ctx.sampleRate` on the
+      //     instance for the fidelity read-out.
+      //   Desktop / iOS retain the pre-HF-040 behaviour (they benefit
+      //   from the higher-rate + playback-latency pair).
       const Ctor = window.AudioContext || window.webkitAudioContext;
-      let attempts;
       if (_IS_ANDROID) {
-        const hw = _probeHardwareSampleRate();
-        // Prefer the probed hardware rate; keep 48k / 44.1k as safety nets
-        // in case the probe returned a legal-but-non-standard value that
-        // the constructor rejects when re-passed explicitly (rare).
-        attempts = hw ? [hw, 48000, 44100] : [48000, 44100];
-        this._hardwareSampleRate = hw || null;
+        try { this.ctx = new Ctor(); } catch (e) { this.ctx = null; }
+        this._hardwareSampleRate = this.ctx ? this.ctx.sampleRate : null;
       } else {
-        attempts = [96000, 48000];
+        let attempts = [96000, 48000];
         this._hardwareSampleRate = null;
-      }
-      for (const sr of attempts) {
-        try {
-          this.ctx = new Ctor({ sampleRate: sr, latencyHint: 'playback' });
-          if (this.ctx) break;
-        } catch (e) { /* try next */ this.ctx = null; }
-      }
-      if (!this.ctx) {
-        try { this.ctx = new Ctor({ latencyHint: 'playback' }); } catch (e) { this.ctx = null; }
+        for (const sr of attempts) {
+          try {
+            this.ctx = new Ctor({ sampleRate: sr, latencyHint: 'playback' });
+            if (this.ctx) break;
+          } catch (e) { /* try next */ this.ctx = null; }
+        }
+        if (!this.ctx) {
+          try { this.ctx = new Ctor({ latencyHint: 'playback' }); } catch (e) { this.ctx = null; }
+        }
       }
       if (!this.ctx) this.ctx = new Ctor();
-      // Fidelity signal chain: master is a UNITY GainNode. No DynamicsCompressor,
-      // no WaveShaper, no Limiter anywhere — sums land on ctx.destination raw so
-      // sine oscillators render in their exact mathematical form. See getState()
-      // for the resolved sampleRate on the current device.
-      //
       // HF-037/038: on Android we OPEN the master bus at the startup floor
       // (0.65 ≈ −3.7 dB) so the audio thread has clipping headroom during
-      // the fragile first ~250 ms of playback (oscillator schedule + noise
-      // buffer alloc + first render quantum all coincide). Once ctx.state
-      // is confirmed 'running' and the settle window elapses, we ramp up
-      // to the ceiling (0.85 ≈ −1.4 dB). Desktop/iOS opens at true unity.
+      // the fragile first ~250 ms of playback. Once ctx.state is confirmed
+      // 'running' and the settle window elapses, we ramp up to the ceiling
+      // (0.85 ≈ −1.4 dB). Desktop/iOS opens at true unity.
       this.master = this.ctx.createGain();
       this.master.gain.value = _MASTER_STARTUP_FLOOR;
-      this.master.connect(this.ctx.destination);
+      // HF-040 limiter: DynamicsCompressor acting as a brick-wall limiter
+      // catches transient peaks that the static master ceiling can't. Sums
+      // of tone + φ harmonics + ambient layers can briefly exceed unity
+      // even when each source is nominally below its individual ceiling —
+      // the limiter clamps those transients before they reach the OS
+      // mixer's clip point. Placed BETWEEN master and destination so
+      // every downstream sink (destination + streamDest) sees the
+      // limited signal. Analyser stays tapped off master so cymatics
+      // visualisations track the raw mix, not the compressed envelope.
+      // Params tuned per HF-040 spec: -3 dB threshold, 12:1 ratio, fast
+      // attack (3 ms) to catch transients, short release (100 ms) so the
+      // limiter unclamps quickly between peaks and doesn't audibly duck.
+      // 0 dB knee = hard-knee limiting (no smooth transition into
+      // compression) — we want a firm ceiling, not gentle compression.
+      this._limiter = this.ctx.createDynamicsCompressor();
+      try {
+        this._limiter.threshold.value = -3;
+        this._limiter.knee.value = 0;
+        this._limiter.ratio.value = 12;
+        this._limiter.attack.value = 0.003;
+        this._limiter.release.value = 0.1;
+      } catch (e) { _warn('audio.limiter.params', e); }
+      this.master.connect(this._limiter);
+      this._limiter.connect(this.ctx.destination);
       // Bind statechange BEFORE anything else. This is the ONLY event that
       // fires reliably when the OS suspends/resumes the audio thread on
       // mobile (visibilitychange lags behind and may arrive after the
@@ -337,17 +359,26 @@ class AudioEngine {
       });
       if (filters.length === 0) return; // entirely-flat profile = no-op
 
-      // Disconnect master from every downstream destination, route through
-      // the filter chain, then reconnect to each destination.
+      // HF-040: EQ chain sits BETWEEN master and limiter so the personal
+      // EQ boost feeds a clip-protected sum. Master no longer connects
+      // directly to the limiter — it routes through the filter chain,
+      // then the chain's tail feeds the limiter, which feeds destination
+      // and the background sink.
       try { this.master.disconnect(); } catch (e) { /* not connected yet */ }
       this.master.connect(filters[0]);
       for (let i = 0; i < filters.length - 1; i++) {
         filters[i].connect(filters[i + 1]);
       }
       const tail = filters[filters.length - 1];
-      tail.connect(ctx.destination);
-      if (this._streamDest) {
-        try { tail.connect(this._streamDest); } catch (e) { _warn('audio', e); }
+      if (this._limiter) {
+        try { tail.connect(this._limiter); } catch (e) { _warn('audio', e); }
+      } else {
+        // Fallback: no limiter (shouldn't happen post-HF-040). Wire
+        // straight to destination + streamDest as before.
+        tail.connect(ctx.destination);
+        if (this._streamDest) {
+          try { tail.connect(this._streamDest); } catch (e) { _warn('audio', e); }
+        }
       }
       if (this.analyser) {
         // Re-attach the analyser to the master so the visualizer measures the
@@ -365,10 +396,16 @@ class AudioEngine {
     try { this.master.disconnect(); } catch (e) { /* */ }
     this._eqFilters.forEach((f) => { try { f.disconnect(); } catch (e) { /* */ } });
     this._eqFilters = [];
-    // Restore the canonical direct routing.
-    try { this.master.connect(this.ctx.destination); } catch (e) { _warn('audio', e); }
-    if (this._streamDest) {
-      try { this.master.connect(this._streamDest); } catch (e) { _warn('audio', e); }
+    // HF-040: restore canonical routing = master → limiter (limiter still
+    // wired to destination + streamDest from _ensureCtx / _buildBackgroundSink).
+    // Only if the limiter is missing do we fall back to a direct connection.
+    if (this._limiter) {
+      try { this.master.connect(this._limiter); } catch (e) { _warn('audio', e); }
+    } else {
+      try { this.master.connect(this.ctx.destination); } catch (e) { _warn('audio', e); }
+      if (this._streamDest) {
+        try { this.master.connect(this._streamDest); } catch (e) { _warn('audio', e); }
+      }
     }
     if (this.analyser) {
       try { this.master.connect(this.analyser); } catch (e) { _warn('audio', e); }
@@ -445,7 +482,11 @@ class AudioEngine {
     try {
       if (typeof this.ctx.createMediaStreamDestination !== 'function') return;
       const dest = this.ctx.createMediaStreamDestination();
-      this.master.connect(dest);
+      // HF-040: route the background sink OFF THE LIMITER so the mobile
+      // media stream gets the same clip-protected mix that ctx.destination
+      // gets. Falls back to master if the limiter somehow wasn't built.
+      const src = this._limiter || this.master;
+      src.connect(dest);
       const el = document.createElement('audio');
       el.setAttribute('data-role', 'audio-engine-sink');
       el.setAttribute('playsinline', '');
@@ -607,6 +648,18 @@ class AudioEngine {
       scheduleLeadMs: _SCHEDULE_LEAD_MS,
       resumeSettleMs: _RESUME_SETTLE_MS,
       hardwareSampleRate: this._hardwareSampleRate ?? null,
+      // HF-040 limiter telemetry — negative dB value showing how hard the
+      // limiter is currently clamping. -0 to -0.1 dB = mostly passing;
+      // < -3 dB sustained = mix is way too hot (ambient layers cranked or
+      // hearing-profile boost too aggressive). `reduction` was an
+      // AudioParam in older Chrome and is a plain float in current spec,
+      // so we probe both shapes.
+      limiterReductionDb: (() => {
+        const r = this._limiter && this._limiter.reduction;
+        if (r == null) return null;
+        const v = (typeof r === 'number') ? r : (typeof r?.value === 'number' ? r.value : null);
+        return v == null ? null : Number(v.toFixed(2));
+      })(),
     };
   }
 
@@ -1480,12 +1533,28 @@ class AudioEngine {
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
     let lastOut = 0;
-    // Pink-ish noise for warmth
+    // Pink-ish noise for warmth. First-pass generation writes low-amplitude
+    // (~±0.15) samples via a simple 1-pole low-pass on white noise.
+    let peak = 0;
     for (let i = 0; i < bufferSize; i++) {
       const white = Math.random() * 2 - 1;
       data[i] = (lastOut + 0.02 * white) / 1.02;
       lastOut = data[i];
-      data[i] *= 3.5;
+      const abs = Math.abs(data[i]);
+      if (abs > peak) peak = abs;
+    }
+    // HF-040 peak-normalisation. The previous `*= 3.5` static boost pushed
+    // noise samples to ~±0.5 (peak-dependent), and once several ambient
+    // layers ran into the same summing bus the combined signal easily
+    // exceeded unity — the largest source of Android distortion at
+    // steady state. Peak-normalise so every generated buffer lands at
+    // exactly ±0.35 (comfortably below unity for the tone/harmonics sum
+    // and safe for the master limiter). Guards against divide-by-zero
+    // when the random walk somehow produced a silent buffer.
+    const TARGET_PEAK = 0.35;
+    const scale = peak > 1e-6 ? (TARGET_PEAK / peak) : 1;
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] *= scale;
     }
     const src = ctx.createBufferSource();
     src.buffer = buffer;
