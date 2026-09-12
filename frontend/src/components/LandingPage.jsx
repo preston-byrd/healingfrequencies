@@ -1,7 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowRight, Mail, MessageSquare, Loader2, CheckCircle2 } from 'lucide-react';
-import PhoneInput, { isValidPhoneNumber } from 'react-phone-number-input';
-import api from '@/lib/api';
+import React, { useMemo } from 'react';
+import { ArrowRight, Mail } from 'lucide-react';
 
 /**
  * Solarisound / Healing Frequencies landing page.
@@ -12,9 +10,13 @@ import api from '@/lib/api';
  *
  * HF-044 additions:
  *   - Contact Us block with support@solarisounds.com mailto
- *   - SMS opt-in form (phone input + explicit consent checkbox + TCPA
- *     disclosure directly beneath the submit)
  *   - Legal footer links to /privacy and /terms
+ *
+ * HF-046 (Feb 2026): removed the "Weekly Alignment via text" opt-in card.
+ * The Weekly Alignment SMS toggle now lives exclusively inside the user's
+ * Account page, so signed-in users control it there. The public
+ * /api/public/sms-signup endpoint remains in place for future marketing
+ * surfaces but is no longer exposed on the landing page.
  */
 export function LandingPage({ onStart }) {
   const bars = useMemo(
@@ -87,128 +89,9 @@ export function LandingPage({ onStart }) {
         </p>
       </div>
 
-      {/* HF-044 — SMS opt-in form. Sits below the hero but above the
-          contact / legal footer so it feels like an invitation, not a
-          hard sell. */}
-      <SmsOptInSection />
-
       {/* HF-044 — Contact Us + legal links */}
       <FooterBlock />
     </div>
-  );
-}
-
-function SmsOptInSection() {
-  const [phone, setPhone] = useState('');
-  const [consent, setConsent] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState('');
-  const [err, setErr] = useState('');
-
-  const canSubmit = phone && isValidPhoneNumber(phone) && consent && !busy;
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!canSubmit) {
-      if (!phone || !isValidPhoneNumber(phone)) setErr('Please enter a valid mobile number including country code.');
-      else if (!consent) setErr('Please check the box to consent.');
-      return;
-    }
-    setBusy(true);
-    setErr('');
-    setMsg('');
-    try {
-      await api.post('/public/sms-signup', {
-        phone_number: phone,
-        consent: true,
-        source: 'landing_page',
-      });
-      setMsg("Thanks — we'll be in touch.");
-      setPhone('');
-      setConsent(false);
-    } catch (e2) {
-      const detail = e2?.response?.data?.detail;
-      setErr(typeof detail === 'string' ? detail : 'Something went wrong. Please try again.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <section
-      data-testid="landing-sms-optin"
-      className="relative z-10 w-full max-w-md mx-auto mt-10 mb-8 px-2"
-    >
-      <div className="glass p-5 sm:p-6 border border-[#5C9E8C]/25 text-left">
-        <div className="flex items-center gap-2 mb-3">
-          <MessageSquare size={13} className="text-[#72C2AC]" />
-          <span className="label-tiny text-[#72C2AC]">Weekly Alignment via text</span>
-        </div>
-        <p className="text-[13px] text-[#C9DED6] leading-relaxed mb-4">
-          Prefer a nudge over your phone? Drop your number and we'll send you the Weekly Alignment Check-in on Monday mornings.
-        </p>
-
-        <form onSubmit={submit} className="space-y-3" data-testid="landing-sms-optin-form">
-          <PhoneInput
-            data-testid="landing-sms-phone"
-            international
-            defaultCountry="US"
-            value={phone}
-            onChange={setPhone}
-            className="admin-input w-full"
-            placeholder="+1 (555) 555-5555"
-            disabled={busy}
-          />
-
-          <label className="flex items-start gap-2 text-[12px] text-[#C9DED6] leading-relaxed cursor-pointer">
-            <input
-              data-testid="landing-sms-consent"
-              type="checkbox"
-              checked={consent}
-              onChange={(e) => setConsent(e.target.checked)}
-              disabled={busy}
-              className="mt-0.5 flex-shrink-0"
-            />
-            <span>
-              I agree to receive SMS messages from Solarisound.
-            </span>
-          </label>
-
-          <button
-            type="submit"
-            data-testid="landing-sms-submit"
-            disabled={!canSubmit}
-            className="w-full py-3 rounded-full bg-[#5C9E8C] hover:bg-[#72C2AC] text-[#08120F] font-medium text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
-          >
-            {busy ? <><Loader2 size={14} className="animate-spin" /> Submitting…</> : 'Sign up for SMS'}
-          </button>
-
-          {/* Required TCPA disclosure — placed directly beneath the
-              submit button per HF-044 spec so consent evidence sits
-              flush with the action that grants it. */}
-          <p
-            data-testid="landing-sms-disclosure"
-            className="text-[10px] text-[#8A9A92] leading-relaxed pt-1"
-          >
-            By providing your phone number and checking this box, you consent to receive recurring automated account notifications and wellness reminders from Solarisound. Consent is not a condition of purchase. Msg &amp; data rates may apply. Reply STOP to cancel at any time.
-          </p>
-
-          {msg && (
-            <div
-              data-testid="landing-sms-success"
-              className="text-[12px] text-[#72C2AC] inline-flex items-center gap-1.5"
-            >
-              <CheckCircle2 size={12} /> {msg}
-            </div>
-          )}
-          {err && (
-            <div data-testid="landing-sms-error" className="text-[12px] text-[#D96C6C]">
-              {err}
-            </div>
-          )}
-        </form>
-      </div>
-    </section>
   );
 }
 
