@@ -6,6 +6,7 @@ import AuthScreen from '@/components/AuthScreen';
 import Dashboard from '@/components/Dashboard';
 import AccountDashboard from '@/components/AccountDashboard';
 import LandingPage from '@/components/LandingPage';
+import LegalPage from '@/components/LegalPage';
 import PlayDeepLink from '@/components/PlayDeepLink';
 import ResetPasswordView from '@/components/ResetPasswordView';
 import SupportBubble from '@/components/SupportBubble';
@@ -41,6 +42,18 @@ function Shell() {
     return typeof window !== 'undefined' && window.location.pathname === '/play';
   });
 
+  // HF-044 static legal routes — /privacy and /terms. Rendered outside
+  // the auth gate so unauthenticated visitors + search engines + the
+  // landing-page footer links can deep-link straight in. Kept in state
+  // so an in-app "Back" tap can dismiss without reloading the SPA.
+  const [legalVariant, setLegalVariant] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    const path = window.location.pathname;
+    if (path === '/privacy') return 'privacy';
+    if (path === '/terms') return 'terms';
+    return null;
+  });
+
   // Auto-navigate to account when returning from Stripe checkout
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -66,6 +79,21 @@ function Shell() {
           // audioEngine singleton.
           try { window.history.replaceState({}, '', '/'); } catch (e) { /* noop */ }
           setDeepLinkActive(false);
+        }}
+      />
+    );
+  }
+
+  // HF-044 /privacy + /terms static pages. Rendered ahead of the auth gate
+  // so anonymous visitors can read them. Back button strips the path from
+  // history without reload so the SPA state is preserved.
+  if (legalVariant) {
+    return (
+      <LegalPage
+        variant={legalVariant}
+        onBack={() => {
+          try { window.history.replaceState({}, '', '/'); } catch (e) { /* noop */ }
+          setLegalVariant(null);
         }}
       />
     );

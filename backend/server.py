@@ -7499,6 +7499,58 @@ class AlignmentStreakAckIn(BaseModel):
     milestone: int = Field(ge=1, le=520)
 
 
+class LandingSmsSignupIn(BaseModel):
+    """HF-044 SMS opt-in form on the landing page. Consent is captured
+    server-side so we have an auditable record if a carrier later
+    disputes the opt-in (TCPA requires this)."""
+    phone_number: str = Field(min_length=6, max_length=20)
+    consent: bool
+    source: Optional[str] = Field(default=None, max_length=64)
+
+
+@api.post("/public/sms-signup")
+async def public_sms_signup(body: LandingSmsSignupIn, request: Request):
+    """Public (no-auth) endpoint that captures an SMS opt-in from the
+    marketing landing page. Stores the phone + consent evidence in
+    `sms_prospects` so we can text them (with the same TCPA-compliant
+    consent trail as authenticated users) without forcing a full signup.
+
+    HF-044: consent MUST be True — a client-side unchecked checkbox
+    that still POSTs is rejected 400. Rate-limited per-IP.
+    """
+    ip = _client_ip(request)
+    _rate_limit_or_429(
+        f"sms-signup:ip:{ip}", capacity=4, refill_per_sec=1 / 300,
+        label="SMS signup",
+    )
+    if not body.consent:
+        raise HTTPException(status_code=400, detail="Consent is required to receive SMS.")
+    phone = _normalize_phone(body.phone_number)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "phone_number": phone,
+        "phone_last4": phone[-4:],
+        "consent_captured_at": now_iso,
+        "consent_source": (body.source or "landing_page")[:64],
+        "consent_ip": ip[:64],
+        "consent_user_agent": (request.headers.get("user-agent") or "")[:400],
+    }
+    # Upsert on phone so a repeat signup just refreshes the timestamp
+    # without creating a duplicate row.
+    await db.sms_prospects.update_one(
+        {"phone_number": phone},
+        {"$set": doc, "$setOnInsert": {"first_seen_at": now_iso}},
+        upsert=True,
+    )
+    await _audit(
+        "public.sms_signup", request,
+        metadata={"phone_last4": phone[-4:], "source": doc["consent_source"]},
+    )
+    # Deliberate generic response — never confirm whether the number
+    # already exists so we don't leak the prospect list.
+    return {"ok": True, "message": "Thanks — we'll be in touch."}
+
+
 @api.post("/me/alignment-streak/ack")
 async def alignment_streak_ack(
     body: AlignmentStreakAckIn,
