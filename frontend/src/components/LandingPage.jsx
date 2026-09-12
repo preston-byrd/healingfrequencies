@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
-import { ArrowRight, Mail } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { ArrowRight, LifeBuoy } from 'lucide-react';
+import PublicSupportModal from '@/components/PublicSupportModal';
 
 /**
  * Solarisound / Healing Frequencies landing page.
@@ -19,6 +20,7 @@ import { ArrowRight, Mail } from 'lucide-react';
  * surfaces but is no longer exposed on the landing page.
  */
 export function LandingPage({ onStart }) {
+  const [supportOpen, setSupportOpen] = useState(false);
   const bars = useMemo(
     () => Array.from({ length: 24 }).map((_, i) => ({
       id: i,
@@ -90,12 +92,15 @@ export function LandingPage({ onStart }) {
       </div>
 
       {/* HF-044 — Contact Us + legal links */}
-      <FooterBlock />
+      <FooterBlock onSupport={() => setSupportOpen(true)} />
+
+      {/* HF-048 — public support modal for logged-out visitors */}
+      <PublicSupportModal open={supportOpen} onClose={() => setSupportOpen(false)} />
     </div>
   );
 }
 
-function FooterBlock() {
+function FooterBlock({ onSupport }) {
   const goLegal = (path) => (e) => {
     e.preventDefault();
     // Push the URL so the browser bar reflects the deep-link, then reload
@@ -124,13 +129,14 @@ function FooterBlock() {
       className="relative z-10 w-full max-w-2xl mx-auto pt-6 pb-2 border-t border-[rgba(92,158,140,0.12)]"
     >
       <div className="flex flex-col sm:flex-row items-center justify-center gap-2 sm:gap-6 mb-4 text-[12px] text-[#8A9A92]">
-        <a
-          href="mailto:support@solarisounds.com"
-          data-testid="landing-contact-email"
-          className="inline-flex items-center gap-1.5 hover:text-[#C4A67A] transition-colors"
+        <button
+          type="button"
+          onClick={onSupport}
+          data-testid="landing-support-link"
+          className="inline-flex items-center gap-1.5 hover:text-[#C4A67A] transition-colors cursor-pointer"
         >
-          <Mail size={12} /> support@solarisounds.com
-        </a>
+          <LifeBuoy size={12} /> Support
+        </button>
         <span className="hidden sm:inline text-[#5A6B65]">·</span>
         <a
           href="/privacy"

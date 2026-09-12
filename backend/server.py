@@ -2850,6 +2850,136 @@ async def support_contact(
     }
 
 
+# --- Public (unauthenticated) support contact -------------------------------
+# HF-048: landing-page "Support" link opens a modal available to logged-out
+# visitors. Same Resend admin routing as the in-app SupportBubble, but the
+# request itself is anonymous (no auth). Name + email + reason + message are
+# ALL required. Rate limited per IP.
+
+class PublicSupportContactIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: EmailStr
+    reason: str = Field(min_length=1, max_length=64)
+    message: str = Field(min_length=10, max_length=4000)
+
+
+@api.post("/public/support/contact")
+async def public_support_contact(body: PublicSupportContactIn, request: Request):
+    reason_label = _SUPPORT_REASONS.get(body.reason)
+    if not reason_label:
+        raise HTTPException(status_code=400, detail="Unknown reason")
+
+    ip = _client_ip(request)
+    # Only per-IP throttle since there's no user identity. 3 messages / 10 min
+    # per IP mirrors the SupportBubble's per-IP bucket.
+    _rate_limit_or_429(
+        f"public_support:ip:{ip}", capacity=3, refill_per_sec=1 / 200,
+        label="support message",
+    )
+
+    display_name = body.name.strip()[:120]
+    reply_email = body.email.strip()[:200]
+    msg = body.message.strip()
+    when_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": None,
+        "anonymous": True,
+        "source": "landing_page",
+        "user_email": reply_email,
+        "user_name": display_name,
+        "reason_key": body.reason,
+        "reason_label": reason_label,
+        "message": msg,
+        "reply_to_email": reply_email,
+        "reply_to_name": display_name,
+        "ip": ip,
+        "user_agent": (request.headers.get("user-agent") or "")[:512],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "delivered": False,
+        "provider": "resend" if (_resend and _RESEND_API_KEY) else "none",
+        "status": "open",
+        "admin_replies": [],
+        "resolved_at": None,
+        "resolved_by": None,
+    }
+    try:
+        await db.support_messages.insert_one(doc)
+    except Exception as e:
+        logger.warning("[public_support] db insert failed: %s", type(e).__name__)
+
+    delivered = False
+    if _resend and _RESEND_API_KEY and _RESEND_ADMIN_RECIPIENT:
+        safe_name = _html_escape(display_name)
+        safe_email = _html_escape(reply_email)
+        safe_msg = _html_escape(msg).replace("\n", "<br/>")
+        safe_ip = _html_escape(ip or "unknown")[:64]
+        safe_ua = _html_escape((request.headers.get("user-agent") or "")[:256])
+        html = f"""
+        <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+          <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound · Support · Landing Page</td></tr>
+          <tr><td style="padding-top: 8px; font-size: 20px; font-weight: 500; color: #E8E3D9;">{_html_escape(reason_label)}</td></tr>
+          <tr><td style="padding-top: 4px; font-size: 13px; color: #8A9A92;">from {safe_name} &lt;{safe_email}&gt; (anonymous visitor)</td></tr>
+          <tr><td style="padding-top: 20px;">
+            <div style="background: #101F1A; border: 1px solid rgba(92,158,140,0.2); border-radius: 8px; padding: 16px; font-size: 14px; color: #E8E3D9; line-height: 1.55; white-space: pre-wrap;">{safe_msg}</div>
+          </td></tr>
+          <tr><td style="padding-top: 16px; font-family: ui-monospace, monospace; font-size: 11px; color: #5A6B65;">
+            Reason key: {_html_escape(body.reason)}<br/>
+            Source: landing_page (no user account)<br/>
+            IP: {safe_ip}<br/>
+            UA: {safe_ua}<br/>
+            {when_iso}
+          </td></tr>
+          <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65;">
+            — Reply directly to reach the visitor at {safe_email}
+          </td></tr>
+        </table>
+        """
+        try:
+            def _send_with_reply_to():
+                if not _resend or not _RESEND_API_KEY:
+                    return None
+                payload = {
+                    "from": _RESEND_SENDER,
+                    "to": [_RESEND_ADMIN_RECIPIENT],
+                    "subject": f"[{reason_label}] - Solarisound Support (Landing Page)",
+                    "html": html,
+                    "reply_to": [reply_email],
+                }
+                try:
+                    result = _resend.Emails.send(payload)
+                    return (result or {}).get("id")
+                except Exception as e:
+                    logger.warning("[resend] public support send failed: %s", type(e).__name__)
+                    return None
+            resend_id = await asyncio.to_thread(_send_with_reply_to)
+            if resend_id:
+                delivered = True
+                try:
+                    await db.support_messages.update_one(
+                        {"id": doc["id"]},
+                        {"$set": {"delivered": True, "resend_id": resend_id}},
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("[public_support] resend dispatch error: %s", type(e).__name__)
+
+    # User ack — same warm confirmation the logged-in flow sends.
+    asyncio.create_task(
+        _send_support_ack_to_user(reply_email, display_name, reason_label, msg)
+    )
+
+    return {
+        "ok": True,
+        "delivered": delivered,
+        "message": "Thank you for reaching out. A member of our team will get back to you soon.",
+    }
+
+
+
+
 # --- Admin Support Inbox ----------------------------------------------------
 # Admin-only endpoints for browsing, replying to, and resolving support
 # tickets that users submit via the floating Support Bubble on the frontend.
