@@ -153,6 +153,12 @@ function FooterBlock() {
       <p className="text-[10px] tracking-[0.4em] uppercase text-[#8A9A92]/60 text-center">
         Powered by silence
       </p>
+      <p
+        data-testid="landing-copyright"
+        className="mt-2 text-[10px] tracking-[0.15em] text-[#8A9A92]/50 text-center"
+      >
+        © 2026 Solarisound. All Rights Reserved
+      </p>
     </footer>
   );
 }
