@@ -482,6 +482,196 @@ async def _cancellation_followup_tick(now: datetime) -> dict:
     return stats
 
 
+# --- HF-047: Pro-access expiration reminder --------------------------------
+# Fires an email exactly ~72 hours before a user's Pro access ends, covering:
+#   • Stripe 7-day free trial about to convert
+#   • Stripe monthly / annual paid subscription that will auto-renew
+#   • Promo / complimentary access about to lapse (no Stripe sub)
+# Exclusions:
+#   • cancel_at_period_end == true  → user already opted out of renewal
+#   • pro_last_renewed_at within 24h → user just paid, don't re-nag
+#   • nudge_unsubscribed == true    → single opt-out for all lifecycle mail
+#   • already sent for THIS expiration (unique index on (user_id, expires_at))
+
+def _expiration_tier_from_user(user: dict) -> str:
+    """Return one of: 'trial' (Stripe trialing), 'promo' (comp/promo grant),
+    or 'paid' (any active paid Stripe subscription). Falls back to 'paid' if
+    the user has pro_until with no other signal."""
+    sub_status = user.get("stripe_subscription_status")
+    if sub_status == "trialing":
+        return "trial"
+    pro_source = user.get("pro_source") or ""
+    if pro_source.startswith("promo:"):
+        return "promo"
+    return "paid"
+
+
+def _expiration_headline_for(tier: str) -> str:
+    if tier == "trial":
+        return "Your Solarisound trial is ending soon"
+    if tier == "promo":
+        return "Your Solarisound complimentary access is ending soon"
+    return "Your Solarisound Pro access is ending soon"
+
+
+async def _send_expiration_notice_email(
+    *, user_email: str, user_name: str, tier: str,
+    expires_at_iso: str, renew_url: str, settings_url: str,
+) -> Optional[str]:
+    """Compose + send the "3 days left" expiration reminder. Silent no-op
+    when Resend isn't configured so preview / local dev remain quiet."""
+    if not _resend or not _RESEND_API_KEY:
+        return None
+    safe_name = _html_escape((user_name or "").strip())[:120]
+    hello = f"Hi {safe_name}," if safe_name else "Hi,"
+    if tier == "trial":
+        access_label = "Your 7-day trial"
+    elif tier == "promo":
+        access_label = "Your complimentary access"
+    else:
+        access_label = "Your Pro access"
+    # Human-friendly date, e.g. "Feb 15, 2026" — silently swallow parse errors.
+    try:
+        ends_dt = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+        ends_pretty = ends_dt.strftime("%B %-d, %Y")
+    except Exception:
+        ends_pretty = ""
+    ends_block = f' <span style="color:#8A9A92">(on {ends_pretty})</span>' if ends_pretty else ""
+
+    subject = "Your Solarisound Pro access is ending soon"
+    html = f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 0; padding: 32px; background: #08120F; color: #E8E3D9; border-radius: 14px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound</td></tr>
+      <tr><td style="padding-top: 14px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 30px; font-weight: 400; color: #E8E3D9; line-height: 1.2;">
+        {_html_escape(_expiration_headline_for(tier))}
+      </td></tr>
+      <tr><td style="padding-top: 20px; font-size: 15px; color: #C9DED6; line-height: 1.7;">
+        {hello} {access_label} is ending in <strong style="color:#72C2AC">3 days</strong>{ends_block}. We hope you've enjoyed your journey back to resonance.
+      </td></tr>
+      <tr><td style="padding-top: 14px; font-size: 15px; color: #C9DED6; line-height: 1.7;">
+        To keep access to your <strong style="color:#E8E3D9">Harmonic Blueprint</strong>, <strong style="color:#E8E3D9">Flow Mode</strong>, and saved sessions, you can renew your plan today. If you choose not to renew, your sessions will be safely locked until you decide to return.
+      </td></tr>
+      <tr><td style="padding-top: 28px;">
+        <a href="{renew_url}" style="display: inline-block; padding: 13px 26px; background: #C4A67A; color: #08120F; border-radius: 999px; text-decoration: none; font-weight: 500; font-size: 14px; margin-right: 10px; margin-bottom: 10px;" data-testid="expiration-renew-cta">Renew Subscription</a>
+        <a href="{settings_url}" style="display: inline-block; padding: 13px 26px; background: transparent; color: #72C2AC; border: 1px solid rgba(114,194,172,0.5); border-radius: 999px; text-decoration: none; font-weight: 500; font-size: 14px; margin-bottom: 10px;" data-testid="expiration-settings-cta">Manage Settings</a>
+      </td></tr>
+      <tr><td style="padding-top: 30px; font-size: 11px; color: #5A6B65; line-height: 1.6;">
+        You're receiving this because your Solarisound Pro access is scheduled to end soon. To stop lifecycle emails from Solarisound, use the unsubscribe link at the bottom of any nudge email or update your preferences from Account Settings.
+      </td></tr>
+    </table>
+    """
+    try:
+        return await asyncio.to_thread(_send_email_sync, user_email, subject, html)
+    except Exception as e:
+        logger.warning("[resend] expiration notice failed: %s", type(e).__name__)
+        return None
+
+
+async def _expiration_notice_tick(now: datetime) -> dict:
+    """Scan for users whose Pro access ends between 72h and 96h from now,
+    then send a one-shot expiration reminder. Skips cancelled auto-renewals,
+    just-renewed users, and previously-notified expirations."""
+    stats = {
+        "scanned": 0, "sent": 0, "skipped_cancelled_at_period_end": 0,
+        "skipped_just_renewed": 0, "skipped_unsub": 0,
+        "skipped_already_sent": 0, "errors": 0,
+    }
+    window_start = (now + timedelta(hours=72)).isoformat()
+    window_end = (now + timedelta(hours=96)).isoformat()
+    just_renewed_cutoff = (now - timedelta(hours=24)).isoformat()
+
+    cursor = db.users.find(
+        {
+            "pro_until": {"$gte": window_start, "$lt": window_end},
+            "$or": [
+                {"nudge_unsubscribed": {"$ne": True}},
+                {"nudge_unsubscribed": {"$exists": False}},
+            ],
+        },
+        {
+            "_id": 0, "id": 1, "email": 1, "name": 1,
+            "pro_until": 1, "pro_source": 1,
+            "stripe_subscription_status": 1,
+            "stripe_cancel_at_period_end": 1,
+            "pro_last_renewed_at": 1,
+            "nudge_unsubscribed": 1,
+            "role": 1,
+        },
+    )
+    base = _build_frontend_url()
+    renew_url = f"{base}/account?src=renew"
+    settings_url = f"{base}/account?src=cancel"
+
+    async for u in cursor:
+        stats["scanned"] += 1
+        # Never send to admin accounts (lifetime access).
+        if u.get("role") == "admin":
+            continue
+        if u.get("nudge_unsubscribed"):
+            stats["skipped_unsub"] += 1
+            continue
+        # If the user has already turned off auto-renewal they are knowingly
+        # letting the sub lapse — don't nag.
+        if u.get("stripe_cancel_at_period_end"):
+            stats["skipped_cancelled_at_period_end"] += 1
+            continue
+        # If Stripe extended their window within the last 24h, they just
+        # paid — skip.
+        last_renewed = u.get("pro_last_renewed_at")
+        if last_renewed and last_renewed >= just_renewed_cutoff:
+            stats["skipped_just_renewed"] += 1
+            continue
+        # Idempotency: one notice per (user_id, expires_at) pair.
+        expires_at = u.get("pro_until")
+        if not expires_at:
+            continue
+        already = await db.expiration_notices.find_one(
+            {"user_id": u["id"], "expires_at": expires_at},
+            {"_id": 0, "id": 1},
+        )
+        if already:
+            stats["skipped_already_sent"] += 1
+            continue
+
+        tier = _expiration_tier_from_user(u)
+        try:
+            resend_id = await _send_expiration_notice_email(
+                user_email=u.get("email", ""),
+                user_name=u.get("name", ""),
+                tier=tier,
+                expires_at_iso=expires_at,
+                renew_url=renew_url,
+                settings_url=settings_url,
+            )
+            doc = {
+                "id": str(uuid.uuid4()),
+                "user_id": u["id"],
+                "user_email": u.get("email"),
+                "tier": tier,
+                "expires_at": expires_at,
+                "sent_at": now.isoformat(),
+                "delivered": bool(resend_id),
+                "resend_id": resend_id,
+            }
+            try:
+                await db.expiration_notices.insert_one(doc)
+            except Exception as e:
+                # Unique-index race — treat as already sent.
+                logger.info("[expire] insert race user=%s: %s", u.get("id"), type(e).__name__)
+                stats["skipped_already_sent"] += 1
+                continue
+            if resend_id:
+                stats["sent"] += 1
+            else:
+                stats["errors"] += 1
+        except Exception as e:
+            logger.warning("[expire] user=%s err=%s", u.get("id"), type(e).__name__)
+            stats["errors"] += 1
+    return stats
+
+
+
+
 
 async def _send_support_ack_to_user(user_email: str, user_name: str, reason_label: str, msg: str) -> None:
     """Confirmation email sent to the user acknowledging that we received
@@ -998,6 +1188,9 @@ async def _reengagement_tick() -> dict:
     # HF-043: "We miss you — come back" email 3 days after account close.
     cancel_stats = await _cancellation_followup_tick(now)
     stats.update({f"cancel_{k}": v for k, v in cancel_stats.items()})
+    # HF-047: 72-hour Pro-access expiration reminder.
+    expire_stats = await _expiration_notice_tick(now)
+    stats.update({f"expire_{k}": v for k, v in expire_stats.items()})
     return stats
 
 
@@ -3183,6 +3376,16 @@ async def admin_email_engagement_tick(
     return {"ok": True, "stats": stats}
 
 
+@api.post("/admin/expiration-notices/tick")
+async def admin_expiration_notice_tick(user: dict = Depends(get_current_user)):
+    """HF-047 admin diagnostic — run one pass of the 72h Pro-access
+    expiration reminder scan RIGHT NOW. Returns the counter dict from
+    `_expiration_notice_tick`. All exclusion gates (cancel_at_period_end,
+    just-renewed, unsubscribed, already-sent) still apply so this cannot
+    accidentally spam."""
+    _require_admin(user)
+    stats = await _expiration_notice_tick(datetime.now(timezone.utc))
+    return {"ok": True, "stats": stats}
 
 
 # --- Sessions (favorites) -----------------------------------------------------
@@ -8395,6 +8598,27 @@ async def _sync_subscription_to_user(user_id: str, subscription) -> dict:
         patch["plan"] = "trial" if sub_status == "trialing" else "pro"
         if sub_status == "trialing":
             patch["trial_used"] = True
+        # HF-047: stamp `pro_last_renewed_at` whenever the Stripe subscription
+        # extends the pro window forward. This powers the expiration-notice
+        # "already renewed in the last 24h" exclusion so a user who upgrades
+        # in the 72h danger zone doesn't also get the reminder email.
+        try:
+            prev = await db.users.find_one(
+                {"id": user_id},
+                {"_id": 0, "pro_until": 1},
+            ) or {}
+            prev_iso = prev.get("pro_until")
+            advanced = True
+            if prev_iso:
+                try:
+                    prev_dt = datetime.fromisoformat(prev_iso.replace("Z", "+00:00"))
+                    advanced = pro_until_dt > prev_dt
+                except Exception:
+                    advanced = True
+            if advanced:
+                patch["pro_last_renewed_at"] = datetime.now(timezone.utc).isoformat()
+        except Exception:
+            pass
     elif sub_status in ("canceled", "incomplete_expired", "unpaid"):
         # Revoke access by clearing pro_until in the past
         patch["pro_until"] = datetime.now(timezone.utc).isoformat()
@@ -10176,6 +10400,12 @@ async def _lifespan_startup():
     await db.email_nudges.create_index([("sent_at", -1)])
     await db.email_nudges.create_index([("user_id", 1), ("sent_at", -1)])
     await db.email_nudges.create_index([("user_id", 1), ("tier", 1), ("sent_at", -1)])
+    # HF-047 expiration reminder — one row per (user, expires_at) so we never
+    # double-fire for the same billing cycle.
+    await db.expiration_notices.create_index(
+        [("user_id", 1), ("expires_at", 1)], unique=True
+    )
+    await db.expiration_notices.create_index([("sent_at", -1)])
     # Unsubscribe token lookup for the public one-tap unsub / prefs links.
     await db.users.create_index("nudge_unsubscribe_token", sparse=True)
     # Seed default feature announcements the first time the app boots (idempotent).
