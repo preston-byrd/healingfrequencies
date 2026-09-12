@@ -874,3 +874,11 @@
   - **Verified** — Backend endpoint returns `200` on valid signup, `400` on `consent:false` and on malformed phone. Live Playwright smoke: landing page renders all 9 new elements; `/privacy` and `/terms` routes both render with `legal-page-privacy` + `legal-page-terms` present. Screenshot confirms visual continuity — same aurora background, glass cards, φ wordmark, Cormorant Garamond H1s.
   - **NOTE** — Fix lives in **preview**. Redeploy to reach solarisound.com. Also: legal copy in `LegalPage.jsx` is a plain-language starting draft — please have counsel review the Privacy Policy + Terms of Service before publishing to production.
 
+- **HF-045 Legal page copy hardening (Feb 12, 2026)**: Merged mandatory legal blocks into the existing `/privacy` and `/terms` drafts. Kept prior sections intact; added:
+  - **Terms** — highlighted `terms-medical-disclaimer` callout block (gold border + tint) placed immediately after Acceptance, containing the verbatim IMPORTANT MEDICAL DISCLAIMER (wellness app, not a medical device, informational/educational only, seek qualified providers, use at own risk).
+  - **Privacy** — new `Harmonic Blueprint & Voice Data Privacy` section (Local Processing via Web Audio API, only Eigenmode Profile stored, user-controlled reset/delete). Replaced the older "SMS specifics" copy with the more explicit **SMS Communications** section (No Third-Party Sharing; STOP opt-out with confirmation SMS; not sold/shared; consent-not-condition; HELP for help). Extended Data Retention with "Users can delete their accounts and data at any time via the profile settings."
+  - Effective date bumped to `February 12, 2026` on both pages; added `data-testid="legal-effective-date"` and `data-testid="terms-medical-disclaimer"`.
+  - **Files** — `frontend/src/components/LegalPage.jsx` (merge-only edits, no route or backend changes).
+  - **Verified** — Playwright screenshots on `/terms` and `/privacy` confirm the Medical Disclaimer callout renders with the gold treatment and both new Privacy sections appear in the correct order without breaking existing sections.
+
+

@@ -44,8 +44,8 @@ export default function LegalPage({ variant = 'privacy', onBack }) {
         <h1 className="font-display font-light text-[#E8E3D9] text-3xl sm:text-5xl leading-tight mb-4">
           {title}
         </h1>
-        <p className="text-[11px] tracking-widest uppercase text-[#5C9E8C]/80 mb-10">
-          Effective February 2026
+        <p className="text-[11px] tracking-widest uppercase text-[#5C9E8C]/80 mb-10" data-testid="legal-effective-date">
+          Effective February 12, 2026
         </p>
 
         {isPrivacy ? <PrivacyBody /> : <TermsBody />}
@@ -102,9 +102,35 @@ function PrivacyBody() {
         </p>
       </Section>
 
-      <Section title="SMS specifics">
+      <Section title="Harmonic Blueprint & Voice Data Privacy">
         <p>
-          By providing your phone number and checking the consent box, you agree to receive recurring automated account notifications and wellness reminders from Solarisound. Consent is not a condition of purchase. Message and data rates may apply. Reply STOP to cancel at any time. Reply HELP for help.
+          Solarisound offers a personalized <strong>Harmonic Blueprint</strong> feature that analyzes your unique frequency signature. To protect your privacy:
+        </p>
+        <ul className="list-disc pl-5 space-y-2">
+          <li>
+            <strong>Local Processing:</strong> When you record your voice for analysis, the audio is processed locally on your device using the Web Audio API. Your actual voice recording is never uploaded to, stored on, or transmitted to our servers.
+          </li>
+          <li>
+            <strong>Data Storage:</strong> We only store the resulting mathematical frequency profile (the <em>Eigenmode Profile</em>) to provide your personalized sound journeys and track your resonance progress over time.
+          </li>
+          <li>
+            <strong>User Control:</strong> You may reset or delete your Eigenmode Profile and all associated resonance data at any time through your Account Settings.
+          </li>
+        </ul>
+      </Section>
+
+      <Section title="SMS Communications">
+        <p>
+          If you opt-in to receive SMS notifications, Solarisound will use your phone number solely to deliver account alerts, re-engagement nudges, and wellness reminders.
+        </p>
+        <p>
+          <strong>No Third-Party Sharing:</strong> Your mobile information will not be shared with third parties or affiliates for marketing or promotional purposes.
+        </p>
+        <p>
+          <strong>Opt-out:</strong> You can cancel the SMS service at any time by texting <strong>STOP</strong> to our short code or toggling the setting in your profile. After you send the SMS message <strong>STOP</strong> to us, we will send you an SMS message to confirm that you have been unsubscribed.
+        </p>
+        <p>
+          Phone numbers provided for SMS alerts are used only for account notifications and wellness reminders. We do not sell or share your phone number with third parties for marketing purposes. Consent is not a condition of purchase. Message and data rates may apply. Message frequency varies. Reply <strong>HELP</strong> for help.
         </p>
         <p>
           We record every SMS we send (category, delivery status, and the last four digits of your phone number) so the admin team can audit deliverability. Full phone numbers are never written to our audit log.
@@ -124,6 +150,9 @@ function PrivacyBody() {
         <p>
           Account data is retained while your account is active and for a reasonable period after cancellation so you can reactivate. Audit logs are retained for a longer window to support security investigations.
         </p>
+        <p>
+          <strong>Users can delete their accounts and data at any time via the profile settings.</strong> Deletion is permanent and removes your Eigenmode Profile, Harmonic Blueprint history, and personalization data.
+        </p>
       </Section>
     </div>
   );
@@ -137,6 +166,23 @@ function TermsBody() {
           By creating a Solarisound account or continuing to use the service, you agree to these Terms of Service and to our Privacy Policy. If you do not agree, please do not use Solarisound.
         </p>
       </Section>
+
+      <div
+        data-testid="terms-medical-disclaimer"
+        className="mb-9 p-5 sm:p-6 rounded-lg border border-[rgba(196,166,122,0.35)] bg-[rgba(196,166,122,0.06)]"
+      >
+        <div className="text-[10px] tracking-[0.3em] uppercase text-[#C4A67A] mb-3">
+          Important Medical Disclaimer
+        </div>
+        <div className="text-[14px] text-[#E8E3D9] leading-relaxed space-y-3">
+          <p>
+            Solarisound is a wellness and self-care application designed to provide sound-based relaxation and meditative experiences. <strong>Solarisound is not a medical device</strong>, and the content provided—including frequencies, soundscapes, and the Harmonic Blueprint analysis—is for informational and educational purposes only.
+          </p>
+          <p>
+            Our services do not constitute medical advice, diagnosis, or treatment. Always seek the advice of your physician or other qualified health providers with any questions you may have regarding a medical condition or mental health concern. Never disregard professional medical advice or delay in seeking it because of something you have experienced within the Solarisound app. <strong>Use of Solarisound is at your own risk.</strong>
+          </p>
+        </div>
+      </div>
 
       <Section title="What Solarisound is">
         <p>
