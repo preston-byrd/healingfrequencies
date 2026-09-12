@@ -685,20 +685,26 @@ async def _send_support_ack_to_user(user_email: str, user_name: str, reason_labe
     safe_msg = _html_escape(msg).replace("\n", "<br/>")
     hello = f"Hi {safe_name}," if safe_name else "Hi,"
     html = f"""
-    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 540px; margin: 0; padding: 28px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
-      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound · Support</td></tr>
-      <tr><td style="padding-top: 12px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 26px; font-weight: 400; color: #E8E3D9;">We received your message</td></tr>
-      <tr><td style="padding-top: 14px; font-size: 14px; color: #C9DED6; line-height: 1.6;">
-        {hello} thanks for reaching out about <span style="color: #72C2AC;">{safe_reason}</span>. A real person on our team will read this and get back to you shortly. If there's more context we should know, just reply directly to this email.
-      </td></tr>
-      <tr><td style="padding-top: 22px; font-size: 11px; color: #5A6B65; letter-spacing: 1px; text-transform: uppercase;">A copy of what you sent</td></tr>
-      <tr><td style="padding-top: 8px;">
-        <div style="background: #101F1A; border-left: 2px solid rgba(196,166,122,0.4); padding: 14px 16px; font-size: 13px; color: #C9DED6; line-height: 1.55; white-space: pre-wrap;">{safe_msg}</div>
-      </td></tr>
-      <tr><td style="padding-top: 24px; font-size: 12px; color: #8A9A92;">
-        Meanwhile, keep tuning — we'll be in touch soon.
-      </td></tr>
-      <tr><td style="padding-top: 24px; font-size: 11px; color: #5A6B65;">— The Solarisound team</td></tr>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: #08120F; padding: 24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 640px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #08120F; color: #E8E3D9; border-radius: 14px;">
+            <tr><td style="padding: 32px 32px 0 32px; font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound · Support</td></tr>
+            <tr><td style="padding: 14px 32px 0 32px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 28px; font-weight: 400; color: #E8E3D9; line-height: 1.2;">We received your message</td></tr>
+            <tr><td style="padding: 18px 32px 0 32px; font-size: 15px; color: #C9DED6; line-height: 1.7;">
+              {hello} thanks for reaching out about <span style="color: #72C2AC;">{safe_reason}</span>. A real person on our team will read this and get back to you shortly. If there's more context we should know, just reply directly to this email.
+            </td></tr>
+            <tr><td style="padding: 26px 32px 0 32px; font-size: 11px; color: #5A6B65; letter-spacing: 1.5px; text-transform: uppercase;">A copy of what you sent</td></tr>
+            <tr><td style="padding: 10px 32px 0 32px;">
+              <div style="background: #101F1A; border-left: 3px solid rgba(196,166,122,0.4); padding: 16px 20px; font-size: 14px; color: #C9DED6; line-height: 1.65; white-space: pre-wrap; border-radius: 4px;">{safe_msg}</div>
+            </td></tr>
+            <tr><td style="padding: 26px 32px 0 32px; font-size: 13px; color: #8A9A92; line-height: 1.6;">
+              Meanwhile, keep tuning — we'll be in touch soon.
+            </td></tr>
+            <tr><td style="padding: 22px 32px 32px 32px; font-size: 12px; color: #5A6B65;">— The Solarisound team</td></tr>
+          </table>
+        </td>
+      </tr>
     </table>
     """
     try:
@@ -3105,17 +3111,23 @@ async def admin_support_reply(
         safe_original = _html_escape(doc.get("message", "")).replace("\n", "<br/>")
         safe_reason = _html_escape(doc.get("reason_label", "Support"))
         html = f"""
-        <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 0; padding: 24px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
-          <tr><td style="font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · Reply</td></tr>
-          <tr><td style="padding-top: 8px; font-size: 20px; font-weight: 500; color: #E8E3D9;">Re: {safe_reason}</td></tr>
-          <tr><td style="padding-top: 20px;">
-            <div style="background: #101F1A; border: 1px solid rgba(92,158,140,0.2); border-radius: 8px; padding: 16px; font-size: 14px; color: #E8E3D9; line-height: 1.55; white-space: pre-wrap;">{safe_reply}</div>
-          </td></tr>
-          <tr><td style="padding-top: 20px; font-size: 11px; color: #5A6B65; letter-spacing: 1px; text-transform: uppercase;">Your original message</td></tr>
-          <tr><td style="padding-top: 8px;">
-            <div style="background: rgba(20,38,31,0.35); border-left: 2px solid rgba(196,166,122,0.4); padding: 12px 14px; font-size: 12px; color: #8A9A92; line-height: 1.5; white-space: pre-wrap;">{safe_original}</div>
-          </td></tr>
-          <tr><td style="padding-top: 24px; font-size: 11px; color: #5A6B65;">— The Solarisound team</td></tr>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: #08120F; padding: 24px 12px;">
+          <tr>
+            <td align="center">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 640px; margin: 0 auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #08120F; color: #E8E3D9; border-radius: 14px;">
+                <tr><td style="padding: 32px 32px 0 32px; font-size: 11px; letter-spacing: 2px; color: #72C2AC; text-transform: uppercase;">Solarisound · Reply</td></tr>
+                <tr><td style="padding: 12px 32px 0 32px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 26px; font-weight: 400; color: #E8E3D9; line-height: 1.2;">Re: {safe_reason}</td></tr>
+                <tr><td style="padding: 24px 32px 0 32px;">
+                  <div style="background: #101F1A; border: 1px solid rgba(92,158,140,0.2); border-radius: 10px; padding: 20px 22px; font-size: 15px; color: #E8E3D9; line-height: 1.7; white-space: pre-wrap;">{safe_reply}</div>
+                </td></tr>
+                <tr><td style="padding: 26px 32px 0 32px; font-size: 11px; color: #5A6B65; letter-spacing: 1.5px; text-transform: uppercase;">Your original message</td></tr>
+                <tr><td style="padding: 10px 32px 0 32px;">
+                  <div style="background: rgba(20,38,31,0.4); border-left: 3px solid rgba(196,166,122,0.4); padding: 14px 18px; font-size: 13px; color: #8A9A92; line-height: 1.6; white-space: pre-wrap; border-radius: 4px;">{safe_original}</div>
+                </td></tr>
+                <tr><td style="padding: 26px 32px 32px 32px; font-size: 12px; color: #5A6B65;">— The Solarisound team</td></tr>
+              </table>
+            </td>
+          </tr>
         </table>
         """
         def _send():
