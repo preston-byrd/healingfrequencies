@@ -10,6 +10,7 @@ import SoundLineage from '@/components/SoundLineage';
 import AdminSupportInbox from '@/components/AdminSupportInbox';
 import AdminEmailEngagement from '@/components/AdminEmailEngagement';
 import AdminSMSStats from '@/components/AdminSMSStats';
+import CancelAccountModal from '@/components/CancelAccountModal';
 import AdminFrequencyDefaults from '@/components/AdminFrequencyDefaults';
 import AdminUserProfileModal from '@/components/AdminUserProfileModal';
 import { UserCog } from 'lucide-react';
@@ -235,6 +236,28 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
     } catch (e) {
       setErr(formatApiError(e));
     } finally {
+      setBusy('');
+    }
+  };
+
+  // HF-043 Cancel service (close account) — separate from cancelSubscription.
+  // Uses a two-step confirmation modal (see `<CancelAccountModal>` below) so
+  // it can't fire accidentally: user must type "close" AND press the button.
+  const [closeModalOpen, setCloseModalOpen] = useState(false);
+  const cancelAccount = async (reason) => {
+    setBusy('cancel-account'); setErr(''); setMsg('');
+    try {
+      await api.post('/me/cancel-account', { reason: reason || null });
+      // Server has already invalidated our bearer token — a `.get('/auth/me')`
+      // will now 401. Blow local auth state and route to the sign-in screen.
+      try { localStorage.removeItem('token'); } catch (_) { /* graceful */ }
+      try { localStorage.removeItem('solar:user'); } catch (_) { /* graceful */ }
+      // Give the user a moment to see the confirmation copy, then hard-reload
+      // so App.jsx's auth bootstrap redirects them to the landing screen.
+      setMsg('Your account is closed. You\'ll continue to receive occasional emails and texts about coming back — reply STOP or use the email unsubscribe link to stop those. Redirecting to the sign-in page…');
+      setTimeout(() => { window.location.href = '/'; }, 2600);
+    } catch (e) {
+      setErr(formatApiError(e));
       setBusy('');
     }
   };
@@ -1283,7 +1306,47 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             }}
           />
         )}
+
+        {/* HF-043 Cancel service — placed at the very bottom of the account
+            dashboard so it never overshadows the primary actions. Distinct
+            from "Cancel subscription" (which downgrades to Basic): this
+            closes the WHOLE account. User is auto-reactivated on next
+            successful login. */}
+        {!sub.is_admin && (
+          <div
+            data-testid="account-cancel-section"
+            className="glass p-6 border border-[#D96C6C]/25"
+          >
+            <div className="label-tiny mb-2 text-[#D96C6C]">Cancel service</div>
+            <div className="text-[14px] text-[#E8E3D9] leading-relaxed mb-2">
+              Close your Solarisound account.
+            </div>
+            <div className="text-[12px] text-[#8A9A92] leading-relaxed mb-4">
+              Any active Pro subscription will cancel at the end of the current billing period. You'll continue to receive occasional emails and texts from us about coming back — you can opt out of those from any message. Your Harmonic Blueprint, journeys, and settings stay saved, so signing in again will reactivate everything exactly where you left off.
+            </div>
+            <button
+              data-testid="account-cancel-service-button"
+              onClick={() => setCloseModalOpen(true)}
+              disabled={!!busy}
+              className="text-[13px] px-4 py-2 rounded-full border border-[#D96C6C]/40 text-[#D96C6C] hover:bg-[#D96C6C]/10 transition-colors disabled:opacity-40"
+            >
+              Cancel service
+            </button>
+          </div>
+        )}
       </div>
+
+      {closeModalOpen && (
+        <CancelAccountModal
+          onCancel={() => setCloseModalOpen(false)}
+          onConfirm={(reason) => {
+            setCloseModalOpen(false);
+            cancelAccount(reason);
+          }}
+          busy={busy === 'cancel-account'}
+          hasActiveSub={!!(sub.pro && !sub.is_admin)}
+        />
+      )}
 
       {celebratingPlan && (
         <ThankYouCelebration

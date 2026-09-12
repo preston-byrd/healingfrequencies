@@ -87,7 +87,20 @@ export default function AuthScreen() {
     setCanRetry(false);
     setBusy(true);
     try {
-      await login(email, password);
+      const result = await login(email, password);
+      // HF-043: server marks a reactivated account with `reactivated_from`
+      // (ISO of the prior cancellation). Surface a welcome-back toast so
+      // the user knows their close-account was undone by this sign-in and
+      // they didn't stumble into a support-worthy state.
+      if (result?.reactivated_from) {
+        try {
+          const { toast } = await import('sonner');
+          toast.success('Welcome back — your account is reactivated.', {
+            description: 'Your Harmonic Blueprint, journeys, and settings are all where you left them.',
+            duration: 6000,
+          });
+        } catch (_) { /* toast lib optional; login still proceeds */ }
+      }
     } catch (e) {
       setErr(formatApiError(e));
       setCanRetry(isNetworkError(e));

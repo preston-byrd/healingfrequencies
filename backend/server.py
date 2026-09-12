@@ -399,6 +399,90 @@ async def _send_welcome_email(user_email: str, user_name: str) -> None:
         logger.warning("[resend] welcome email failed: %s", type(e).__name__)
 
 
+async def _send_cancellation_followup_email(user_email: str, user_name: str) -> Optional[str]:
+    """HF-043: "We miss you — come back" email fired 3 days after a user
+    closes their account. This is distinct from the regular re-engagement
+    nudge tiers (which are also active for cancelled users) — the copy
+    acknowledges the cancellation explicitly so it doesn't feel like the
+    system forgot they left."""
+    if not _resend or not _RESEND_API_KEY:
+        return None
+    safe_name = _html_escape((user_name or "").strip())[:120]
+    greeting = f"We miss you, {safe_name}." if safe_name else "We miss you."
+    html = f"""
+    <table style="font-family: -apple-system, system-ui, sans-serif; max-width: 520px; margin: 0; padding: 28px; background: #08120F; color: #E8E3D9; border-radius: 12px;">
+      <tr><td style="font-size: 11px; letter-spacing: 2px; color: #C4A67A; text-transform: uppercase;">Solarisound</td></tr>
+      <tr><td style="padding-top: 14px; font-family: 'Cormorant Garamond', Georgia, serif; font-size: 30px; font-weight: 400; color: #E8E3D9;">{greeting}</td></tr>
+      <tr><td style="padding-top: 18px; font-size: 15px; color: #C9DED6; line-height: 1.65;">
+        A few days ago you closed your Solarisound account. Life has seasons — and if this one didn't need us, that's okay. But if you ever feel your system asking for a moment of stillness again, your account is ready for you.
+      </td></tr>
+      <tr><td style="padding-top: 14px; font-size: 15px; color: #C9DED6; line-height: 1.65;">
+        Simply sign in with your existing credentials — no support ticket needed. Your Harmonic Blueprint, saved journeys, and settings are exactly where you left them.
+      </td></tr>
+      <tr><td style="padding-top: 26px;">
+        <a href="https://solarisound.com/" style="display: inline-block; padding: 12px 22px; background: #C4A67A; color: #08120F; border-radius: 999px; text-decoration: none; font-weight: 500; font-size: 14px;">Come back to Solarisound</a>
+      </td></tr>
+      <tr><td style="padding-top: 26px; font-size: 11px; color: #5A6B65;">
+        You'll still receive occasional emails and texts from us. Reply "STOP" to any text or use the unsubscribe link at the bottom of any email to hear from us less.
+      </td></tr>
+    </table>
+    """
+    try:
+        return await asyncio.to_thread(
+            _send_email_sync,
+            user_email,
+            "Your Solarisound account is waiting",
+            html,
+        )
+    except Exception as e:
+        logger.warning("[resend] cancellation follow-up failed: %s", type(e).__name__)
+        return None
+
+
+async def _cancellation_followup_tick(now: datetime) -> dict:
+    """Fires the "we miss you" email 3+ days after `cancelled_at`. One-shot
+    per cancellation cycle — reactivation clears `cancelled_at`, so a
+    user who cancels-reactivates-cancels-again gets the email once per
+    close. Skips users who have `nudge_unsubscribed=True` so the SAME
+    unsubscribe switch that silences the recurring nudge tier silences
+    the cancellation follow-up too (single source of truth for opt-out)."""
+    stats = {"scanned": 0, "sent": 0, "skipped_recent": 0,
+             "skipped_already_sent": 0, "skipped_unsub": 0, "errors": 0}
+    cutoff_iso = (now - timedelta(days=3)).isoformat()
+    cursor = db.users.find(
+        {
+            "cancelled_at": {"$lte": cutoff_iso},
+            "cancellation_email_sent_at": None,
+            "$or": [
+                {"nudge_unsubscribed": {"$ne": True}},
+                {"nudge_unsubscribed": {"$exists": False}},
+            ],
+        },
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "cancelled_at": 1, "nudge_unsubscribed": 1},
+    )
+    async for u in cursor:
+        stats["scanned"] += 1
+        if u.get("nudge_unsubscribed"):
+            stats["skipped_unsub"] += 1
+            continue
+        try:
+            resend_id = await _send_cancellation_followup_email(u.get("email", ""), u.get("name", ""))
+            if resend_id:
+                await db.users.update_one(
+                    {"id": u["id"]},
+                    {"$set": {"cancellation_email_sent_at": now.isoformat(),
+                              "cancellation_email_resend_id": resend_id}},
+                )
+                stats["sent"] += 1
+            else:
+                stats["errors"] += 1
+        except Exception as e:
+            logger.warning("[cancel.followup] user=%s err=%s", u.get("id"), type(e).__name__)
+            stats["errors"] += 1
+    return stats
+
+
+
 async def _send_support_ack_to_user(user_email: str, user_name: str, reason_label: str, msg: str) -> None:
     """Confirmation email sent to the user acknowledging that we received
     their support submission. Complements the in-app "Thank you" screen
@@ -911,6 +995,9 @@ async def _reengagement_tick() -> dict:
     # who haven't captured a Harmonic Blueprint in the last 6 days.
     align_stats = await _sms_alignment_checkin_tick(now)
     stats.update({f"align_{k}": v for k, v in align_stats.items()})
+    # HF-043: "We miss you — come back" email 3 days after account close.
+    cancel_stats = await _cancellation_followup_tick(now)
+    stats.update({f"cancel_{k}": v for k, v in cancel_stats.items()})
     return stats
 
 
@@ -2163,6 +2250,12 @@ async def login(body: LoginIn, request: Request, response: Response):
         "auth.login_succeeded", request,
         user_id=user["id"], user_email=email,
     )
+    # HF-043: auto-reactivate a cancelled account on successful login. This
+    # is the ONE deliberate re-entry path — no support ticket needed. The
+    # helper unsets `cancelled_at`, stamps `reactivated_at` for the audit
+    # trail, and returns the ISO of the prior cancellation so the client
+    # can render a welcome-back toast.
+    was_cancelled_at = await _reactivate_account_if_needed(user["id"])
     # Stamp last_login_at so the re-engagement scheduler can compute
     # "days since last login" for tier decisions. Also clears any pending
     # nudge sequence — a fresh login means the user is engaged again.
@@ -2176,7 +2269,10 @@ async def login(body: LoginIn, request: Request, response: Response):
         logger.warning("[auth.login] last_login stamp failed: %s", type(e).__name__)
     token = create_access_token(user["id"], email)
     set_auth_cookie(response, token)
-    return {"id": user["id"], "email": email, "name": user.get("name", ""), "token": token}
+    resp = {"id": user["id"], "email": email, "name": user.get("name", ""), "token": token}
+    if was_cancelled_at:
+        resp["reactivated_from"] = was_cancelled_at
+    return resp
 
 
 # --- Password reset ---------------------------------------------------------
@@ -8780,6 +8876,128 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=502, detail="Subscription cancellation is temporarily unavailable. Please try again in a moment.")
     await _sync_subscription_to_user(user["id"], sub)
     return {"ok": True, "cancel_at_period_end": True}
+
+
+# ==========================================================================
+# HF-043 — Cancel service (full account close) + reactivation
+# --------------------------------------------------------------------------
+# Distinct from HF-N "cancel subscription": this closes the ACCOUNT — the
+# user can no longer sign in until they explicitly reactivate. Design goals:
+#   • Reuse Stripe cancel-at-period-end so Pro users don't lose paid time
+#   • Keep email + SMS re-engagement flowing (until user unsubscribes those
+#     channels via existing List-Unsubscribe / STOP flows)
+#   • Auto-reactivate on next successful login — no support ticket needed
+#   • Send a distinct "we miss you — come back" email 3 days after close
+# --------------------------------------------------------------------------
+
+
+class CancelAccountIn(BaseModel):
+    """Optional survey field so we can learn why users leave. Kept
+    permissively short so a user CAN close their account without typing
+    anything — friction here is a bug, not a feature."""
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@api.post("/me/cancel-account")
+async def cancel_account(
+    body: CancelAccountIn,
+    user: dict = Depends(get_current_user),
+):
+    """Close the current user's account.
+
+    Effects:
+      • Any active Stripe subscription is set to cancel-at-period-end
+        so they don't pay for time they can't use.
+      • `cancelled_at` timestamp + `cancellation_reason` stored on the
+        user doc.
+      • User's current session token is invalidated (bumped `token_version`)
+        so subsequent requests with an old bearer are rejected.
+      • Email + SMS opt-in states are NOT modified — re-engagement nudges
+        keep flowing until the user unsubscribes via their normal channels.
+
+    Reactivation is automatic on the next successful login.
+    """
+    full = await db.users.find_one({"id": user["id"]}) or {}
+    if full.get("cancelled_at"):
+        return {"ok": True, "cancelled_at": full["cancelled_at"], "already": True}
+
+    # Cancel Stripe sub at period-end (best-effort — never block account
+    # close on a Stripe API blip; the webhook will reconcile eventually).
+    sub_id = full.get("stripe_subscription_id")
+    stripe_cancel_ok = None
+    if sub_id and STRIPE_API_KEY:
+        import stripe as _stripe
+        try:
+            sub = await _stripe_call(
+                _stripe.Subscription.modify, sub_id, cancel_at_period_end=True,
+            )
+            await _sync_subscription_to_user(user["id"], sub)
+            stripe_cancel_ok = True
+        except Exception as e:
+            logger.warning("[cancel_account] stripe cancel failed user=%s err=%s",
+                           user.get("email"), type(e).__name__)
+            stripe_cancel_ok = False
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    set_doc = {
+        "cancelled_at": now_iso,
+        # Bumping the token watermark invalidates every outstanding bearer
+        # token — the current session is booted as soon as they leave the
+        # confirmation modal. `get_current_user` compares this against the
+        # `iat` claim in the JWT.
+        "tokens_valid_after": now_iso,
+        "cancellation_email_sent_at": None,
+    }
+    if body.reason:
+        set_doc["cancellation_reason"] = body.reason.strip()[:500]
+    await db.users.update_one({"id": user["id"]}, {"$set": set_doc})
+
+    await _audit(
+        "account.cancelled", None,
+        user_id=user["id"],
+        metadata={
+            "had_active_sub": bool(sub_id),
+            "stripe_cancel_ok": stripe_cancel_ok,
+            "reason_provided": bool(body.reason),
+        },
+    )
+    return {
+        "ok": True,
+        "cancelled_at": now_iso,
+        "stripe_cancel_ok": stripe_cancel_ok,
+        # Tell the client to blow away their local token — the current
+        # bearer is dead the moment this response lands.
+        "invalidate_session": True,
+    }
+
+
+async def _reactivate_account_if_needed(user_id: str) -> Optional[str]:
+    """Called on every successful login. If the user is currently
+    `cancelled`, unset the flag and stamp a `reactivated_at` timestamp
+    so support can see the timeline. Returns the ISO of when they had
+    been cancelled (for a welcome-back toast on the client) or None if
+    they weren't cancelled to begin with.
+    """
+    u = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "cancelled_at": 1},
+    ) or {}
+    was_cancelled_at = u.get("cancelled_at")
+    if not was_cancelled_at:
+        return None
+    await db.users.update_one(
+        {"id": user_id},
+        {
+            "$set": {"reactivated_at": datetime.now(timezone.utc).isoformat()},
+            "$unset": {"cancelled_at": ""},
+        },
+    )
+    await _audit(
+        "account.reactivated", None,
+        user_id=user_id,
+        metadata={"was_cancelled_at": was_cancelled_at},
+    )
+    return was_cancelled_at
 
 
 @api.get("/me/transactions")
