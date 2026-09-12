@@ -57,16 +57,32 @@ export default function PublicSupportModal({ open, onClose }) {
   if (!open) return null;
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const MIN_MSG = 2;
   const canSend =
     name.trim().length >= 1 &&
     emailValid &&
     !!reason &&
-    message.trim().length >= 10 &&
+    message.trim().length >= MIN_MSG &&
     status !== 'sending';
+
+  // Called when the user taps the (visually disabled) Send button — we
+  // surface a clear inline hint about which field is blocking the submit
+  // instead of failing silently.
+  const explainWhyBlocked = () => {
+    if (!name.trim()) return 'Please add your name.';
+    if (!emailValid) return 'Please enter a valid email address.';
+    if (!reason) return 'Please select a reason.';
+    if (message.trim().length < MIN_MSG) return 'Please add a short message.';
+    return '';
+  };
 
   const handleSend = async (e) => {
     e.preventDefault();
-    if (!canSend) return;
+    if (!canSend) {
+      const hint = explainWhyBlocked();
+      if (hint) setErrMsg(hint);
+      return;
+    }
     setStatus('sending');
     setErrMsg('');
     try {
@@ -192,14 +208,14 @@ export default function PublicSupportModal({ open, onClose }) {
                 placeholder="Tell us what's on your mind — we read every message."
                 rows={5}
                 required
-                minLength={10}
+                minLength={MIN_MSG}
                 maxLength={4000}
                 className="w-full bg-black/25 border border-[#5C9E8C]/25 focus:border-[#72C2AC] rounded-lg px-3 py-2.5 text-[13px] text-[#E8E3D9] placeholder-[#5A6B65] outline-none resize-none transition-colors"
               />
               <div className="flex items-center justify-between text-[10px] text-[#5A6B65] mt-1">
                 <span>
-                  {message.trim().length < 10
-                    ? `${10 - message.trim().length} more characters`
+                  {message.trim().length < MIN_MSG
+                    ? 'Add a short message'
                     : 'Ready to send'}
                 </span>
                 <span>{message.length}/4000</span>
@@ -219,8 +235,12 @@ export default function PublicSupportModal({ open, onClose }) {
               <button
                 type="submit"
                 data-testid="public-support-send"
-                disabled={!canSend}
-                className="w-full py-2.5 rounded-lg bg-[#5C9E8C]/25 hover:bg-[#5C9E8C]/40 disabled:opacity-40 disabled:cursor-not-allowed border border-[#72C2AC]/50 hover:border-[#72C2AC] text-[#72C2AC] text-sm font-medium tracking-wide transition-colors inline-flex items-center justify-center gap-2"
+                aria-disabled={!canSend}
+                className={`w-full py-2.5 rounded-lg border border-[#72C2AC]/50 hover:border-[#72C2AC] text-[#72C2AC] text-sm font-medium tracking-wide transition-colors inline-flex items-center justify-center gap-2 ${
+                  canSend
+                    ? 'bg-[#5C9E8C]/25 hover:bg-[#5C9E8C]/40 cursor-pointer'
+                    : 'bg-[#5C9E8C]/10 opacity-70 cursor-pointer'
+                }`}
               >
                 {status === 'sending' ? (
                   <><Loader2 size={14} className="animate-spin" />Sending…</>

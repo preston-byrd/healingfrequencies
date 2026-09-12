@@ -2860,7 +2860,10 @@ class PublicSupportContactIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     email: EmailStr
     reason: str = Field(min_length=1, max_length=64)
-    message: str = Field(min_length=10, max_length=4000)
+    # Public landing-page form allows short messages (e.g. "issue") — the
+    # user just wants a quick way to flag something. 2-char floor still
+    # rejects accidental empty submits.
+    message: str = Field(min_length=2, max_length=4000)
 
 
 @api.post("/public/support/contact")
