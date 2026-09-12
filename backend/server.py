@@ -8770,7 +8770,145 @@ async def _sync_subscription_to_user(user_id: str, subscription) -> dict:
         patch["plan"] = "basic"
 
     await db.users.update_one({"id": user_id}, {"$set": patch})
+
+    # HF-049 — subscription cancellation tracking. Two lifecycle transitions
+    # are logged into `db.cancellations`:
+    #   • scheduled — user just flipped cancel_at_period_end=true (still Pro
+    #     until period_end). Idempotent: unique compound index on
+    #     (user_id, stripe_subscription_id, phase="scheduled") prevents
+    #     re-logging when Stripe re-fires the same event.
+    #   • final — Stripe actually ended the sub (status=canceled). Logged
+    #     once per (subscription_id, phase="final"). Trials that never
+    #     converted also land here because Stripe transitions the sub
+    #     directly to `canceled` without ever going through `active`.
+    # If a user re-enables auto-renew before period_end we flip
+    # reactivated_at on the scheduled row so admins see the churn/save.
+    try:
+        await _log_cancellation_if_transition(
+            user_id=user_id, sub=subscription, sub_status=sub_status,
+            cancel_at_period_end=bool(cancel_at_period_end),
+            pro_until_iso=(pro_until_dt.isoformat() if pro_until_dt else None),
+        )
+    except Exception as e:
+        logger.warning("[cancel-log] err: %s", type(e).__name__)
+
     return patch
+
+
+# --- HF-049: Subscription-cancellation tracking ------------------------------
+CANCELLATION_REASONS = {
+    "too_expensive":    "Too expensive",
+    "missing_features": "Missing features",
+    "just_testing":     "Just testing it out",
+    "not_using":        "Not using it enough",
+    "technical_issues": "Technical issues",
+    "found_alternative": "Found an alternative",
+    "other":            "Other",
+}
+
+
+def _subscription_type_from_status(sub_status: Optional[str], plan_hint: Optional[str] = None) -> str:
+    """Map Stripe subscription state → the human-readable subscription type
+    shown in the admin panel. `plan_hint` is the user.plan field when
+    available (helps distinguish monthly vs annual on `canceled` events
+    where Stripe no longer carries interval info in the raw payload)."""
+    if sub_status == "trialing":
+        return "trial"
+    if plan_hint in ("monthly", "annual"):
+        return f"pro_{plan_hint}"
+    return "pro"
+
+
+async def _log_cancellation_if_transition(
+    *, user_id: str, sub, sub_status: Optional[str],
+    cancel_at_period_end: bool, pro_until_iso: Optional[str],
+) -> None:
+    """Detect a cancellation lifecycle transition and persist a row to
+    `db.cancellations`. Idempotent — the unique compound index on
+    (subscription_id, phase) makes duplicate inserts a no-op. If the user
+    turns auto-renew BACK on (cancel_at_period_end flips false), we stamp
+    reactivated_at on the outstanding scheduled row."""
+    sub_id = sub.get("id") if isinstance(sub, dict) else getattr(sub, "id", None)
+    if not sub_id:
+        return
+    user_doc = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "id": 1, "email": 1, "name": 1, "plan": 1,
+         "pending_cancellation_reason_key": 1,
+         "pending_cancellation_reason_note": 1,
+         "pending_cancellation_captured_at": 1},
+    ) or {}
+
+    phase: Optional[str] = None
+    if sub_status in ("canceled", "incomplete_expired", "unpaid"):
+        phase = "final"
+    elif cancel_at_period_end:
+        phase = "scheduled"
+
+    if phase is None:
+        # Sub is active AND auto-renew is on → the user may have re-enabled
+        # renewal after previously scheduling cancellation. Flip the
+        # outstanding scheduled row's reactivated_at so admins see the save.
+        try:
+            await db.cancellations.update_many(
+                {
+                    "user_id": user_id,
+                    "stripe_subscription_id": sub_id,
+                    "phase": "scheduled",
+                    "reactivated_at": None,
+                },
+                {"$set": {"reactivated_at": datetime.now(timezone.utc).isoformat()}},
+            )
+        except Exception:
+            pass
+        return
+
+    reason_key = user_doc.get("pending_cancellation_reason_key")
+    reason_note = user_doc.get("pending_cancellation_reason_note")
+    reason_label = CANCELLATION_REASONS.get(reason_key or "") if reason_key else None
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "user_email": user_doc.get("email"),
+        "user_name": user_doc.get("name"),
+        "subscription_type": _subscription_type_from_status(sub_status, user_doc.get("plan")),
+        "stripe_subscription_id": sub_id,
+        "phase": phase,  # scheduled | final
+        "cancelled_at": datetime.now(timezone.utc).isoformat(),
+        "period_end": pro_until_iso,
+        "reason_key": reason_key,
+        "reason_label": reason_label,
+        "reason_note": (reason_note or "").strip()[:500] or None,
+        "source": "stripe_webhook",  # overwritten by direct API call if it
+                                     # captured a fresher reason first
+        "reactivated_at": None,
+    }
+    try:
+        await db.cancellations.insert_one(doc)
+        logger.info("[cancel-log] user=%s phase=%s type=%s reason=%s",
+                    user_id, phase, doc["subscription_type"], reason_key)
+    except DuplicateKeyError:
+        # Compound unique on (stripe_subscription_id, phase) — this transition
+        # already recorded. If we now have a reason the previous row didn't,
+        # backfill it so the admin can see it even when Stripe fires first.
+        if reason_key:
+            try:
+                await db.cancellations.update_one(
+                    {
+                        "stripe_subscription_id": sub_id,
+                        "phase": phase,
+                        "reason_key": None,
+                    },
+                    {"$set": {
+                        "reason_key": reason_key,
+                        "reason_label": reason_label,
+                        "reason_note": (reason_note or "").strip()[:500] or None,
+                    }},
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("[cancel-log] insert failed: %s", type(e).__name__)
 
 
 @api.post("/me/checkout")
@@ -9270,12 +9408,25 @@ async def billing_portal(request: Request, user: dict = Depends(get_current_user
     return {"url": portal.url}
 
 
+class CancelSubscriptionIn(BaseModel):
+    reason_key: Optional[str] = Field(default=None, max_length=64)
+    reason_note: Optional[str] = Field(default=None, max_length=500)
+
+
 @api.post("/me/cancel-subscription")
-async def cancel_subscription(user: dict = Depends(get_current_user)):
+async def cancel_subscription(
+    body: Optional[CancelSubscriptionIn] = None,
+    user: dict = Depends(get_current_user),
+):
     """In-app cancellation fallback: marks the user's active Stripe subscription
     to cancel at the end of the current period. The Customer Portal is the
     preferred UX; this endpoint exists so we can offer a one-click cancel CTA
     too (e.g., from an email link or trial-ending banner).
+
+    HF-049 — accepts an optional exit-survey payload (`reason_key`,
+    `reason_note`). The reason is stamped on the user doc BEFORE we call
+    Stripe so the webhook-triggered cancellation-log entry picks it up
+    even if the webhook fires before this handler returns.
     """
     if not STRIPE_API_KEY:
         raise HTTPException(status_code=500, detail="Payments not configured")
@@ -9283,6 +9434,21 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
     sub_id = full.get("stripe_subscription_id")
     if not sub_id:
         raise HTTPException(status_code=400, detail="No active subscription to cancel.")
+
+    # Stamp the pending reason FIRST so the concurrent Stripe webhook that
+    # eventually fires can pick it up when it inserts the cancellation row.
+    if body and body.reason_key:
+        if body.reason_key not in CANCELLATION_REASONS:
+            raise HTTPException(status_code=400, detail="Unknown cancellation reason")
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": {
+                "pending_cancellation_reason_key": body.reason_key,
+                "pending_cancellation_reason_note": (body.reason_note or "").strip()[:500] or None,
+                "pending_cancellation_captured_at": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+
     import stripe as _stripe
     try:
         sub = await _stripe_call(
@@ -9292,10 +9458,30 @@ async def cancel_subscription(user: dict = Depends(get_current_user)):
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("[cancel] failed for user=%s", user.get("email"))
         raise HTTPException(status_code=502, detail="Subscription cancellation is temporarily unavailable. Please try again in a moment.")
     await _sync_subscription_to_user(user["id"], sub)
+
+    # Belt-and-suspenders: if the webhook hasn't fired yet, insert the row
+    # directly from this handler so the admin sees the cancellation the
+    # moment the user hits confirm. `_log_cancellation_if_transition` is
+    # idempotent, so this is safe even when the webhook races us.
+    try:
+        await _log_cancellation_if_transition(
+            user_id=user["id"], sub=sub, sub_status=(sub.get("status") if isinstance(sub, dict) else getattr(sub, "status", None)),
+            cancel_at_period_end=True,
+            pro_until_iso=None,
+        )
+        # Mark direct-source so the admin knows this came from the in-app CTA
+        # rather than the Stripe portal (helps understand cancellation funnels).
+        await db.cancellations.update_one(
+            {"stripe_subscription_id": sub_id, "phase": "scheduled"},
+            {"$set": {"source": "in_app"}},
+        )
+    except Exception:
+        pass
+
     return {"ok": True, "cancel_at_period_end": True}
 
 
@@ -9541,6 +9727,11 @@ async def admin_list_users(
         u["pro"] = is_pro
         u["days_left"] = days_left
         u["plan"] = u.get("plan") or ("pro" if is_pro else "basic")
+        # HF-049: Cancelling badge → user still has Pro time left but has
+        # already turned off auto-renew. This is a distinct state from
+        # `basic` (never subscribed) and from `cancelled_at` (closed the
+        # whole account).
+        u["cancelling"] = bool(u.get("stripe_cancel_at_period_end")) and is_pro
     return {
         "items": items,
         "total": total,
@@ -9548,6 +9739,170 @@ async def admin_list_users(
         "limit": limit,
         "filtered_test_count": filtered_test_count,
     }
+
+
+# --- HF-049 Admin: Cancellations dashboard ---------------------------------
+@api.get("/admin/cancellations")
+async def admin_list_cancellations(
+    offset: int = 0,
+    limit: int = 100,
+    phase: str = "",
+    sub_type: str = "",
+    q: str = "",
+    user: dict = Depends(get_current_user),
+):
+    """Paginated list of cancellation rows from `db.cancellations` for the
+    Admin > Cancellations tab. Sorted newest first."""
+    _require_admin(user)
+    limit = max(1, min(int(limit or 100), 500))
+    offset = max(0, int(offset or 0))
+
+    query: dict = {}
+    if phase in ("scheduled", "final"):
+        query["phase"] = phase
+    if sub_type:
+        query["subscription_type"] = sub_type
+    if q:
+        safe_q = re.escape(q.strip())[:100]
+        query["user_email"] = {"$regex": safe_q, "$options": "i"}
+
+    total = await db.cancellations.count_documents(query)
+    cursor = (
+        db.cancellations.find(query, {"_id": 0})
+        .sort("cancelled_at", -1)
+        .skip(offset)
+        .limit(limit)
+    )
+    items = await cursor.to_list(limit)
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+@api.get("/admin/cancellations/stats")
+async def admin_cancellations_stats(user: dict = Depends(get_current_user)):
+    """Summary stats card powering the Cancellations tab header:
+    - `total_this_month`: rows with cancelled_at >= first-of-month (UTC)
+    - `total_all_time`: full corpus
+    - `trial_to_paid_rate`: pct of ever-trialing users who successfully
+      moved to a paid Pro plan.
+    - `top_reasons`: [{reason_key, reason_label, count, pct}] over the
+      last 90 days, sorted by count desc.
+    - `by_type_last_90d`: subscription type breakdown.
+    """
+    _require_admin(user)
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    ninety_days_ago = (now - timedelta(days=90)).isoformat()
+
+    total_this_month = await db.cancellations.count_documents(
+        {"cancelled_at": {"$gte": month_start}}
+    )
+    total_all_time = await db.cancellations.count_documents({})
+
+    total_trials = await db.users.count_documents({"trial_used": True})
+    converted = 0
+    if total_trials > 0:
+        converted = await db.users.count_documents({
+            "trial_used": True,
+            "$or": [
+                {"plan": "pro"},
+                {"pro_last_renewed_at": {"$exists": True, "$ne": None}},
+            ],
+        })
+    trial_to_paid_rate = round((converted / total_trials) * 100, 1) if total_trials else 0.0
+
+    reasons_pipeline = [
+        {"$match": {"cancelled_at": {"$gte": ninety_days_ago}, "reason_key": {"$ne": None}}},
+        {"$group": {"_id": "$reason_key", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 10},
+    ]
+    reason_rows = await db.cancellations.aggregate(reasons_pipeline).to_list(10)
+    reason_total = sum(r["count"] for r in reason_rows) or 1
+    top_reasons = [
+        {
+            "reason_key": r["_id"],
+            "reason_label": CANCELLATION_REASONS.get(r["_id"], r["_id"]),
+            "count": r["count"],
+            "pct": round(r["count"] * 100.0 / reason_total, 1),
+        }
+        for r in reason_rows
+    ]
+    without_reason = await db.cancellations.count_documents({
+        "cancelled_at": {"$gte": ninety_days_ago},
+        "reason_key": None,
+    })
+
+    type_pipeline = [
+        {"$match": {"cancelled_at": {"$gte": ninety_days_ago}}},
+        {"$group": {"_id": "$subscription_type", "count": {"$sum": 1}}},
+    ]
+    type_rows = await db.cancellations.aggregate(type_pipeline).to_list(10)
+    by_type = {r["_id"]: r["count"] for r in type_rows}
+
+    return {
+        "total_this_month": total_this_month,
+        "total_all_time": total_all_time,
+        "trial_to_paid_rate": trial_to_paid_rate,
+        "converted_trial_count": converted,
+        "total_trial_users": total_trials,
+        "top_reasons": top_reasons,
+        "without_reason_last_90d": without_reason,
+        "by_type_last_90d": by_type,
+    }
+
+
+@api.get("/admin/cancellations.csv")
+async def admin_cancellations_csv(user: dict = Depends(get_current_user)):
+    """CSV export of the full cancellation log."""
+    _require_admin(user)
+    import csv, io
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "cancelled_at", "user_id", "user_email", "user_name",
+        "subscription_type", "phase", "period_end",
+        "reason_key", "reason_label", "reason_note", "source",
+        "stripe_subscription_id", "reactivated_at",
+    ])
+    cursor = db.cancellations.find({}, {"_id": 0}).sort("cancelled_at", -1)
+    async for r in cursor:
+        writer.writerow([
+            r.get("cancelled_at", ""),
+            r.get("user_id", ""),
+            r.get("user_email", ""),
+            r.get("user_name", ""),
+            r.get("subscription_type", ""),
+            r.get("phase", ""),
+            r.get("period_end", "") or "",
+            r.get("reason_key", "") or "",
+            r.get("reason_label", "") or "",
+            (r.get("reason_note") or "").replace("\n", " "),
+            r.get("source", ""),
+            r.get("stripe_subscription_id", ""),
+            r.get("reactivated_at", "") or "",
+        ])
+    csv_bytes = buf.getvalue().encode("utf-8")
+    from fastapi.responses import Response
+    fname = f"cancellations_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@api.get("/me/cancellation-reasons")
+async def public_cancellation_reasons(user: dict = Depends(get_current_user)):
+    """Signed-in surface for the reason catalog — used by the in-app exit
+    survey modal so it doesn't hardcode the list."""
+    return {"reasons": [{"key": k, "label": v} for k, v in CANCELLATION_REASONS.items()]}
+
+
 
 
 @api.post("/admin/users/{user_id}/grant-pro")
@@ -10551,6 +10906,13 @@ async def _lifespan_startup():
         [("user_id", 1), ("expires_at", 1)], unique=True
     )
     await db.expiration_notices.create_index([("sent_at", -1)])
+    # HF-049 cancellation tracking — one row per (Stripe subscription id, phase)
+    # so replays of the same webhook event are naturally deduped.
+    await db.cancellations.create_index(
+        [("stripe_subscription_id", 1), ("phase", 1)], unique=True
+    )
+    await db.cancellations.create_index([("cancelled_at", -1)])
+    await db.cancellations.create_index([("user_id", 1), ("cancelled_at", -1)])
     # Unsubscribe token lookup for the public one-tap unsub / prefs links.
     await db.users.create_index("nudge_unsubscribe_token", sparse=True)
     # Seed default feature announcements the first time the app boots (idempotent).

@@ -8,9 +8,11 @@ import { useSubscription } from '@/contexts/SubscriptionContext';
 import { PaymentLinkModal } from '@/components/PaymentLinkModal';
 import SoundLineage from '@/components/SoundLineage';
 import AdminSupportInbox from '@/components/AdminSupportInbox';
+import AdminCancellationsInbox from '@/components/AdminCancellationsInbox';
 import AdminEmailEngagement from '@/components/AdminEmailEngagement';
 import AdminSMSStats from '@/components/AdminSMSStats';
 import CancelAccountModal from '@/components/CancelAccountModal';
+import CancelSubscriptionModal from '@/components/CancelSubscriptionModal';
 import AdminFrequencyDefaults from '@/components/AdminFrequencyDefaults';
 import AdminUserProfileModal from '@/components/AdminUserProfileModal';
 import { UserCog } from 'lucide-react';
@@ -227,17 +229,14 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
   };
 
   const cancelSubscription = async () => {
-    if (!window.confirm('Cancel your subscription? You\'ll keep Pro access until the end of the current period, then return to Basic. You can also use Manage Billing for more options.')) return;
-    setBusy('cancel'); setErr(''); setMsg('');
-    try {
-      await api.post('/me/cancel-subscription');
-      setMsg('Subscription canceled. You\'ll keep Pro access until your current period ends.');
-      await load();
-    } catch (e) {
-      setErr(formatApiError(e));
-    } finally {
-      setBusy('');
-    }
+    // HF-049: open the exit-survey modal instead of a bare confirm.
+    setCancelSubModalOpen(true);
+  };
+  const [cancelSubModalOpen, setCancelSubModalOpen] = useState(false);
+  const onSubscriptionCancelled = async () => {
+    setCancelSubModalOpen(false);
+    setMsg("Subscription canceled. You'll keep Pro access until your current period ends.");
+    await load();
   };
 
   // HF-043 Cancel service (close account) — separate from cancelSubscription.
@@ -798,7 +797,7 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
                   disabled={!!busy}
                   className="w-full py-2 rounded-full text-[11px] text-[#8A9A92] hover:text-[#E8E3D9] transition-colors disabled:opacity-50"
                 >
-                  {busy === 'cancel' ? 'Canceling…' : 'or, cancel here in one click'}
+                  or, cancel here in one click
                 </button>
               )}
             </div>
@@ -1183,6 +1182,15 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
                         {u.role === 'admin' && (
                           <span className="px-1.5 py-0.5 rounded-full bg-[#5C9E8C]/20 text-[#72C2AC]">ADMIN</span>
                         )}
+                        {u.cancelling && (
+                          <span
+                            data-testid={`user-cancelling-badge-${u.id}`}
+                            title="Auto-renew is off. User keeps Pro access until period end."
+                            className="px-1.5 py-0.5 rounded-full bg-[#D9A45C]/15 text-[#D9A45C] border border-[#D9A45C]/40"
+                          >
+                            CANCELLING
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -1278,6 +1286,11 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
             right where the admin ends up scrolling to. */}
         {sub.is_admin && <AdminSupportInbox />}
 
+        {/* HF-049 Admin: Cancellations — list + stats + CSV export for the
+            db.cancellations collection so churn analytics live next to the
+            support inbox where the admin already operates. */}
+        {sub.is_admin && <AdminCancellationsInbox />}
+
         {/* Admin: Email Engagement — re-engagement nudge analytics. */}
         {sub.is_admin && <AdminEmailEngagement />}
 
@@ -1347,6 +1360,12 @@ export default function AccountDashboard({ onBack, onOpenHarmonicBlueprint }) {
           hasActiveSub={!!(sub.pro && !sub.is_admin)}
         />
       )}
+
+      <CancelSubscriptionModal
+        open={cancelSubModalOpen}
+        onClose={() => setCancelSubModalOpen(false)}
+        onCancelled={onSubscriptionCancelled}
+      />
 
       {celebratingPlan && (
         <ThankYouCelebration
