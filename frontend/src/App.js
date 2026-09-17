@@ -7,6 +7,7 @@ import Dashboard from '@/components/Dashboard';
 import AccountDashboard from '@/components/AccountDashboard';
 import LandingPage from '@/components/LandingPage';
 import LegalPage from '@/components/LegalPage';
+import WhatWeDoPage from '@/components/WhatWeDoPage';
 import PlayDeepLink from '@/components/PlayDeepLink';
 import ResetPasswordView from '@/components/ResetPasswordView';
 import SupportBubble from '@/components/SupportBubble';
@@ -54,6 +55,11 @@ function Shell() {
     return null;
   });
 
+  // HF-050 static "What We Do" page — same deep-link pattern as /privacy + /terms.
+  const [whatWeDoActive, setWhatWeDoActive] = useState(() => {
+    return typeof window !== 'undefined' && window.location.pathname === '/what-we-do';
+  });
+
   // Auto-navigate to account when returning from Stripe checkout
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -94,6 +100,18 @@ function Shell() {
         onBack={() => {
           try { window.history.replaceState({}, '', '/'); } catch (e) { /* noop */ }
           setLegalVariant(null);
+        }}
+      />
+    );
+  }
+
+  // HF-050 /what-we-do static page — same anonymous-friendly pattern.
+  if (whatWeDoActive) {
+    return (
+      <WhatWeDoPage
+        onBack={() => {
+          try { window.history.replaceState({}, '', '/'); } catch (e) { /* noop */ }
+          setWhatWeDoActive(false);
         }}
       />
     );

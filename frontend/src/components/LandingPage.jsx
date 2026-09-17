@@ -139,6 +139,15 @@ function FooterBlock({ onSupport }) {
         </button>
         <span className="hidden sm:inline text-[#5A6B65]">·</span>
         <a
+          href="/what-we-do"
+          data-testid="landing-what-we-do-link"
+          onClick={goLegal('/what-we-do')}
+          className="hover:text-[#C4A67A] transition-colors"
+        >
+          What We Do
+        </a>
+        <span className="hidden sm:inline text-[#5A6B65]">·</span>
+        <a
           href="/privacy"
           data-testid="landing-privacy-link"
           onClick={goLegal('/privacy')}
