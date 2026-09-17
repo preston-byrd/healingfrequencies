@@ -938,3 +938,11 @@
   - **Verified** — Playwright: baseline `data-active-hz=""` + `data-active=false`; tap 285 → `data-active-hz=285`, `orb-active=true`, `landing-orb--active` class applied, computed `animation-duration=3.6s`; switch to 528 → duration drops to 2.1s; re-tap stops and orb reverts to the calm 4.5s breath.
   - **Files** — `frontend/src/index.css` (+`landing-orb-breath--active` keyframe + active classes), `frontend/src/components/WhatWeDoHero.jsx` (accepts `activeHz`, applies CSS variables + active classes), `frontend/src/components/FrequencySampler.jsx` (`onActiveHzChange` prop + effect), `frontend/src/components/WhatWeDoPage.jsx` (lifts state + `useCallback` bridge).
 
+
+- **HF-053 Bar visualizer syncs with active tone (Feb 12, 2026)**: The 24-bar equalizer beneath the hero orb now amplifies when a Solfeggio tone is playing — completing the sensory loop with the orb pulse from HF-052.
+  - **CSS** — new `landing-bar-wave--active` keyframe in `index.css` raises the amplitude floor (`scaleY 0.35 → 1.35` vs baseline `0.18 → 1`), lifts the opacity floor to 0.7, and swaps the gradient to a warmer teal→gold blend. `.landing-bar--active` uses `calc(var(--bar-base-duration) * var(--bar-duration-mul))` so each bar's individual base cadence composes with the tone's speed multiplier.
+  - **Per-frequency multipliers** — 285 Hz → 0.75× (slightly faster), 396 Hz → 0.55×, 528 Hz → 0.4× (tightest, fastest). Higher pitch pulls the visualizer tighter, matching the orb's own pace.
+  - **Wiring** — `WhatWeDoHero` publishes `--bar-duration-mul` on the visualizer band, sets `--bar-base-duration` per bar (was previously a plain inline `animationDuration`), toggles `landing-bar--active` on each bar when a tone is active. `data-active` on the band gives testing agents a hook.
+  - **Verified** — Playwright: baseline bar animation-name `landing-bar-wave` at 7.2s → tapping 285 flips to `landing-bar-wave--active` at 5.4s → tapping 528 tightens to 2.88s → stopping reverts to `landing-bar-wave` at 7.2s. Visual confirmation via screenshot shows taller, brighter, warmer bars during a preview and calm short bars once the tone stops.
+  - **Files** — `frontend/src/index.css` (new active keyframe + rule), `frontend/src/components/WhatWeDoHero.jsx` (extended `PULSE_MAP` with `barMul`, applied active class + CSS vars).
+

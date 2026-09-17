@@ -293,6 +293,26 @@ input, select { font-family: inherit; }
   animation: landing-bar-wave 6s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
 }
 
+/* HF-053 — bar visualizer amplifies when a Solfeggio preview is playing.
+   Amplitude widens (scaleY floor rises + ceiling boosts to 1.35), the
+   gradient saturates toward gold, and the wave tightens via
+   `--bar-duration-mul` inherited from the parent (higher Hz → smaller
+   multiplier → faster wave). Falls back to 1× (no change) if unset. */
+@keyframes landing-bar-wave--active {
+  0%, 100% { transform: scaleY(0.35); opacity: 0.7; }
+  50%      { transform: scaleY(1.35); opacity: 1; }
+}
+.landing-bar--active {
+  background: linear-gradient(
+    to top,
+    rgba(114,194,172,0) 0%,
+    rgba(114,194,172,0.9) 45%,
+    rgba(232,184,114,1) 100%
+  );
+  animation-name: landing-bar-wave--active;
+  animation-duration: calc(var(--bar-base-duration, 6s) * var(--bar-duration-mul, 1));
+}
+
 /* CTA breathing glow — applied alongside the reveal transition. */
 @keyframes landing-cta-breath-anim {
   0%, 100% { box-shadow: 0 0 0 0 rgba(196, 166, 122, 0.0); }
