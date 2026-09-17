@@ -923,3 +923,10 @@
   - **Verified** — Playwright smoke: direct `/what-we-do` load renders all 4 sections + both back buttons; clicking the landing footer link deep-links successfully; visual continuity with existing dark theme confirmed via screenshot.
   - **Files** — `frontend/src/components/WhatWeDoPage.jsx` (new), `frontend/src/App.js` (route wiring), `frontend/src/components/LandingPage.jsx` (footer link).
 
+
+- **HF-051 "What We Do" hero + Solfeggio audio sampler (Feb 12, 2026)**: The static `/what-we-do` page now opens with a procedural "hero video" (breathing-orb + concentric ring pulses + 24-bar visualizer — same aesthetic language as the landing page, no external asset) followed by an interactive tap-to-play Solfeggio sampler.
+  - **Hero** — `WhatWeDoHero.jsx` reuses the landing page's `landing-ring`, `landing-orb`, and `landing-bar` CSS animations. Zero external assets; ~0 KB payload; renders on every device the landing page does.
+  - **Sampler** — `FrequencySampler.jsx` uses Web Audio API sine oscillators (same engine as the main app) to preview **285 Hz** (Cellular renewal), **396 Hz** (Release & letting go), and **528 Hz** (DNA & love resonance). 12-second auto-stop, 120 ms fade-in / 300 ms fade-out envelopes so there are no clicks, animated gold progress ring around the play icon, one-tone-at-a-time enforcement (tapping a second card gracefully fades out the first). Cleans up the AudioContext on unmount so page refreshes don't strand resources.
+  - **Verified** — Playwright: `wwd-hero`, `wwd-hero-orb`, `wwd-hero-visualizer`, `wwd-frequency-sampler`, and all three `wwd-tone-{hz}` testids present. Interaction: tap 528 → `aria-pressed=true`, tap 396 → 528 stops + 396 starts, re-tap 396 stops cleanly. UI screenshot confirms hero + sampler render seamlessly above the four existing content sections.
+  - **Files** — `frontend/src/components/WhatWeDoHero.jsx` (new), `frontend/src/components/FrequencySampler.jsx` (new), `frontend/src/components/WhatWeDoPage.jsx` (imports + mount).
+

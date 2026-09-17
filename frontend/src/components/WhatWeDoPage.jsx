@@ -1,5 +1,7 @@
 import React, { useEffect } from 'react';
 import { ArrowLeft, Waves, Brain, Moon, Sparkles } from 'lucide-react';
+import WhatWeDoHero from '@/components/WhatWeDoHero';
+import FrequencySampler from '@/components/FrequencySampler';
 
 /**
  * HF-050 static "What We Do" page. Rendered outside the auth gate so
@@ -42,10 +44,14 @@ export default function WhatWeDoPage({ onBack }) {
         <h1 className="font-display font-light text-[#E8E3D9] text-3xl sm:text-5xl leading-tight mb-4">
           What We Do
         </h1>
-        <p className="text-[13px] text-[#C9DED6] leading-relaxed mb-12 max-w-xl">
+        <p className="text-[13px] text-[#C9DED6] leading-relaxed mb-10 max-w-xl">
           Solarisound is a sound-based wellness studio in your pocket — designed to help you slow
           down, come back to yourself, and hear the resonance you already carry.
         </p>
+
+        {/* HF-051 procedural hero + Solfeggio audio sampler */}
+        <WhatWeDoHero />
+        <FrequencySampler />
 
         <Section
           icon={<Waves size={16} className="text-[#72C2AC]" strokeWidth={1.75} />}
