@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Waves, Brain, Moon, Sparkles } from 'lucide-react';
 import WhatWeDoHero from '@/components/WhatWeDoHero';
 import FrequencySampler from '@/components/FrequencySampler';
@@ -16,6 +16,12 @@ export default function WhatWeDoPage({ onBack }) {
   useEffect(() => {
     try { window.scrollTo(0, 0); } catch (_) { /* SSR safety */ }
   }, []);
+
+  // HF-052 — bridge the sampler's active tone up to the hero so the orb
+  // can pulse in sync. `useCallback` keeps the reference stable across
+  // renders (FrequencySampler's effect uses this in its dep list).
+  const [activeHz, setActiveHz] = useState(null);
+  const handleActiveHz = useCallback((hz) => setActiveHz(hz), []);
 
   return (
     <div
@@ -49,9 +55,11 @@ export default function WhatWeDoPage({ onBack }) {
           down, come back to yourself, and hear the resonance you already carry.
         </p>
 
-        {/* HF-051 procedural hero + Solfeggio audio sampler */}
-        <WhatWeDoHero />
-        <FrequencySampler />
+        {/* HF-051 procedural hero + Solfeggio audio sampler.
+            HF-052: activeHz bridges the sampler → hero so the orb pulses
+            in sync with whichever tone is currently playing. */}
+        <WhatWeDoHero activeHz={activeHz} />
+        <FrequencySampler onActiveHzChange={handleActiveHz} />
 
         <Section
           icon={<Waves size={16} className="text-[#72C2AC]" strokeWidth={1.75} />}

@@ -37,7 +37,7 @@ const TONES = [
   },
 ];
 
-export default function FrequencySampler() {
+export default function FrequencySampler({ onActiveHzChange = () => {} }) {
   const [playingHz, setPlayingHz] = useState(null);
   const [progress, setProgress] = useState(0);
   const ctxRef = useRef(null);
@@ -46,6 +46,12 @@ export default function FrequencySampler() {
   const rafRef = useRef(null);
   const stopTimerRef = useRef(null);
   const startedAtRef = useRef(0);
+
+  // HF-052 — broadcast the active tone up to the page so the hero orb can
+  // pulse in sync. We do this in an effect (not inline in play/stop) so
+  // the ref stays a single source of truth even if the parent forgets to
+  // memoize its callback.
+  useEffect(() => { onActiveHzChange(playingHz); }, [playingHz, onActiveHzChange]);
 
   // Kill the context + any running oscillator on unmount. This is important
   // because AudioContext is a scarce resource — Chrome will refuse to create

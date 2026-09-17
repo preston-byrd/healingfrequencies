@@ -253,6 +253,32 @@ input, select { font-family: inherit; }
   animation: landing-orb-breath 4.5s ease-in-out infinite;
 }
 
+/* HF-052 — synced pulse for /what-we-do sampler.
+   When a tone is playing, the hero orb inherits `--pulse-duration` and
+   `--pulse-glow` from JS (mapped per Solfeggio frequency). The keyframe
+   is amplified (bigger scale + stronger shadow) so a visitor immediately
+   sees the response after tapping a tone card — while staying calm
+   enough to remain on-brand. */
+@keyframes landing-orb-breath--active {
+  0%, 100% {
+    transform: scale(1.02);
+    box-shadow: 0 0 70px var(--pulse-glow, rgba(196, 166, 122, 0.55)),
+                inset 0 0 35px rgba(255,255,255,0.10);
+  }
+  50% {
+    transform: scale(1.14);
+    box-shadow: 0 0 130px var(--pulse-glow, rgba(196, 166, 122, 0.9)),
+                inset 0 0 55px rgba(255,255,255,0.20);
+  }
+}
+.landing-orb--active {
+  animation: landing-orb-breath--active var(--pulse-duration, 3s) ease-in-out infinite;
+}
+/* Sibling rings speed up too so the whole hero feels coherent. */
+.landing-ring--active {
+  animation-duration: var(--pulse-duration-ring, 2.4s);
+}
+
 /* Vertical bar visualizer beneath the orb */
 @keyframes landing-bar-wave {
   0%, 100% { transform: scaleY(0.18); opacity: 0.45; }
