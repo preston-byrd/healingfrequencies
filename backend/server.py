@@ -1545,6 +1545,14 @@ class RegisterIn(BaseModel):
     # prove the phone belongs to the person creating the account.
     phone_number: str = Field(min_length=6, max_length=20)
     phone_verification_token: str = Field(min_length=10, max_length=800)
+    # HF-054 — Twilio A2P 10DLC compliance. The registration form now
+    # shows an unchecked-by-default marketing SMS opt-in. When true, we
+    # stamp `sms_marketing_consent=true` + `sms_marketing_consent_at` on
+    # the user doc so downstream SMS categories can gate on it. When
+    # false/omitted the user still receives strictly transactional
+    # messages (OTP, welcome, delivery receipts) — never wellness
+    # reminders or nudges.
+    sms_marketing_consent: Optional[bool] = False
 
 
 class LoginIn(BaseModel):
@@ -2383,6 +2391,13 @@ async def register(body: RegisterIn, request: Request, response: Response):
         "phone_number": phone,
         "phone_verified": True,
         "phone_verified_at": datetime.now(timezone.utc).isoformat(),
+        # HF-054 marketing SMS opt-in (Twilio A2P 10DLC compliance).
+        "sms_marketing_consent": bool(body.sms_marketing_consent),
+        "sms_marketing_consent_at": (
+            datetime.now(timezone.utc).isoformat()
+            if body.sms_marketing_consent else None
+        ),
+        "sms_marketing_consent_source": "registration_form" if body.sms_marketing_consent else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
         # Seed last_login_at with the registration moment so the re-engagement
         # scheduler doesn't immediately flag a brand-new user as "inactive

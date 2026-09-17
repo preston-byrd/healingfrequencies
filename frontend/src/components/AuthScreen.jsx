@@ -59,6 +59,11 @@ export default function AuthScreen() {
   const [canRetryByCall, setCanRetryByCall] = useState(false);
   // Which channel the OTP was ultimately delivered through — used to
   // customise the verify-step subhead ("we called you" vs "we texted you").
+  // HF-054 — Twilio A2P 10DLC marketing SMS opt-in. Unchecked by default;
+  // consent is NOT required to register (the disclosure spells this out).
+  // When true, we forward `sms_marketing_consent: true` to /auth/register
+  // and the backend stamps the audit trail (consent_at + source).
+  const [smsMarketingConsent, setSmsMarketingConsent] = useState(false);
   const [otpChannel, setOtpChannel] = useState('sms');
 
   useEffect(() => {
@@ -168,6 +173,7 @@ export default function AuthScreen() {
       await register(email, password, name, {
         phone_number: verifiedPhone,
         phone_verification_token: data.phone_verification_token,
+        sms_marketing_consent: smsMarketingConsent,
       });
       // AuthContext will flip user, App unmounts this component.
     } catch (e) {
@@ -303,6 +309,53 @@ export default function AuthScreen() {
                   We'll text you a 6-digit code to confirm this number. Standard
                   message rates apply. We never share your number.
                 </p>
+
+                {/* HF-054 — Twilio A2P 10DLC marketing SMS opt-in.
+                    Checkbox is unchecked by default. Disclosure copy is the
+                    exact language required for carrier registration. */}
+                <label
+                  data-testid="sms-consent-row"
+                  className="mt-4 flex items-start gap-2.5 cursor-pointer group"
+                >
+                  <input
+                    type="checkbox"
+                    data-testid="sms-consent-checkbox"
+                    checked={smsMarketingConsent}
+                    onChange={(e) => setSmsMarketingConsent(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-[#72C2AC] cursor-pointer flex-shrink-0"
+                  />
+                  <span
+                    data-testid="sms-consent-disclosure"
+                    className="text-[10px] leading-relaxed text-[#8A9A92] group-hover:text-[#C9DED6] transition-colors"
+                  >
+                    By checking this box, you consent to receive recurring
+                    automated wellness reminders and account notifications
+                    from Solarisound. Consent is not a condition of purchase.
+                    Msg &amp; data rates may apply. Reply STOP to cancel.{' '}
+                    <a
+                      href="/privacy"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid="sms-consent-privacy-link"
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-[#C4A67A] hover:text-[#E8B872] underline underline-offset-2"
+                    >
+                      Privacy Policy
+                    </a>
+                    {' & '}
+                    <a
+                      href="/terms"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid="sms-consent-terms-link"
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-[#C4A67A] hover:text-[#E8B872] underline underline-offset-2"
+                    >
+                      Terms
+                    </a>
+                    .
+                  </span>
+                </label>
               </div>
             </>
           )}
