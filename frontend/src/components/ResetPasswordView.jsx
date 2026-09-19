@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api, { formatApiError } from '@/lib/api';
+import PublicFooter from '@/components/PublicFooter';
 
 /**
  * Reset-password landing view. Rendered when a `?reset_token=...` query
@@ -57,11 +58,12 @@ export default function ResetPasswordView({ token, onDone }) {
   return (
     <div
       data-testid="reset-password-view"
-      className="min-h-screen flex items-center justify-center relative px-4"
+      className="min-h-screen flex flex-col relative px-4"
     >
       <div className="aurora-bg" />
       <div className="grain" />
-      <div className="relative z-10 w-full max-w-md glass p-10">
+      <div className="flex-1 flex items-center justify-center relative z-10 w-full py-10">
+        <div className="w-full max-w-md glass p-10">
         <div className="text-center mb-8">
           <div className="label-tiny mb-3">Solarisound</div>
           <h1 className="font-display text-4xl font-light tracking-tight text-[#E8E3D9]">
@@ -144,6 +146,12 @@ export default function ResetPasswordView({ token, onDone }) {
             </button>
           </div>
         )}
+        </div>
+      </div>
+
+      {/* HF-055 shared pre-login footer */}
+      <div className="relative z-10 pb-4">
+        <PublicFooter />
       </div>
     </div>
   );

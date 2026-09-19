@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowRight, LifeBuoy } from 'lucide-react';
-import PublicSupportModal from '@/components/PublicSupportModal';
+import React, { useMemo } from 'react';
+import { ArrowRight } from 'lucide-react';
+import PublicFooter from '@/components/PublicFooter';
 
 /**
  * Solarisound / Healing Frequencies landing page.
@@ -20,7 +20,6 @@ import PublicSupportModal from '@/components/PublicSupportModal';
  * surfaces but is no longer exposed on the landing page.
  */
 export function LandingPage({ onStart }) {
-  const [supportOpen, setSupportOpen] = useState(false);
   const bars = useMemo(
     () => Array.from({ length: 24 }).map((_, i) => ({
       id: i,
@@ -91,90 +90,10 @@ export function LandingPage({ onStart }) {
         </p>
       </div>
 
-      {/* HF-044 — Contact Us + legal links */}
-      <FooterBlock onSupport={() => setSupportOpen(true)} />
-
-      {/* HF-048 — public support modal for logged-out visitors */}
-      <PublicSupportModal open={supportOpen} onClose={() => setSupportOpen(false)} />
+      {/* HF-044 → HF-055: unified pre-login footer shared across the
+          landing page, legal pages, "What We Do", and the auth screen. */}
+      <PublicFooter />
     </div>
-  );
-}
-
-function FooterBlock({ onSupport }) {
-  const goLegal = (path) => (e) => {
-    e.preventDefault();
-    // Push the URL so the browser bar reflects the deep-link, then reload
-    // once — this triggers App.js's `legalVariant` router. A silent
-    // history push alone wouldn't re-render because App.js only reads
-    // pathname on mount.
-    try {
-      window.history.pushState({}, '', path);
-      window.dispatchEvent(new PopStateEvent('popstate'));
-      // Fallback if PopStateEvent isn't observed (older Safari): reload.
-      setTimeout(() => {
-        if (window.location.pathname !== path) window.location.href = path;
-      }, 30);
-    } catch (_) {
-      window.location.href = path;
-    }
-    // Simplest reliable path — just navigate. The legal pages set scroll
-    // to top on mount and share the same theme, so the visual continuity
-    // is preserved.
-    window.location.href = path;
-  };
-
-  return (
-    <footer
-      data-testid="landing-footer"
-      className="relative z-10 w-full max-w-2xl mx-auto pt-6 pb-2 border-t border-[rgba(92,158,140,0.12)]"
-    >
-      <div className="flex flex-col sm:flex-row items-center justify-center gap-2 sm:gap-6 mb-4 text-[12px] text-[#8A9A92]">
-        <button
-          type="button"
-          onClick={onSupport}
-          data-testid="landing-support-link"
-          className="inline-flex items-center gap-1.5 hover:text-[#C4A67A] transition-colors cursor-pointer"
-        >
-          <LifeBuoy size={12} /> Support
-        </button>
-        <span className="hidden sm:inline text-[#5A6B65]">·</span>
-        <a
-          href="/what-we-do"
-          data-testid="landing-what-we-do-link"
-          onClick={goLegal('/what-we-do')}
-          className="hover:text-[#C4A67A] transition-colors"
-        >
-          What We Do
-        </a>
-        <span className="hidden sm:inline text-[#5A6B65]">·</span>
-        <a
-          href="/privacy"
-          data-testid="landing-privacy-link"
-          onClick={goLegal('/privacy')}
-          className="hover:text-[#C4A67A] transition-colors"
-        >
-          Privacy Policy
-        </a>
-        <span className="hidden sm:inline text-[#5A6B65]">·</span>
-        <a
-          href="/terms"
-          data-testid="landing-terms-link"
-          onClick={goLegal('/terms')}
-          className="hover:text-[#C4A67A] transition-colors"
-        >
-          Terms of Service
-        </a>
-      </div>
-      <p className="text-[10px] tracking-[0.4em] uppercase text-[#8A9A92]/60 text-center">
-        Powered by silence
-      </p>
-      <p
-        data-testid="landing-copyright"
-        className="mt-2 text-[10px] tracking-[0.15em] text-[#8A9A92]/50 text-center"
-      >
-        © 2026 Solarisound. All Rights Reserved
-      </p>
-    </footer>
   );
 }
 

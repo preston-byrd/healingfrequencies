@@ -5,6 +5,7 @@ import 'react-phone-number-input/style.css';
 import { useAuth } from '@/contexts/AuthContext';
 import api, { formatApiError, warmBackend } from '@/lib/api';
 import ForgotPasswordModal from '@/components/ForgotPasswordModal';
+import PublicFooter from '@/components/PublicFooter';
 import { LOGIN } from '@/constants/testIds/auth';
 
 // Axios throws either `Network Error` (browser refused / DNS / TLS died) or
@@ -227,19 +228,20 @@ export default function AuthScreen() {
   })();
 
   return (
-    <div className="min-h-screen flex items-center justify-center relative px-4">
+    <div className="min-h-screen flex flex-col relative px-4">
       <div className="aurora-bg" />
       <div className="grain" />
-      <div className="relative z-10 w-full max-w-md glass p-10">
-        <div className="text-center mb-8">
-          <div className="label-tiny mb-3">Healing Frequencies</div>
-          <h1 className="font-display text-5xl font-light tracking-tight text-[#E8E3D9]">
-            {heading}
-          </h1>
-          <p className="text-[#8A9A92] mt-3 text-sm">
-            {subhead}
-          </p>
-        </div>
+      <div className="flex-1 flex items-center justify-center relative z-10 w-full py-10">
+        <div className="w-full max-w-md glass p-10">
+          <div className="text-center mb-8">
+            <div className="label-tiny mb-3">Healing Frequencies</div>
+            <h1 className="font-display text-5xl font-light tracking-tight text-[#E8E3D9]">
+              {heading}
+            </h1>
+            <p className="text-[#8A9A92] mt-3 text-sm">
+              {subhead}
+            </p>
+          </div>
 
         <form onSubmit={submit} className="space-y-4">
           {mode === 'register' && registerStep === REGISTER_STEP_FORM && (
@@ -518,6 +520,12 @@ export default function AuthScreen() {
             {mode === 'login' ? 'Create an account' : 'Sign in'}
           </button>
         </div>
+        </div>
+      </div>
+
+      {/* HF-055 shared pre-login footer */}
+      <div className="relative z-10 pb-4">
+        <PublicFooter />
       </div>
 
       {showForgot && (

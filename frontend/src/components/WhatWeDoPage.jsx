@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Waves, Brain, Moon, Sparkles } from 'lucide-react';
 import WhatWeDoHero from '@/components/WhatWeDoHero';
 import FrequencySampler from '@/components/FrequencySampler';
+import PublicFooter from '@/components/PublicFooter';
 
 /**
  * HF-050 static "What We Do" page. Rendered outside the auth gate so
@@ -154,6 +155,11 @@ export default function WhatWeDoPage({ onBack }) {
           >
             <ArrowLeft size={14} /> Back to Home
           </button>
+        </div>
+
+        {/* HF-055 shared pre-login footer */}
+        <div className="mt-14">
+          <PublicFooter />
         </div>
       </div>
     </div>

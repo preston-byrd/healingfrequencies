@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { ArrowLeft, Mail } from 'lucide-react';
+import PublicFooter from '@/components/PublicFooter';
 
 /**
  * HF-044: static legal pages — Privacy Policy + Terms of Service. Reuses the
@@ -59,6 +60,11 @@ export default function LegalPage({ variant = 'privacy', onBack }) {
           >
             <Mail size={12} /> support@solarisounds.com
           </a>
+        </div>
+
+        {/* HF-055 shared pre-login footer */}
+        <div className="mt-12">
+          <PublicFooter />
         </div>
       </div>
     </div>

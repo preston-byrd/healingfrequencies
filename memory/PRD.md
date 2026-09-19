@@ -954,3 +954,12 @@
   - **Verified** — Playwright: unchecked-by-default, full disclosure text matches character-for-character, both links have `target=_blank` + `rel=noopener noreferrer` + point at `/privacy` and `/terms`, click toggles checkbox state correctly. Screenshot confirms visual integration with the dark theme.
   - **Files** — `frontend/src/components/AuthScreen.jsx` (state + UI), `backend/server.py` (`RegisterIn` schema + `register()` user doc fields).
 
+
+- **HF-055 Shared pre-login footer on every surface (Feb 12, 2026)**: The Support · What We Do · Privacy Policy · Terms of Service block + "Powered by silence" + copyright line now appear identically on every page a logged-out visitor can reach.
+  - **New shared component** — `frontend/src/components/PublicFooter.jsx`. Owns its own `PublicSupportModal` state so any host page can drop `<PublicFooter />` in without extra wiring. Deep-link nav for the three internal routes uses `history.pushState` + `popstate` (SPA-safe) with a hard-nav fallback for older Safari.
+  - **Mounted on**: Landing (refactored to reuse the shared component), `/privacy`, `/terms`, `/what-we-do`, and the AuthScreen (both Sign-in and Create-account modes). ResetPasswordView also mounts it for completeness.
+  - **Layout tweaks** — AuthScreen and ResetPasswordView switched from a single `flex items-center` container to `flex flex-col` with a `flex-1` centering wrapper for the auth card and the footer pinned at the bottom of the min-h-screen shell. The card is still perfectly centered while the footer stays at the fold's edge.
+  - **Testids preserved** — `landing-footer`, `landing-support-link`, `landing-what-we-do-link`, `landing-privacy-link`, `landing-terms-link`, `landing-copyright` remain valid on all six surfaces so existing Playwright assertions keep working.
+  - **Verified** — Playwright loop across all 6 surfaces confirms every testid is attached in DOM on each page; screenshots of `/privacy` and `/what-we-do` show the identical footer at the bottom of both.
+  - **Files** — `frontend/src/components/PublicFooter.jsx` (new), `frontend/src/components/LandingPage.jsx` (refactor to use it), `frontend/src/components/LegalPage.jsx` (mount + preserved existing support-email block), `frontend/src/components/WhatWeDoPage.jsx` (mount), `frontend/src/components/AuthScreen.jsx` (layout shift + mount), `frontend/src/components/ResetPasswordView.jsx` (layout shift + mount).
+
