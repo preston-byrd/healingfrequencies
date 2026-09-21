@@ -333,7 +333,8 @@ export default function AuthScreen() {
                     By checking this box, you consent to receive recurring
                     automated wellness reminders and account notifications
                     from Solarisound. Consent is not a condition of purchase.
-                    Msg &amp; data rates may apply. Reply STOP to cancel.{' '}
+                    You may receive up to 4 messages per month. Msg &amp; data
+                    rates may apply. Reply STOP to cancel.{' '}
                     <a
                       href="/privacy"
                       target="_blank"
